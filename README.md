@@ -1,7 +1,23 @@
-<!-- Project Satori logo. Drop docs/assets/satori-logo.svg (see docs/assets/ASSETS.txt),
-     then replace this comment with:
-<p align="center"><img src="docs/assets/satori-logo.svg" alt="Satori" width="360"></p>
--->
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/satori-white.png">
+    <img src="docs/assets/satori.png" alt="Satori" height="88">
+  </picture>
+</p>
+
+<p align="center">
+  <a href="https://lfenergy.org/"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/lf-energy-white.png">
+    <img src="docs/assets/lf-energy-color.png" alt="LF Energy" height="32">
+  </picture></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://sunspec.org/"><img src="docs/assets/sunspec.png" alt="SunSpec Alliance" height="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://dersec.io/"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dersec-white.png">
+    <img src="docs/assets/dersec-dark.png" alt="DER Security" height="32">
+  </picture></a>
+</p>
 
 # py20305
 

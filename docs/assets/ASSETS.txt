@@ -1,12 +1,20 @@
-Brand assets for Project Satori live here.
+Brand assets for Project Satori and the organizations behind it.
 
-Expected files:
-  satori-logo.svg   the full lockup (mark + wordmark), used at the top of the README
-  satori-mark.svg   the mark alone, square; used as the docs-site logo and favicon
+satori.png            Satori lockup, dark text -- for light backgrounds
+satori-white.png      white recolor of satori.png for dark backgrounds
+                      (machine-generated; replace with an official white
+                      export when one exists)
+lf-energy-color.png   LF Energy horizontal logo, from the official
+                      lf-energy/artwork repository
+lf-energy-white.png   white variant of the same, same source
+sunspec.png           SunSpec Alliance logo, from sunspec.org
+dersec-dark.png       DER Security lockup, dark text
+dersec-white.png      DER Security lockup, white text
 
-After dropping them:
-  1. README.md: replace the HTML comment at the top with the <img> line it contains.
-  2. mkdocs.yml: under `theme:`, add
-       logo: assets/satori-mark.svg
-       favicon: assets/satori-mark.svg
-SVG preferred; a PNG at the same basename works in the README but not as the favicon.
+The README pairs the light/dark variants with <picture>
+prefers-color-scheme sources, so the banner is legible in both GitHub
+themes.
+
+Still welcome: a square Satori mark (satori-mark.svg or .png) for the
+docs-site logo and favicon -- wire it in mkdocs.yml under `theme:` as
+`logo:` and `favicon:` once dropped.
