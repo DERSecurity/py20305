@@ -16,7 +16,8 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-from py20305.client.connector import Ieee2030TCPConnector
+from py20305.client.connector import Ieee2030TCPConnector, SocketPair
+from py20305.client.observer import ConnectionObserver
 from py20305.client.errors import (
     Sep2ConnectionError,
     Sep2NoContentError,
@@ -139,6 +140,7 @@ class Sep2Client:
         always_send_alarm_status: bool = False,
         request_headers: dict[str, str] | None = None,
         timebase: ServerTimebase | None = None,
+        connection_observer: ConnectionObserver | None = None,
     ) -> None:
         """Initialize Sep2Client.
 
@@ -157,6 +159,11 @@ class Sep2Client:
             timebase: Shared server timebase; carried here so free functions
                 (discovery) and telemetry managers holding only this client can
                 observe/read server time. Defaults to a fresh identity instance.
+            connection_observer: Optional observer for this client's own
+                connection outcomes and established sockets — what a passive
+                capture beside the client cannot recover from inside TLS. May
+                also be attached after construction via the
+                ``connection_observer`` property. No observer, no reporting.
         """
         self._base_url = base_url.rstrip("/")
         self._retry = retry or RetryPolicy()
@@ -212,6 +219,35 @@ class Sep2Client:
         # Populated after discovery so each request can be attributed to
         # the correct device instead of using the client's cert LFDI.
         self._device_lfdi_by_prefix: dict[str, str] = {}
+
+        self._connection_observer = connection_observer
+
+    @property
+    def connection_observer(self) -> ConnectionObserver | None:
+        """Return the attached connection observer, if any."""
+        return self._connection_observer
+
+    @connection_observer.setter
+    def connection_observer(self, value: ConnectionObserver | None) -> None:
+        """Attach (or detach) the connection observer.
+
+        Settable after construction because an embedder typically reads the
+        configuration that decides on observation later than it builds the
+        client. The connector's socket callback binds late, so connections
+        established by an already-open session still reach a newly attached
+        observer.
+        """
+        self._connection_observer = value
+
+    def _dispatch_connect(self, pair: SocketPair) -> None:
+        """Forward an established socket to the observer, if one is attached.
+
+        Bound once into the connector at session creation; indirection rather
+        than the observer's own method so attaching or replacing the observer
+        mid-session takes effect without a session reset.
+        """
+        if self._connection_observer is not None:
+            self._connection_observer.on_connect(pair)
 
     @property
     def forwarder(self) -> ForwarderManager | None:
@@ -387,7 +423,11 @@ class Sep2Client:
             # PKI-profile chain audit at handshake time, so it gates every request
             # method uniformly (not just the first GET). Plain-HTTP sessions
             # (self._ssl is False) use aiohttp's default connector.
-            connector = Ieee2030TCPConnector() if isinstance(self._ssl, ssl.SSLContext) else None
+            connector = (
+                Ieee2030TCPConnector(on_connect=self._dispatch_connect)
+                if isinstance(self._ssl, ssl.SSLContext)
+                else None
+            )
             self._session = aiohttp.ClientSession(
                 timeout=self._timeout,
                 headers=self._default_headers(),
@@ -541,6 +581,43 @@ class Sep2Client:
         self._server_alive = True
         self._last_validated_epoch = self._last_contact_epoch
 
+    async def _retry_observed(self, do_fn: Callable[[], Awaitable[T]]) -> T:
+        """Run one logical request through retry, reporting its outcome.
+
+        Every request method funnels through here so the connection observer
+        is applied in one place rather than repeated down each method's
+        except ladder. With no observer attached this is exactly
+        ``with_retry``.
+
+        Reporting is per logical request, not per retry attempt: the retry
+        wrapper collapses exhausted transport attempts into one
+        ``Sep2ConnectionError``, so the individual attempts are not
+        distinguishable here.
+        """
+        observer = self._connection_observer
+        if observer is None:
+            return await with_retry(self._retry, do_fn, peer=self._server_host)
+        # Scope socket attribution to this request: a connection established
+        # while handling it is this request's, and one left over from an
+        # earlier request in the same task is not.
+        observer.begin_request()
+        try:
+            result = await with_retry(self._retry, do_fn, peer=self._server_host)
+        except Sep2NoContentError:
+            # A 204 is a successful, validated contact that happens to signal
+            # itself by raising. Routing it through the failure branch would
+            # leave it classified as "not a connection outcome" and emit
+            # nothing at all, so every empty optional resource would go
+            # unrecorded — an under-count of attempts in a log whose whole
+            # purpose is to account for them.
+            observer.record_success()
+            raise
+        except BaseException as exc:
+            observer.record_failure(exc)
+            raise
+        observer.record_success()
+        return result
+
     async def _send_tracked(self, do_fn: Callable[[], Awaitable[T]]) -> T:
         """Run a non-GET request via retry, recording connectivity health once
         per logical request.
@@ -552,7 +629,7 @@ class Sep2Client:
         nuances), so it does not route through here.
         """
         try:
-            result = await with_retry(self._retry, do_fn, peer=self._server_host)
+            result = await self._retry_observed(do_fn)
         except (Sep2ConnectionError, Sep2TlsError) as exc:
             # ``with_retry`` wraps exhausted transport failures (connect/timeout,
             # TLS handshake) into these -> server unreachable.

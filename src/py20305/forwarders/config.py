@@ -10,6 +10,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# Topic the protocol-message channel publishes on, relative to the configured
+# topic base. Defined here rather than in the forwarder so config validation
+# can reject a telemetry topic that collides with it without importing the
+# transport.
+PROTOCOL_MESSAGE_TOPIC_SUFFIX = "out/2030-5-raw"
+
 
 class _StrictForwarderModel(BaseModel):
     """Base for the forwarder models: an unknown key is an error.
@@ -128,8 +134,16 @@ class DeviceTelemetryConfig(_StrictForwarderModel):
     @field_validator("topic_suffix")
     @classmethod
     def validate_topic_suffix(cls, v: str) -> str:
-        """Normalize the suffix, allowing empty to mean "the default topic"."""
-        return v.strip().strip("/")
+        """Normalize the suffix, allowing empty to mean "the default topic".
+
+        Wildcards are rejected: they are subscription filters, not topic
+        names, and a suffix like ``out/#`` would validate here and then
+        publish to a literal-``#`` topic no subscriber matches.
+        """
+        cleaned = v.strip().strip("/")
+        if "+" in cleaned or "#" in cleaned:
+            raise ValueError("topic_suffix must not contain the MQTT wildcards '+' or '#'")
+        return cleaned
 
 
 class ForwarderConfig(_StrictForwarderModel):

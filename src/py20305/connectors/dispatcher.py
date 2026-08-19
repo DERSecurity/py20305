@@ -215,6 +215,7 @@ class ConnectorDispatcher:
         lfdi: str | None,
         origin: CommandOrigin,
         label: str,
+        connector: BaseConnector | None = None,
     ) -> None:
         """Apply one translated mode and report it to the command observer.
 
@@ -231,9 +232,13 @@ class ConnectorDispatcher:
         # whichever interface issued it.
         control = method_name.removeprefix("update_")
         issued_at = time.time()
-        # The bound method carries its connector, so the device's address is
-        # reachable for telemetry without widening this signature.
-        connector = getattr(method, "__self__", None)
+        # A bound method carries its connector, so the device's address and
+        # protocol are reachable without widening every call site. A caller
+        # that wraps the method -- the native clear-control path passes a
+        # lambda -- has no ``__self__`` to introspect, so it supplies the
+        # connector explicitly and that takes precedence.
+        if connector is None:
+            connector = getattr(method, "__self__", None)
         try:
             await method(params)
         except Exception as exc:
@@ -481,7 +486,9 @@ class ConnectorDispatcher:
         """
         logger.debug("Clearing all controls on %s", device_href)
         connector = await self._resolve_connector(device_href)
-        await self._clear_control_on_connector(connector)
+        await self._clear_control_on_connector(
+            connector, lfdi=self._lfdi_resolver(device_href), label=device_href
+        )
 
     async def clear_control_by_lfdi(
         self,
@@ -495,15 +502,42 @@ class ConnectorDispatcher:
         """
         logger.debug("Clearing all controls on LFDI %s", lfdi)
         connector = await self._resolve_connector_by_lfdi(lfdi)
-        await self._clear_control_on_connector(connector)
+        await self._clear_control_on_connector(connector, lfdi=lfdi, label=lfdi)
 
-    async def _clear_control_on_connector(self, connector: BaseConnector | None) -> None:
+    async def _clear_control_on_connector(
+        self,
+        connector: BaseConnector | None,
+        *,
+        lfdi: str | None = None,
+        label: str = "",
+    ) -> None:
+        """Disable every active control on a device.
+
+        Both branches route through ``_apply_one`` so a clear is recorded like
+        any other write. It reaches the device the same way, and it is the
+        comms-loss safe default -- the one control action most worth being able
+        to account for after the fact -- so leaving it out of the audit trail
+        and the monitoring stream would be the wrong asymmetry.
+        """
         if connector is None:
             return
 
         native_clear = getattr(connector, "clear_control", None)
         if callable(native_clear):
-            await native_clear()
+            # One round-trip that clears everything, so it is one record
+            # rather than the fan-out's per-mode ones.
+            await self._apply_one(
+                lambda _params: native_clear(),
+                "clear_control",
+                {},
+                lfdi=lfdi,
+                origin=CommandOrigin.COMMS_LOSS,
+                label=label,
+                # The lambda has no ``__self__``; without this the clear would
+                # report as generic with no destination -- losing exactly the
+                # attribution this path most needs.
+                connector=connector,
+            )
             return
 
         disable_calls: list[tuple[str, dict[str, Any]]] = [
@@ -549,4 +583,11 @@ class ConnectorDispatcher:
         for method_name, params in disable_calls:
             method = getattr(connector, method_name, None)
             if method is not None:
-                await method(params)
+                await self._apply_one(
+                    method,
+                    method_name,
+                    params,
+                    lfdi=lfdi,
+                    origin=CommandOrigin.COMMS_LOSS,
+                    label=label,
+                )

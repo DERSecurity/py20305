@@ -138,14 +138,14 @@ class TestEmittedEnvelope:
         """The demo connector reaches no wire; recording it as Modbus is a lie."""
         emitter, fw = make_emitter()
         emitter.record_read("dev1", {"W": 1500}, connector=object())
-        assert fw.events[0].payload["protocol"] == "other"
+        assert fw.events[0].payload["protocol"] == "generic"
 
     def test_an_unknown_protocol_does_not_break_the_data_path(self):
         emitter, fw = make_emitter()
         connector = Mock()
         connector.telemetry_protocol = "smoke-signals"
         emitter.record_read("dev1", {"W": 1500}, connector=connector)
-        assert fw.events[0].payload["protocol"] == "other"
+        assert fw.events[0].payload["protocol"] == "generic"
 
     def test_read_carries_the_points_verbatim(self):
         emitter, fw = make_emitter()

@@ -103,8 +103,11 @@ class Protocol(StrEnum):
     #: A southbound exchange over something this vocabulary does not name --
     #: a custom or in-process connector. Recording it as `modbus` would be a
     #: claim about the wire that is simply untrue, and a consumer filtering on
-    #: protocol would then act on a device that speaks something else.
-    OTHER = "other"
+    #: protocol would then act on a device that speaks something else. The
+    #: wire value is ``generic``, matching the consumer contract's catch-all;
+    #: any other spelling fails enum parsing and schema validation on the
+    #: receiving side.
+    GENERIC = "generic"
 
     @classmethod
     def from_string(cls, value: str) -> Protocol:

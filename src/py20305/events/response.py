@@ -128,8 +128,8 @@ _DISPATCH_ERROR_CODES: tuple[tuple[type[BaseException], ResponseCode], ...] = (
 def response_code_for_dispatch_error(exc: BaseException) -> ResponseCode:
     """Map an unsuccessful control dispatch onto the code to report.
 
-    An unclassified failure falls through to ``NOT_SUPPORTED``: the
-    the client lacks a precise reason, but the control still was not applied,
+    An unclassified failure falls through to ``NOT_SUPPORTED``: the client
+    lacks a precise reason, but the control still was not applied,
     and reporting ACTIVE for it would assert something that did not happen. The
     in-process connector path does not raise the typed control errors, so its
     failures land here until those connectors are migrated.
@@ -145,8 +145,8 @@ def response_code_for_dispatch_error(exc: BaseException) -> ResponseCode:
 
 
 #: IEEE 2030.5-2018 reserves 251 and gives 252 the meaning that 2030.5-2023
-#: assigns to 251, so a rejection bound for a 2018 server has to go out as 252
-#:. ``NOT_APPLICABLE`` is already 252 and passes through unchanged, which
+#: assigns to 251, so a rejection bound for a 2018 server has to go out as
+#: 252. ``NOT_APPLICABLE`` is already 252 and passes through unchanged, which
 #: collapses the two codes onto one wire value -- the Response resource carries
 #: no reason field in either revision, so nothing can preserve the distinction.
 #: The original code stays in the logs.
