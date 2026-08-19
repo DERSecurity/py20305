@@ -28,7 +28,8 @@ and industry consortium members.
 [![CI](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml/badge.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
 [![Tests](.github/badges/tests.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
 [![Coverage](.github/badges/coverage.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
+[![PyPI](https://img.shields.io/pypi/v/py20305)](https://pypi.org/project/py20305/)
+[![Python](https://img.shields.io/pypi/pyversions/py20305)](https://pypi.org/project/py20305/)
 [![License](https://img.shields.io/github/license/DERSecurity/py20305)](LICENSE)
 [![Project Satori](https://img.shields.io/badge/Project-Satori-b7410e)](https://dersec.io/satori)
 
