@@ -1,21 +1,21 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/satori-dark.png">
-    <img src="docs/assets/satori.png" alt="Satori" height="88">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/satori-dark.png">
+    <img src="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/satori.png" alt="Satori" height="88">
   </picture>
 </p>
 
 <p align="center">
   <a href="https://lfenergy.org/"><picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/lf-energy-white.png">
-    <img src="docs/assets/lf-energy-color.png" alt="LF Energy" height="32">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/lf-energy-white.png">
+    <img src="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/lf-energy-color.png" alt="LF Energy" height="32">
   </picture></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://sunspec.org/"><img src="docs/assets/sunspec.png" alt="SunSpec Alliance" height="44"></a>
+  <a href="https://sunspec.org/"><img src="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/sunspec.png" alt="SunSpec Alliance" height="44"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://dersec.io/"><picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dersec-white.png">
-    <img src="docs/assets/dersec-dark.png" alt="DER Security" height="32">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/dersec-white.png">
+    <img src="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/dersec-dark.png" alt="DER Security" height="32">
   </picture></a>
 </p>
 
@@ -26,11 +26,11 @@ an LF Energy open-source project led by the SunSpec Alliance, DER Security,
 and industry consortium members.
 
 [![CI](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml/badge.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
-[![Tests](.github/badges/tests.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
-[![Coverage](.github/badges/coverage.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDERSecurity%2Fpy20305%2Fmain%2F.github%2Fbadges%2Ftests.json)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDERSecurity%2Fpy20305%2Fmain%2F.github%2Fbadges%2Fcoverage.json)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/py20305)](https://pypi.org/project/py20305/)
 [![Python](https://img.shields.io/pypi/pyversions/py20305)](https://pypi.org/project/py20305/)
-[![License](https://img.shields.io/github/license/DERSecurity/py20305)](LICENSE)
+[![License](https://img.shields.io/github/license/DERSecurity/py20305)](https://github.com/DERSecurity/py20305/blob/main/LICENSE)
 [![Project Satori](https://img.shields.io/badge/Project-Satori-b7410e)](https://dersec.io/satori)
 
 An open IEEE 2030.5 client for distributed energy resources, with CSIP-AUS
@@ -62,7 +62,7 @@ One YAML or JSON file describes the server, the certificate and the devices. It
 retries the connection while the server is down, registers itself only if the
 server does not already know it, and stops cleanly on SIGTERM. See
 [Running a client](https://dersecurity.github.io/py20305/running/)
-and [`examples/client.example.yaml`](examples/client.example.yaml).
+and [`examples/client.example.yaml`](https://github.com/DERSecurity/py20305/blob/main/examples/client.example.yaml).
 
 ## Running it in a container
 
@@ -74,7 +74,7 @@ docker run -d -v "$PWD/config:/etc/py20305:ro" py20305
 The image carries the client and nothing else -- configuration and certificates
 are mounted, never baked in. It runs unprivileged and stops in order on
 `SIGTERM`. See [Running in a container](https://dersecurity.github.io/py20305/docker/)
-and [`examples/docker-compose.yml`](examples/docker-compose.yml).
+and [`examples/docker-compose.yml`](https://github.com/DERSecurity/py20305/blob/main/examples/docker-compose.yml).
 
 ## Embedding it: talking to a server in five minutes
 
@@ -173,8 +173,8 @@ The unit suite proves this client does what we believe the standard requires.
 That one proves the belief survives contact with an implementation nobody here
 wrote. See [Testing](https://dersecurity.github.io/py20305/testing/).
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](https://github.com/DERSecurity/py20305/blob/main/CONTRIBUTING.md).
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache-2.0. See [LICENSE](https://github.com/DERSecurity/py20305/blob/main/LICENSE) and [NOTICE](https://github.com/DERSecurity/py20305/blob/main/NOTICE).

@@ -189,11 +189,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install "genbadge[coverage,tests]"
-      - name: Regenerate badges
-        run: |
-          genbadge coverage -i coverage.xml -o .github/badges/coverage.svg
-          genbadge tests -i junit.xml -o .github/badges/tests.svg
+      - name: Regenerate badge data
+        # shields.io draws the badges from these JSON files, so the README row
+        # keeps one renderer and one style; only the numbers live here.
+        run: python scripts/make_badges.py junit.xml coverage.xml
       - name: Commit if changed
         run: |
           if git diff --quiet -- .github/badges; then
