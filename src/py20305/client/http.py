@@ -17,7 +17,6 @@ from urllib.parse import urlparse
 import aiohttp
 
 from py20305.client.connector import Ieee2030TCPConnector, SocketPair
-from py20305.client.observer import ConnectionObserver
 from py20305.client.errors import (
     Sep2ConnectionError,
     Sep2NoContentError,
@@ -27,6 +26,7 @@ from py20305.client.errors import (
     Sep2RedirectError,
     Sep2TlsError,
 )
+from py20305.client.observer import ConnectionObserver
 from py20305.client.retry import RetryPolicy, with_retry
 from py20305.client.timebase import ServerTimebase
 from py20305.client.tls import (
@@ -1019,7 +1019,7 @@ class Sep2Client:
                 self._record_traffic_response("GET", path, error=str(exc))
                 raise
 
-        return await with_retry(self._retry, _do_get, peer=self._server_host)
+        return await self._retry_observed(_do_get)
 
     async def get_with_body(self, path: str, model_type: type[T]) -> tuple[T, bytes]:
         """GET a resource, returning both the parsed model and raw response body."""
@@ -1105,7 +1105,7 @@ class Sep2Client:
                 self._record_traffic_response("GET", path, error=str(exc))
                 raise
 
-        return await with_retry(self._retry, _do_get, peer=self._server_host)
+        return await self._retry_observed(_do_get)
 
     async def get_list(self, path: str, model_type: type[T]) -> list[T]:
         """GET a list resource, fetching all pages.
@@ -1419,6 +1419,10 @@ class Sep2Client:
 
     async def close(self) -> None:
         """Close the underlying HTTP session."""
+        # Flush the observer first: successes accumulated since its last
+        # window closed are still attempts the connection log accounts for.
+        if self._connection_observer is not None:
+            self._connection_observer.flush()
         if self._session and not self._session.closed:
             await self._session.close()
 

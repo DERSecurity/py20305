@@ -28,7 +28,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from py20305.forwarders.base import EventFrame
-from py20305.forwarders.mqtt_forwarder import PROTOCOL_MESSAGE_TOPIC_SUFFIX
+from py20305.forwarders.config import PROTOCOL_MESSAGE_TOPIC_SUFFIX
 from py20305.forwarders.types import (
     NetworkEndpoint,
     Protocol,
@@ -66,6 +66,7 @@ def _unknown_endpoint() -> NetworkEndpoint:
     shape, not a judgment about the two directions.
     """
     return NetworkEndpoint(ip=_UNKNOWN_IP, port=0)
+
 
 # Upper bound on a device's error text. A Modbus exception message is normally
 # short, but it originates outside this process and lands on a topic an operator

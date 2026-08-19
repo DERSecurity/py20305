@@ -27,6 +27,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from py20305.client import CsipClient, TlsConfig
 from py20305.client.errors import (
@@ -39,7 +40,7 @@ from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
 from py20305.connectors.dispatcher import ConnectorDispatcher
 from py20305.connectors.registry import ConnectorConfigRegistry
 from py20305.security import compute_cert_fingerprint, compute_lfdi
-from py20305.version_info import get_version_string
+from py20305.version_info import get_package_version, get_version_string
 
 if TYPE_CHECKING:
     from py20305.config import LoggingConfig
@@ -181,6 +182,36 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
     # back to start and stop the transport -- so the manager needs no second
     # channel out of here and this function keeps its shape.
     client.http.forwarder = forwarder
+
+    # Connection telemetry: the client's own connection outcomes, on their own
+    # topic. Attached through the observer seam so the client stays ignorant
+    # of the forwarder package; the emitter rides the same transport as the
+    # protocol messages.
+    if config.forwarders is not None and config.forwarders.connection_telemetry.enabled:
+        if forwarder is None:
+            # Same silent-nothing failure mode as device telemetry above: an
+            # enabled channel with no transport records nothing and looks like
+            # a client that never connects.
+            logger.warning(
+                "connection telemetry is enabled but no forwarder is configured or "
+                "enabled; nothing will be published. Configure `forwarders.mqtt` "
+                "alongside it."
+            )
+        else:
+            from py20305.forwarders.connection_telemetry import ConnectionTelemetryEmitter
+
+            emitter = ConnectionTelemetryEmitter(
+                forwarder,
+                config.forwarders.connection_telemetry,
+                product_version=get_package_version(),
+            )
+            parsed = urlparse(config.server.url)
+            emitter.set_server(
+                parsed.hostname,
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+                base_url=config.server.url,
+            )
+            client.http.connection_observer = emitter
 
     # Subscribe/notify. Attached after construction because the manager needs
     # the client's transport, which exists only once the client does. The

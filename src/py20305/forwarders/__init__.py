@@ -20,17 +20,17 @@ from py20305.forwarders.base import (
     MessageFrame,
 )
 from py20305.forwarders.config import (
+    PROTOCOL_MESSAGE_TOPIC_SUFFIX,
+    ConnectionTelemetryConfig,
     DeviceTelemetryConfig,
     ForwarderConfig,
     MQTTForwarderConfig,
 )
+from py20305.forwarders.connection_telemetry import ConnectionTelemetryEmitter
 from py20305.forwarders.lfdi_extraction import extract_client_id, extract_lfdi
 from py20305.forwarders.manager import ForwarderManager
 from py20305.forwarders.mqtt_adapter import MQTTForwarderAdapter
-from py20305.forwarders.mqtt_forwarder import (
-    PROTOCOL_MESSAGE_TOPIC_SUFFIX,
-    MQTTForwarder,
-)
+from py20305.forwarders.mqtt_forwarder import MQTTForwarder
 from py20305.forwarders.types import (
     NetworkEndpoint,
     PayloadEnvelope,
@@ -44,6 +44,8 @@ __all__ = [
     "PROTOCOL_MESSAGE_TOPIC_SUFFIX",
     "AbstractForwarder",
     "BaseForwarder",
+    "ConnectionTelemetryConfig",
+    "ConnectionTelemetryEmitter",
     "DeviceTelemetryConfig",
     "EventFrame",
     "ForwarderConfig",

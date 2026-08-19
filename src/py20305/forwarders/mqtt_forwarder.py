@@ -17,16 +17,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from py20305.forwarders.base import AbstractForwarder, EventFrame, MessageFrame
+from py20305.forwarders.config import PROTOCOL_MESSAGE_TOPIC_SUFFIX
 
 if TYPE_CHECKING:
     from py20305.forwarders.config import MQTTForwarderConfig
 
 logger = logging.getLogger(__name__)
-
-# Topic the protocol-message channel publishes on, relative to the configured
-# topic base. Named here rather than restated inline so a subsystem that wants
-# its envelopes to land beside the existing traffic references one value.
-PROTOCOL_MESSAGE_TOPIC_SUFFIX = "out/2030-5-raw"
 
 # Queue size for buffering messages before publish
 _DEFAULT_QUEUE_SIZE = 1000

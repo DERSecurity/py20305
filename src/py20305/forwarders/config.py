@@ -111,6 +111,58 @@ class MQTTForwarderConfig(_StrictForwarderModel):
         return self
 
 
+class ConnectionTelemetryConfig(_StrictForwarderModel):
+    """Configuration for reporting this client's own connection outcomes.
+
+    Off by default: an operator who has not asked for connection telemetry
+    should not start publishing it on an upgrade.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to report connection attempts and failures",
+    )
+    topic_suffix: str = Field(
+        default="out/connection-events",
+        description="Topic to publish connection events on, relative to the forwarder topic base",
+    )
+    coalesce_window_seconds: float = Field(
+        default=60.0,
+        description=(
+            "How long successful connections are collapsed into one event. "
+            "Failures are never coalesced. Zero emits one event per success."
+        ),
+    )
+
+    @field_validator("coalesce_window_seconds")
+    @classmethod
+    def validate_window(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("coalesce_window_seconds must not be negative")
+        return v
+
+    @field_validator("topic_suffix")
+    @classmethod
+    def validate_topic_suffix(cls, v: str) -> str:
+        cleaned = v.strip().strip("/")
+        if not cleaned:
+            raise ValueError("topic_suffix must not be empty")
+        # Publishing connection events onto the protocol-message topic would
+        # put OCSF envelopes where a consumer expects captured protocol
+        # payloads. The two shapes are different and nothing downstream would
+        # flag the mix, so it is rejected here rather than discovered there.
+        if cleaned == PROTOCOL_MESSAGE_TOPIC_SUFFIX:
+            raise ValueError(
+                f"topic_suffix must not be {PROTOCOL_MESSAGE_TOPIC_SUFFIX!r} -- that topic "
+                "carries captured protocol messages, not connection events"
+            )
+        # MQTT reserves these for subscription filters; a publisher using them
+        # produces a topic no subscriber matches the way the operator intended.
+        if "+" in cleaned or "#" in cleaned:
+            raise ValueError("topic_suffix must not contain the MQTT wildcards '+' or '#'")
+        return cleaned
+
+
 class DeviceTelemetryConfig(_StrictForwarderModel):
     """Configuration for reporting southbound device reads and writes.
 
@@ -170,10 +222,34 @@ class ForwarderConfig(_StrictForwarderModel):
             "the lifetime of the process."
         ),
     )
+    connection_telemetry: ConnectionTelemetryConfig = Field(
+        default_factory=ConnectionTelemetryConfig,
+        description="Reporting of this client's own connection attempts and failures",
+    )
     device_telemetry: DeviceTelemetryConfig = Field(
         default_factory=DeviceTelemetryConfig,
         description="Reporting of southbound device reads and writes",
     )
+
+    @model_validator(mode="after")
+    def validate_telemetry_topics_differ(self) -> ForwarderConfig:
+        """Keep the two telemetry streams off one another's topic.
+
+        They carry different payload shapes -- OCSF connection events and
+        protocol-message envelopes -- and a consumer reading one would
+        silently receive the other mixed in. Device telemetry's empty default
+        means the protocol-message topic, so the comparison is on effective
+        topics.
+        """
+        if not (self.connection_telemetry.enabled and self.device_telemetry.enabled):
+            return self
+        device_topic = self.device_telemetry.topic_suffix or PROTOCOL_MESSAGE_TOPIC_SUFFIX
+        if device_topic == self.connection_telemetry.topic_suffix:
+            raise ValueError(
+                f"connection_telemetry and device_telemetry both publish to {device_topic!r}; "
+                "they carry different payload shapes and must use different topics"
+            )
+        return self
 
     def has_enabled_forwarders(self) -> bool:
         """Return True if any forwarder is configured and enabled."""

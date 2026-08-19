@@ -1585,3 +1585,102 @@ class TestRunsWithoutAStore:
 
         assert dict(snapshot.reading_overrides) == {}
         assert snapshot.quality is Quality.GOOD
+
+
+class _RecordingForwarder:
+    """Stands in for the forwarder manager, keeping what was queued."""
+
+    def __init__(self):
+        self.events = []
+
+    def queue_event(self, event):
+        self.events.append(event)
+
+
+def _make_telemetry():
+    """A live DeviceTelemetryEmitter backed by a recording forwarder."""
+    from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
+    from py20305.forwarders.config import DeviceTelemetryConfig
+
+    fw = _RecordingForwarder()
+    emitter = DeviceTelemetryEmitter(fw, DeviceTelemetryConfig(enabled=True), client_id="site-a")
+    return emitter, fw
+
+
+def _points_of(event):
+    import json
+
+    return json.loads(event.payload["payload"]["data"])["points"]
+
+
+class TestManagerReadsAreReported:
+    """The status and availability reads the manager issues itself do not pass
+    through the measurement source, so without this seam they are southbound
+    traffic a monitoring system never sees.
+
+    The source is passed explicitly without telemetry so the assertions see
+    only the manager's own reads, not the metering poll's.
+    """
+
+    @pytest.mark.asyncio
+    async def test_log_event_status_read_is_reported(
+        self, mock_client, mock_connector, connector_resolver
+    ):
+        emitter, fw = _make_telemetry()
+        manager = TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            source=DirectConnectorSource(connector_resolver),
+            device_telemetry=emitter,
+        )
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=300, log_event_list_href="/edev/1/log")
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert len(fw.events) == 1
+        assert fw.events[0].payload["direction"] == "upstream"
+        assert "alarmStatus" in _points_of(fw.events[0])
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_availability_read_is_reported(
+        self, mock_client, mock_connector, connector_resolver
+    ):
+        emitter, fw = _make_telemetry()
+        manager = TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            source=DirectConnectorSource(connector_resolver),
+            device_telemetry=emitter,
+        )
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=300, der_availability_href="/der/1/avail")
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert len(fw.events) == 1
+        assert "availabilityDuration" in _points_of(fw.events[0])
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_without_the_kwarg_the_cycle_runs_unchanged(
+        self, manager, mock_client, mock_connector
+    ):
+        """No emitter, no reporting -- and no change to the posting path."""
+        manager.start_metering(
+            SAMPLE_LFDI,
+            post_rate=300,
+            log_event_list_href="/edev/1/log",
+            der_availability_href="/der/1/avail",
+        )
+
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        mock_connector.fetch_status.assert_called_once()
+        mock_connector.fetch_availability.assert_called_once()
+        mock_client.put_bytes.assert_called_once()
+
+        await manager.shutdown()
