@@ -41,6 +41,8 @@ def _make_service() -> ClientAPIService:
     client.trigger_rediscovery = AsyncMock()
     client.poll_now = AsyncMock(return_value=0)
     client.http.reset_session = AsyncMock()
+    # The probe path awaits this; a bare MagicMock is not awaitable.
+    client.http.get_raw = AsyncMock(return_value={"status_code": 0, "error": "not wired"})
     client.http.update_ca_trust = MagicMock()
     client.http.update_client_cert = MagicMock()
     del client._event_processor
@@ -308,3 +310,86 @@ class TestSubscriptionRoutes:
         service = ClientAPIService(client)
         assert service.get_subscriptions() == {"subscriptions": []}
         assert service.get_notifications() == {"notifications": []}
+
+
+# ---------------------------------------------------------------------------
+# HTTP-to-HTTPS redirect probe -- the ERR-001 instrumentation call
+# ---------------------------------------------------------------------------
+
+
+class TestHttpProbe:
+    """ERR-001 asserts on these exact fields; their names are the contract."""
+
+    @staticmethod
+    def _service_with(responses):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from py20305.api.service import ClientAPIService
+
+        client = MagicMock()
+        client.http.host = "server.example.com"
+        client.http.get_raw = AsyncMock(side_effect=responses)
+        service = ClientAPIService(client)
+
+        # No event loop handoff in tests: await the coroutine inline.
+        async def run_inline(coro):
+            return await coro
+
+        service._run_on_loop = run_inline
+        return service, client
+
+    @pytest.mark.asyncio
+    async def test_redirect_followed_end_to_end(self):
+        service, client = self._service_with([
+            {"status_code": 301, "headers": {"Location": "https://server.example.com:8443/dcap"}},
+            {
+                "status_code": 200,
+                "body": "<DeviceCapability><EndDeviceListLink/></DeviceCapability>" * 20,
+                "content_type": "application/sep+xml",
+            },
+        ])
+        result = await service.http_probe()
+
+        assert result["http_response"]["status_code"] == 301
+        assert result["http_response"]["location"].startswith("https://")
+        assert result["redirect_followed"] is True
+        assert result["https_response"]["status_code"] == 200
+        assert "DeviceCapability" in result["https_response"]["body_excerpt"]
+        assert len(result["https_response"]["body_excerpt"]) <= 500
+        assert "sep+xml" in result["https_response"]["content_type"]
+        # The HTTP leg went to the configured host and port 80, path /dcap.
+        first_url = client.http.get_raw.await_args_list[0].args[0]
+        assert first_url == "http://server.example.com:80/dcap"
+
+    @pytest.mark.asyncio
+    async def test_location_header_is_case_insensitive(self):
+        service, _ = self._service_with([
+            {"status_code": 302, "headers": {"location": "https://server.example.com:8443/dcap"}},
+            {"status_code": 200, "body": "<DeviceCapability/>", "content_type": "xml"},
+        ])
+        result = await service.http_probe()
+        assert result["redirect_followed"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_redirect_is_reported_not_followed(self):
+        """A server answering 200 on plain HTTP is the failure ERR-001 exists to catch."""
+        service, _ = self._service_with([
+            {"status_code": 200, "headers": {}, "body": "<DeviceCapability/>"},
+        ])
+        result = await service.http_probe()
+        assert result["redirect_followed"] is False
+        assert result["https_response"] is None
+        assert result["http_response"]["status_code"] == 200
+
+    @pytest.mark.asyncio
+    async def test_transport_error_surfaces_as_error(self):
+        service, _ = self._service_with([
+            {"status_code": 0, "error": "connection refused"},
+        ])
+        result = await service.http_probe()
+        assert "error" in result
+
+    def test_route_registered(self, connected_client: TestClient) -> None:
+        # 200 regardless of outcome: the endpoint reports what happened.
+        r = connected_client.post("/api/v1/proxy/http-probe", json={"path": "/dcap"})
+        assert r.status_code == 200

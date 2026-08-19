@@ -386,6 +386,55 @@ class ClientAPIService:
             "devices_discovered": len(self._client.state.end_devices),
         }
 
+    async def http_probe(self, path: str = "/dcap", http_port: int = 80) -> dict[str, Any]:
+        """Issue an HTTP GET to the configured server and follow its redirect.
+
+        The IEEE 2030.5 conformance error tests require the DUT to (a) issue
+        an unencrypted HTTP GET, (b) parse the 301/302 ``Location`` header,
+        and (c) re-issue the request over TLS at the redirect target. This
+        exposes that sequence as one instrumentation call; it plays no part
+        in normal operation.
+
+        Only the configured server host is targeted -- the caller chooses a
+        path and a port, never a host.
+        """
+        if not path.startswith("/"):
+            path = "/" + path
+        http = self._client.http
+        http_url = f"http://{http.host}:{http_port}{path}"
+
+        http_resp = await self._run_on_loop(http.get_raw(http_url))
+        if http_resp.get("error"):
+            return {"error": f"HTTP GET to {http_url} failed: {http_resp['error']}"}
+
+        location: str | None = None
+        for k, v in (http_resp.get("headers") or {}).items():
+            if k.lower() == "location":
+                location = v
+                break
+
+        https_resp_payload: dict[str, Any] | None = None
+        redirect_followed = False
+        status = int(http_resp.get("status_code") or 0)
+        if status in (301, 302) and location:
+            https_resp = await self._run_on_loop(http.get_raw(location))
+            if https_resp.get("error"):
+                https_resp_payload = {"error": https_resp["error"]}
+            else:
+                redirect_followed = True
+                https_resp_payload = {
+                    "status_code": int(https_resp.get("status_code") or 0),
+                    "body_excerpt": (https_resp.get("body") or "")[:500],
+                    "content_type": https_resp.get("content_type", ""),
+                }
+
+        return {
+            "http_response": {"status_code": status, "location": location},
+            "https_response": https_resp_payload,
+            "redirect_followed": redirect_followed,
+            "redirect_target": location,
+        }
+
     def get_subscriptions(self) -> dict[str, Any]:
         """Return active subscriptions for the /subscriptions endpoint."""
         mgr = self._client.subscription_manager

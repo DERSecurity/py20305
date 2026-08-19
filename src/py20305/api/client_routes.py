@@ -270,6 +270,28 @@ def create_client_router(
     # System Operations
     # -----------------------------------------------------------------
 
+    @router.post("/proxy/http-probe")
+    async def proxy_http_probe(request: Request) -> dict[str, Any]:
+        """Probe the server's HTTP-to-HTTPS redirect, as one call.
+
+        Body: ``{"path": "/dcap", "http_port": 80}``, both optional.
+        """
+        service = service_getter()
+        if service is None:
+            return {"error": "not_connected"}
+        try:
+            body = await request.json() if await request.body() else {}
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        path = str(body.get("path") or "/dcap")
+        try:
+            http_port = int(body.get("http_port") or 80)
+        except (TypeError, ValueError):
+            http_port = 80
+        return await service.http_probe(path=path, http_port=http_port)
+
     @router.get("/subscriptions")
     async def get_subscriptions() -> dict[str, Any]:
         """Return the client's active subscriptions."""

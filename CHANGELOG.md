@@ -11,6 +11,10 @@ below says so explicitly.
   subscription manager and notification listener and wires them into the
   client. Off by default; enabling it requires `notification_external_host`,
   the address the server delivers notifications to.
+- `POST /api/v1/proxy/http-probe`: issue an HTTP GET to the configured
+  server, follow its 301/302 to HTTPS, and report both legs -- the
+  instrumentation call the IEEE 2030.5 error-handling conformance test
+  drives. Targets only the configured server host.
 - Two management-API endpoints, `GET /api/v1/subscriptions` and
   `GET /api/v1/notifications`, reporting the client's active subscriptions
   and received notifications.
