@@ -125,12 +125,44 @@ class TestClassify:
         outcome = classify(Sep2RedirectError("moved", "https://elsewhere/dcap", 301))
         assert outcome.activity_id is NetworkActivityId.OPEN
 
+    def test_a_redirect_reports_a_stripped_location(self):
+        """The Location header is peer-controlled: no userinfo, no query."""
+        outcome = classify(
+            Sep2RedirectError(
+                "moved", "https://user:hunter2@elsewhere/dcap?sig=SECRETTOKEN", 302
+            )
+        )
+        assert "https://elsewhere/dcap" in outcome.detail
+        for secret in ("hunter2", "user:", "SECRETTOKEN", "sig="):
+            assert secret not in outcome.detail
+        assert outcome.status_code == "302"
+
     def test_a_payload_error_is_an_exchange_failure(self):
         outcome = classify(Sep2PayloadError("bad xml", path="/dcap", body_length=10))
         assert outcome.activity_id is NetworkActivityId.OPEN
 
+    def test_a_payload_error_reports_where_not_what(self):
+        """The exception text can embed the unparseable body itself."""
+        outcome = classify(
+            Sep2PayloadError(
+                "could not parse: <secret>hunter2</secret>", path="/dcap", body_length=31
+            )
+        )
+        assert "/dcap" in outcome.detail and "31" in outcome.detail
+        assert "hunter2" not in outcome.detail
+
     def test_a_protocol_error_is_an_exchange_failure(self):
         assert classify(Sep2ProtocolError("500", 500)).activity_id is NetworkActivityId.OPEN
+
+    def test_a_protocol_error_reports_the_status_not_the_body(self):
+        """The exception text embeds the peer's response body; a length cap
+        limits volume but not content, so only the status code is reported."""
+        outcome = classify(
+            Sep2ProtocolError("GET /dcap returned 500: <body>password=hunter2</body>", 500)
+        )
+        assert "500" in outcome.detail
+        assert "hunter2" not in outcome.detail
+        assert outcome.status_code == "500"
 
     def test_raw_transport_exceptions_are_classified_too(self):
         assert classify(ssl.SSLError("bad cert")).activity_id is NetworkActivityId.FAIL

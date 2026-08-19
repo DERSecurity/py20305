@@ -94,6 +94,18 @@ _request_socket: ContextVar[SocketPair | None] = ContextVar("_request_socket", d
 MAX_STATUS_DETAIL_CHARS = 512
 
 
+def _safe_url_reference(url: str) -> str:
+    """A peer-controlled URL reduced to what identifies it: scheme, host, path.
+
+    Userinfo and the query string are dropped, not just the password:
+    a redirect ``Location`` is chosen by the peer and can carry credentials
+    or signed query parameters, and this reference lands on a topic scoped
+    for connection metadata.
+    """
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+
+
 def _redact_url(url: str | None) -> str | None:
     """Strip userinfo from a URL before it can reach the wire.
 
@@ -210,23 +222,39 @@ def classify(exc: BaseException) -> Outcome | None:
         return Outcome(NetworkActivityId.OPEN, f"Rate limited by the server{suffix}: {exc}", "429")
 
     if isinstance(exc, Sep2RedirectError):
+        # The Location header is peer-controlled: it can carry userinfo or
+        # signed query parameters, so only a stripped-down reference to it is
+        # reported -- and the exception text, which embeds the raw header, is
+        # not interpolated at all.
         status = getattr(exc, "status_code", None)
         location = getattr(exc, "location", None)
-        where = f" to {location}" if location else ""
+        where = f" to {_safe_url_reference(location)}" if location else ""
         return Outcome(
             NetworkActivityId.OPEN,
-            f"Redirected{where}, triggering re-discovery: {exc}",
+            f"Redirected{where}, triggering re-discovery",
             str(status) if status is not None else None,
         )
 
     if isinstance(exc, Sep2PayloadError):
-        return Outcome(NetworkActivityId.OPEN, f"Unusable response body: {exc}")
+        # The exception text can embed the unparseable body; identify the
+        # failure by where and how big instead of by content.
+        path = getattr(exc, "path", None)
+        size = getattr(exc, "body_length", None)
+        at = f" from GET {path}" if path else ""
+        of = f" ({size} bytes)" if size is not None else ""
+        return Outcome(NetworkActivityId.OPEN, f"Unusable response body{at}{of}")
 
     if isinstance(exc, Sep2ProtocolError):
+        # The exception text embeds the peer's response body, and a length
+        # cap limits volume but not content -- the status code alone is what
+        # identifies this failure, so nothing else is reported.
         status = getattr(exc, "status_code", None)
+        detail = "Server returned an unexpected status"
+        if status is not None:
+            detail += f": HTTP {status}"
         return Outcome(
             NetworkActivityId.OPEN,
-            f"Server returned an unexpected status: {exc}",
+            detail,
             str(status) if status is not None else None,
         )
 
