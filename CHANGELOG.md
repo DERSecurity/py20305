@@ -5,7 +5,7 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
-## [0.2.0] — unreleased
+## [0.2.0] — 2026-08-19
 
 - Subscribe/notify from the runner: a `subscription:` section constructs the
   subscription manager and notification listener and wires them into the
