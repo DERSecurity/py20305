@@ -11,6 +11,13 @@ below says so explicitly.
   subscription manager and notification listener and wires them into the
   client. Off by default; enabling it requires `notification_external_host`,
   the address the server delivers notifications to.
+- Scenario integration tests: a scriptable IEEE 2030.5 test double under
+  `tests/scenario/` serves a resource tree over real mutual TLS, records
+  every request, and injects faults on demand. The client is driven end
+  to end through discovery, control dispatch and Response posting,
+  in-band registration and its refusals, error bursts, malformed
+  payloads, an outage with recovery, a CA rotation, and a real
+  HTTP-to-HTTPS redirect.
 - `POST /api/v1/proxy/http-probe`: issue an HTTP GET to the configured
   server, follow its 301/302 to HTTPS, and report both legs -- the
   instrumentation call the IEEE 2030.5 error-handling conformance test
