@@ -173,6 +173,7 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
             registry, lfdi_resolver=resolve_lfdi, telemetry=telemetry
         ),
         dcap_path=config.server.dcap_path,
+        registration_pins=config.registration_pins or None,
         server_2018_compat=config.server.server_2018_compat,
         use_server_time=config.server.use_server_time,
     )

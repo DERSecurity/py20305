@@ -166,17 +166,28 @@ def time_xml() -> str:
     )
 
 
-def edev_list_xml(lfdi: str | None) -> str:
+def edev_list_xml(lfdi: str | None, *, registration: bool = False) -> str:
     if lfdi is None:
         return f'<EndDeviceList {NS} href="/edev" all="0" results="0"/>'
     sfdi = 111111111111
+    reg_link = '<RegistrationLink href="/edev/1/rg"/>' if registration else ""
     return (
         f'<EndDeviceList {NS} href="/edev" all="1" results="1">'
         '<EndDevice href="/edev/1">'
         '<FunctionSetAssignmentsListLink href="/edev/1/fsa" all="1"/>'
         f"<lFDI>{lfdi.upper()}</lFDI><sFDI>{sfdi}</sFDI>"
         "<changedTime>1</changedTime>"
+        f"{reg_link}"
         "</EndDevice></EndDeviceList>"
+    )
+
+
+def registration_xml(pin: int) -> str:
+    """The Registration resource a utility's flow verifies the PIN against."""
+    return (
+        f'<Registration {NS} href="/edev/1/rg">'
+        f"<dateTimeRegistered>1</dateTimeRegistered><pIN>{pin}</pIN>"
+        "</Registration>"
     )
 
 
@@ -277,11 +288,24 @@ class ScenarioServer:
 
     # -- scripting ----------------------------------------------------------
 
-    def seed_standard_tree(self, client_lfdi: str | None, *, poll_rate: int = 1) -> None:
+    def seed_standard_tree(
+        self,
+        client_lfdi: str | None,
+        *,
+        poll_rate: int = 1,
+        registration_pin: int | None = None,
+    ) -> None:
         """The minimal tree a client walks: dcap -> tm -> edev -> fsa -> derp."""
+        with_reg = registration_pin is not None
         self.responses["/dcap"] = lambda: (200, SEP_XML, dcap_xml(poll_rate))
         self.responses["/tm"] = lambda: (200, SEP_XML, time_xml())
-        self.responses["/edev"] = lambda: (200, SEP_XML, edev_list_xml(self._edev_lfdi))
+        self.responses["/edev"] = lambda: (
+            200,
+            SEP_XML,
+            edev_list_xml(self._edev_lfdi, registration=with_reg),
+        )
+        if with_reg:
+            self.responses["/edev/1/rg"] = (200, SEP_XML, registration_xml(registration_pin))
         self.responses["/edev/1/fsa"] = (200, SEP_XML, fsa_list_xml())
         self.responses["/edev/1/fsa/1/derp"] = lambda: (200, SEP_XML, derp_list_xml(poll_rate))
         self.responses["/derp/1/derc"] = lambda: (200, SEP_XML, derc_list_xml())

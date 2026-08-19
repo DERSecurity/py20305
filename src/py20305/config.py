@@ -255,6 +255,14 @@ class ClientConfig(_Strict):
         ),
     )
 
+    registration_pins: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Expected Registration PIN per device LFDI (40 hex characters). When a "
+            "device's Registration resource carries a different pIN, the mismatch is "
+            "reported at discovery -- the check a utility's registration flow expects."
+        ),
+    )
     register_on_start: bool = Field(
         default=True,
         description=(
@@ -262,6 +270,15 @@ class ClientConfig(_Strict):
             "does not already have one. Registering when it does would create a duplicate."
         ),
     )
+
+    @field_validator("registration_pins")
+    @classmethod
+    def _pins_keyed_by_lfdi(cls, pins: dict[str, int]) -> dict[str, int]:
+        """A mistyped key would silently verify nothing."""
+        for lfdi in pins:
+            if len(lfdi) != 40 or any(c not in "0123456789abcdefABCDEF" for c in lfdi):
+                raise ValueError(f"registration_pins key {lfdi!r} is not a 40-hex LFDI")
+        return {k.lower(): v for k, v in pins.items()}
 
     @field_validator("devices")
     @classmethod

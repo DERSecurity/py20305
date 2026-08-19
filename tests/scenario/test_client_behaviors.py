@@ -325,3 +325,69 @@ async def test_ca_rotation_needs_a_trust_update_and_then_works(scenario):
     assert result.get("status") == "ok"
 
     assert await client.poll_now() >= 1
+
+
+# ---------------------------------------------------------------------------
+# Auto-registration -- the flow the runner performs on start
+# ---------------------------------------------------------------------------
+
+
+async def test_auto_registration_registers_once_and_only_once(scenario):
+    """The runner's startup flow: register if absent, never duplicate.
+
+    Same helper the packaged command runs. First pass finds no EndDevice and
+    POSTs one; after rediscovery the server lists it, and a second pass --
+    a restart, in effect -- must not POST again.
+    """
+    from py20305.cli import _register_if_needed
+
+    scenario.server.seed_standard_tree(None)
+    client = scenario.make_client()
+    await client.connect()
+
+    await _register_if_needed(client, scenario.lfdi)
+    assert len(scenario.server.requests_for("/edev", "POST")) == 1
+
+    await client.trigger_rediscovery()
+    await _register_if_needed(client, scenario.lfdi)
+
+    assert len(scenario.server.requests_for("/edev", "POST")) == 1, (
+        "a second startup against a server that lists the device must not re-POST"
+    )
+
+
+async def test_registration_pin_is_fetched_and_verified(scenario, caplog):
+    """With a PIN configured, discovery reads the Registration resource."""
+    scenario.server.seed_standard_tree(scenario.lfdi, registration_pin=111115)
+    client = scenario.make_client(registration_pins={scenario.lfdi.lower(): 111115})
+
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="py20305.client.discovery"):
+        await client.connect()
+
+    assert scenario.server.requests_for("/edev/1/rg", "GET"), (
+        "a configured PIN must make discovery fetch the Registration resource"
+    )
+    assert not [r for r in caplog.records if "PIN" in r.message.upper()]
+
+
+async def test_registration_pin_mismatch_is_reported_not_fatal(scenario, caplog):
+    """A wrong PIN is loudly reported; the session continues regardless.
+
+    The PIN check exists to catch a mis-provisioned device, and an operator
+    reads the warning -- but refusing to run would take a working device off
+    a program over a bookkeeping mismatch.
+    """
+    scenario.server.seed_standard_tree(scenario.lfdi, registration_pin=999999)
+    client = scenario.make_client(registration_pins={scenario.lfdi.lower(): 111115})
+
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="py20305.client.discovery"):
+        await client.connect()
+
+    assert [r for r in caplog.records if "PIN" in r.message.upper()], (
+        "a PIN mismatch must be reported"
+    )
+    assert await client.poll_now() >= 1

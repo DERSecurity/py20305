@@ -11,6 +11,11 @@ below says so explicitly.
   subscription manager and notification listener and wires them into the
   client. Off by default; enabling it requires `notification_external_host`,
   the address the server delivers notifications to.
+- Registration PINs from the runner: `registration_pins` maps a device
+  LFDI to the PIN its Registration resource should carry, verified at
+  discovery. Scenario coverage for the auto-registration flow: register
+  once when absent, never duplicate, and report a PIN mismatch without
+  taking the device off the program.
 - Scenario integration tests: a scriptable IEEE 2030.5 test double under
   `tests/scenario/` serves a resource tree over real mutual TLS, records
   every request, and injects faults on demand. The client is driven end
