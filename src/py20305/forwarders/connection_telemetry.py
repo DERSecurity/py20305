@@ -394,25 +394,30 @@ def build_failure_event(
         logger.debug("No destination endpoint for connection failure; not reporting")
         return None
 
-    common: dict[str, object] = {
-        "metadata": metadata,
-        "dst_endpoint": dst,
-        "src_endpoint": src,
-        "status_detail": outcome.detail,
-        "status_code": outcome.status_code,
-        "service": SERVICE_LABEL,
-        "url": url,
-        "connection_direction": ConnectionDirectionId.OUTBOUND,
-    }
-
     # The two factories split on which layer failed: the connection itself,
     # or an exchange over a connection that stayed up.
     if outcome.activity_id is NetworkActivityId.OPEN:
-        return NetworkActivity.for_exchange_failure(**common)
+        return NetworkActivity.for_exchange_failure(
+            metadata=metadata,
+            dst_endpoint=dst,
+            src_endpoint=src,
+            status_detail=outcome.detail,
+            status_code=outcome.status_code,
+            service=SERVICE_LABEL,
+            url=url,
+            connection_direction=ConnectionDirectionId.OUTBOUND,
+        )
 
     return NetworkActivity.for_connection_failure(
         activity_id=outcome.activity_id,
-        **common,
+        metadata=metadata,
+        dst_endpoint=dst,
+        src_endpoint=src,
+        status_detail=outcome.detail,
+        status_code=outcome.status_code,
+        service=SERVICE_LABEL,
+        url=url,
+        connection_direction=ConnectionDirectionId.OUTBOUND,
     )
 
 
