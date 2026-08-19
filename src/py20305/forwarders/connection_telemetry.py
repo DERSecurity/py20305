@@ -107,19 +107,18 @@ def _safe_url_reference(url: str) -> str:
 
 
 def _redact_url(url: str | None) -> str | None:
-    """Strip userinfo from a URL before it can reach the wire.
+    """Reduce a URL to connection metadata before it can reach the wire.
 
     The configured server URL is serialized into every event's
-    ``url.url_string``. A URL of the ``https://user:password@host`` form would
-    publish those credentials to the broker -- an event topic is connection
-    metadata, never a place for secrets.
+    ``url.url_string``, and the configuration accepts any string -- so
+    userinfo (``https://user:password@host``) and query parameters
+    (``?token=...``) would both publish secrets to the broker. What
+    identifies the interface is scheme, host, port and path; nothing else
+    is retained.
     """
     if url is None:
         return None
-    parts = urlsplit(url)
-    if "@" not in parts.netloc:
-        return url
-    return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
+    return _safe_url_reference(url)
 
 
 def _bounded(detail: str) -> str:
@@ -393,6 +392,25 @@ class CoalescingWindow:
         assert self._start_ms is not None
         return Window(self._count, self._start_ms, self._end_ms or self._start_ms, self._socket)
 
+    def take_expired(self, now_ms: int) -> Window | None:
+        """Close the window if its configured length has elapsed.
+
+        The window normally closes when the success *after* it arrives. A
+        client whose successes stop -- it starts failing, or goes idle --
+        would otherwise hold its last successes unreported until shutdown, so
+        anything else passing through the emitter offers the clock a chance
+        to close an expired window.
+
+        Returns:
+            The expired window, or ``None`` when nothing is open or it is
+            still inside its length.
+        """
+        if self._window_ms == 0 or self._start_ms is None or self._count == 0:
+            return None
+        if now_ms - self._start_ms < self._window_ms:
+            return None
+        return self.flush()
+
     def flush(self) -> Window | None:
         """Close the open window, if any.
 
@@ -635,6 +653,20 @@ class ConnectionTelemetryEmitter:
         if not self.enabled:
             return
         try:
+            # The failure is also the clock's chance to close an expired
+            # success window: those successes happened before this failure,
+            # and holding them until the next success -- which may never
+            # come -- would leave them unreported until shutdown.
+            expired = self._window.take_expired(_now_ms())
+            if expired is not None:
+                self._emit(
+                    build_coalesced_success_event(
+                        expired,
+                        metadata=self._metadata,
+                        server_endpoint=self._server_endpoint,
+                        url=self._base_url,
+                    )
+                )
             outcome = classify(exc)
             if outcome is None:
                 return

@@ -374,6 +374,17 @@ class TestServerEndpoint:
         assert "hunter2" not in url and "user" not in url
         assert url == "https://utility.example.com:8443"
 
+    def test_query_strings_in_the_server_url_never_reach_the_wire(self):
+        """The configuration accepts any string, token-bearing URLs included."""
+        emitter, fw = make_emitter()
+        emitter.set_server(
+            "utility.example.com", 8443, base_url="https://utility.example.com:8443/api?token=SECRET"
+        )
+        emitter.record_failure(Sep2TlsError("bad chain"))
+        url = fw.events[0].payload["url"]["url_string"]
+        assert "SECRET" not in url and "token" not in url
+        assert url == "https://utility.example.com:8443/api"
+
 
 class TestEmitter:
     def test_it_satisfies_the_clients_observer_seam(self):
@@ -425,6 +436,35 @@ class TestEmitter:
         emitter.begin_request()  # next request reuses the pool: no connect fires
         emitter.record_success(now_ms=2_000)
         assert "src_endpoint" not in fw.events[1].payload
+
+    def test_a_failure_flushes_an_expired_success_window(self):
+        """Successes must not wait for a next success that may never come."""
+        emitter, fw = make_emitter(window=60.0)
+        emitter.record_success(now_ms=1_000)
+        emitter.record_success(now_ms=2_000)
+        assert fw.events == []
+
+        # Well past the window, the client starts failing. The buffered
+        # successes are reported first, then the failure.
+        import py20305.forwarders.connection_telemetry as ct
+
+        original = ct._now_ms
+        ct._now_ms = lambda: 200_000
+        try:
+            emitter.record_failure(Sep2TlsError("bad chain"))
+        finally:
+            ct._now_ms = original
+        assert [e.payload["status"] for e in fw.events] == ["Success", "Failure"]
+        assert fw.events[0].payload["count"] == 2
+
+    def test_a_failure_leaves_a_fresh_window_alone(self):
+        """Only an expired window closes early; coalescing otherwise holds."""
+        emitter, fw = make_emitter(window=3600.0)
+        emitter.record_success()
+        emitter.record_failure(Sep2TlsError("bad chain"))
+        assert [e.payload["status"] for e in fw.events] == ["Failure"]
+        emitter.flush()
+        assert [e.payload["status"] for e in fw.events] == ["Failure", "Success"]
 
     def test_flush_reports_the_open_window(self):
         emitter, fw = make_emitter(window=3600.0)
