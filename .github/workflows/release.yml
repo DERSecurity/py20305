@@ -1,0 +1,74 @@
+name: Release
+
+# Publishes a tagged version to PyPI and mirrors the artifacts on a GitHub
+# release. Trusted publishing (OIDC): PyPI accepts this workflow's identity
+# directly, so no API token exists to store, leak, or rotate.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - name: The tag must be the version the package says it is
+        # A tag that disagrees with pyproject would publish a release whose
+        # installed version contradicts its own announcement.
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(grep -Po '^version = "\K[^"]+' pyproject.toml)
+          test "$tag" = "$version" || { echo "tag v$tag but pyproject says $version"; exit 1; }
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Check package metadata
+        run: twine check dist/*
+      - name: Verify the schemas ship inside the wheel
+        # Package data that quietly fell out of the wheel leaves every import
+        # working and schema validation silently unavailable.
+        run: |
+          python -m zipfile -l dist/*.whl | grep -c 'schemas/.*\.xsd' |             xargs -I{} sh -c 'test {} -eq 8 || { echo "expected 8 XSDs in the wheel, found {}"; exit 1; }'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/py20305/
+    permissions:
+      # The OIDC token is the credential; nothing else is granted.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*             --repo "$GITHUB_REPOSITORY"             --title "$GITHUB_REF_NAME"             --notes "See [CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/main/CHANGELOG.md) for what this release contains."
