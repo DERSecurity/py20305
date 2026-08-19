@@ -5,7 +5,7 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
-## [Unreleased]
+## [0.3.0] — 2026-08-19
 
 - Connection telemetry: the client reports its own connection outcomes as
   OCSF Network Activity (4001) events on their own MQTT topic
