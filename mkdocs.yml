@@ -5,6 +5,10 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
+  # The cream mark reads on the teal header in both palettes; the charcoal
+  # one is for browser tabs, which are usually light.
+  logo: assets/satori-mark-dark.png
+  favicon: assets/satori-mark.png
   features:
     - navigation.sections
     - navigation.top

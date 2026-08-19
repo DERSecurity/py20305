@@ -8,6 +8,10 @@ lf-energy-color.png   LF Energy horizontal logo, from the official
                       lf-energy/artwork repository
 lf-energy-white.png   white variant of the same, same source
 sunspec.png           SunSpec Alliance logo, from sunspec.org
+satori-mark.png       square Satori mark, charcoal on transparency --
+                      the docs-site favicon
+satori-mark-dark.png  the same mark in the brand cream, for dark
+                      surfaces -- the docs-site header logo
 dersec-dark.png       DER Security lockup, dark text
 dersec-white.png      DER Security lockup, white text
 
@@ -15,6 +19,3 @@ The README pairs the light/dark variants with <picture>
 prefers-color-scheme sources, so the banner is legible in both GitHub
 themes.
 
-Still welcome: a square Satori mark (satori-mark.svg or .png) for the
-docs-site logo and favicon -- wire it in mkdocs.yml under `theme:` as
-`logo:` and `favicon:` once dropped.
