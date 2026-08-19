@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py20305"
-version = "0.1.0"
+version = "0.1.1"
 description = "An open IEEE 2030.5 / CSIP client for distributed energy resources"
 readme = "README.md"
 license = "Apache-2.0"
