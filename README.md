@@ -129,6 +129,16 @@ The client maps one certificate identity to one end device. It registers and
 drives that device, and does not fan a server-side EndDevice out across several
 local ones.
 
+## Certification
+
+py20305 is not SunSpec CSIP certified, and using it does not make a product
+certified. Certification is a property of the *product* -- the assembled
+client device or system, tested as a whole -- not of a library inside it.
+
+If you are building a client product that needs SunSpec CSIP certification,
+follow the SunSpec Alliance's certification process:
+[IEEE 2030.5 / CSIP certification](https://sunspec.org/ieee-2030-5-csip-certification/).
+
 ## Project Satori
 
 *Any certified DER. Any utility program.* Satori — “awakening” — is an

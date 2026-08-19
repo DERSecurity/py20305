@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from py20305.forwarders.config import (
+    DeviceTelemetryConfig,
     ForwarderConfig,
     MQTTForwarderConfig,
 )
@@ -107,3 +108,22 @@ class TestMQTTForwarderConfigPlainMQTT:
                 cert_path=cert,
                 key_path=key,
             )
+
+
+class TestDeviceTelemetryTopicSuffix:
+    """The suffix names a topic to publish on, so it can never be a filter."""
+
+    def test_a_plain_suffix_validates_and_strips_slashes(self) -> None:
+        config = DeviceTelemetryConfig(topic_suffix="/devices/out/")
+        assert config.topic_suffix == "devices/out"
+
+    def test_the_multilevel_wildcard_is_rejected(self) -> None:
+        """'#' is a subscription filter. Publishing on it produces a
+        literal-'#' topic no subscriber matches the way the operator
+        intended -- silence that looks like a client with nothing to say."""
+        with pytest.raises(ValueError, match="wildcard"):
+            DeviceTelemetryConfig(topic_suffix="out/#")
+
+    def test_the_single_level_wildcard_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="wildcard"):
+            DeviceTelemetryConfig(topic_suffix="+foo")

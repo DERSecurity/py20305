@@ -46,7 +46,8 @@ class DdercTracker:
           primacy (no redundant re-apply for unchanged content).
 
         A DDERC update on the same program (different mrid) is allowed through
-        even at the same primacy — see
+        even at the same primacy: fresh defaults from the utility replace the
+        ones it previously published.
         """
         # Cross-program check: if any other program already applied a
         # higher-priority DDERC to the same device, block this one.

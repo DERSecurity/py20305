@@ -28,7 +28,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from py20305.forwarders.base import EventFrame
-from py20305.forwarders.mqtt_forwarder import PROTOCOL_MESSAGE_TOPIC_SUFFIX
+from py20305.forwarders.config import PROTOCOL_MESSAGE_TOPIC_SUFFIX
 from py20305.forwarders.types import (
     NetworkEndpoint,
     Protocol,
@@ -47,6 +47,26 @@ logger = logging.getLogger(__name__)
 # with no port of its own -- an RTU device has no TCP port at all, and inventing
 # one would be worse than reporting the serial line it actually uses.
 _DEFAULT_MODBUS_PORT = 502
+
+# The unspecified address, used when a connector exposes none. This is the same
+# placeholder the protocol-message path already uses for an endpoint it cannot
+# resolve. It reads as "unknown" to anyone looking at the record, which a
+# device's logical name in an `ip` field does not -- that looks like an address.
+_UNKNOWN_IP = "0.0.0.0"
+
+
+def _unknown_endpoint() -> NetworkEndpoint:
+    """An endpoint standing for "not known", never for a real address.
+
+    Used only where the envelope requires one. ``ProtocolMessage`` types
+    ``source`` as a required ``NetworkEndpoint`` and ``destination`` as
+    optional, so an unknown source has to be *represented* while an unknown
+    destination can simply be omitted. That is why the two sides are handled
+    differently for the same underlying condition: it is the shared envelope's
+    shape, not a judgment about the two directions.
+    """
+    return NetworkEndpoint(ip=_UNKNOWN_IP, port=0)
+
 
 # Upper bound on a device's error text. A Modbus exception message is normally
 # short, but it originates outside this process and lands on a topic an operator
@@ -105,17 +125,19 @@ def device_protocol(connector: object) -> Protocol:
     a false claim about the wire on the monitoring channel, and a consumer
     filtering by protocol would act on it.
 
-    Unknown or malformed values fall back to ``OTHER`` rather than raising:
+    Unknown or malformed values fall back to ``GENERIC`` rather than raising:
     this runs inside the data path, and a connector's mislabelling is not
     worth failing a control write over.
     """
     declared = getattr(connector, "telemetry_protocol", None)
-    if not isinstance(declared, str):
-        return Protocol.OTHER
-    try:
-        return Protocol.from_string(declared)
-    except ValueError:
-        return Protocol.OTHER
+    if isinstance(declared, Protocol):
+        return declared
+    if isinstance(declared, str):
+        try:
+            return Protocol.from_string(declared)
+        except ValueError:
+            logger.debug("Connector declared unknown protocol %r; reporting generic", declared)
+    return Protocol.GENERIC
 
 
 def device_endpoint(connector: object) -> NetworkEndpoint | None:
@@ -162,6 +184,9 @@ class DeviceTelemetryEmitter:
         self._forwarder = forwarder
         self._config = config
         self._forwarder_id = client_id or ""
+        #: The client's own advertised host, used as the endpoint on
+        #: whichever side of the exchange it sits. Empty until configured.
+        self._source_host = ""
         #: Emission failures since start. Telemetry that stopped working must
         #: not look the same as a client with nothing to report.
         self.emit_failures = 0
@@ -180,11 +205,26 @@ class DeviceTelemetryEmitter:
         """
         self._forwarder = forwarder
 
-    def configure(self, config: DeviceTelemetryConfig, *, client_id: str | None = None) -> None:
-        """Apply operator configuration after construction."""
+    def configure(
+        self,
+        config: DeviceTelemetryConfig,
+        *,
+        client_id: str | None = None,
+        source_host: str | None = None,
+    ) -> None:
+        """Apply operator configuration after construction.
+
+        Args:
+            config: Whether telemetry is on, and its topic.
+            client_id: Identifier recorded as the forwarding system.
+            source_host: The client's own advertised host, reported as its
+                endpoint on whichever side of the exchange it sits.
+        """
         self._config = config
         if client_id is not None:
             self._forwarder_id = client_id
+        if source_host is not None:
+            self._source_host = source_host
 
     def record_read(
         self,
@@ -265,13 +305,12 @@ class DeviceTelemetryEmitter:
     def _client_side(self) -> NetworkEndpoint:
         """This client's end of a southbound exchange.
 
-        The Modbus master is this process, and it has no address of its own
-        worth reporting -- the connector knows the device's, not the local
-        one. The unspecified address is what the 2030.5 side of this transport
+        Reported by its advertised host once one is configured. Before that,
+        the unspecified address -- what the 2030.5 side of this transport
         already emits when an endpoint is unknown, so a collector reading both
         halves sees one convention rather than two.
         """
-        return NetworkEndpoint(ip="0.0.0.0", port=0)
+        return NetworkEndpoint(ip=self._source_host or _UNKNOWN_IP, port=0)
 
     def _emit(
         self,
@@ -284,23 +323,32 @@ class DeviceTelemetryEmitter:
         is_valid: bool = True,
         validation_error: str | None = None,
     ) -> None:
-        """Build the envelope and hand it to the transport."""
+        """Build the envelope and hand it to the transport.
+
+        Source is where the exchange came from and destination where it went,
+        which is the contract the 2030.5 side of this transport already
+        follows. A reading is pulled off the device, so the device is the
+        source; a control is written to it, so the device is the destination.
+        Putting the device in ``source`` for both would tell a collector that
+        the inverter issued the command.
+        """
         if not self.enabled or self._forwarder is None:
             return
         try:
-            device_side = device_endpoint(connector) or NetworkEndpoint(
-                ip=device, port=_DEFAULT_MODBUS_PORT
-            )
-            # Source is where the exchange came from and destination where it
-            # went, which is the contract the 2030.5 side of this transport
-            # already follows. A reading is pulled off the device, so the
-            # device is the source; a control is written to it, so the device
-            # is the destination. Putting the device in `source` for both
-            # would tell a collector that the inverter issued the command.
+            device_ep = device_endpoint(connector)
+
             if direction is WireDirection.UPSTREAM:
-                source, destination = device_side, self._client_side()
+                # The device initiated nothing, but the data came from it. The
+                # envelope requires a source, so an unknown one is represented
+                # by the unspecified address rather than by the device's
+                # logical name in an `ip` field -- that looks like an address.
+                source = device_ep or _unknown_endpoint()
+                destination: NetworkEndpoint | None = self._client_side()
             else:
-                source, destination = self._client_side(), device_side
+                source = self._client_side()
+                # Omitted rather than invented when the connector has no
+                # address; the device identifier carries the attribution.
+                destination = device_ep
             message = ProtocolMessage(
                 protocol=device_protocol(connector),
                 direction=direction,

@@ -201,7 +201,7 @@ def translate_p_lim_inj(
     active-power limit in *watts* (``value * 10^multiplier``), NOT a percent
     (unlike opModMaxLimW). Emit the watts unchanged under ``p_lim_watts``; the
     connector converts to a percent of the device's WMax before writing the
-    percent-only SunSpec WMaxLimPct register. See
+    percent-only SunSpec WMaxLimPct register.
     """
     field = base.op_mod_max_lim_winject
     if field is None:
@@ -348,7 +348,7 @@ def translate_fixed_w(
 
     opModFixedW is SignedPerCent (hundredths of a percent of setMaxW), so
     ``WSet`` carries the percent (field.value / 100, e.g. 5000 -> 50.0) and
-    ``WSetMod`` selects SunSpec 704's ``W_MAX_PCT`` mode (enum value 0). See
+    ``WSetMod`` selects SunSpec 704's ``W_MAX_PCT`` mode (enum value 0).
 
     **The key is not the register.** SunSpec 704 reads ``WSetPct`` under
     ``W_MAX_PCT`` and ``WSet`` under ``WATTS``, but this dict is a transport,

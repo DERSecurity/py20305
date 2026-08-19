@@ -5,6 +5,33 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
+## [Unreleased]
+
+- Connection telemetry: the client reports its own connection outcomes as
+  OCSF Network Activity (4001) events on their own MQTT topic
+  (`forwarders.connection_telemetry`, off by default). Transport failures
+  report `Fail`/`Refuse` with the reason; application-layer failures over a
+  connection that opened stay `Open` with a `Failure` status; successes are
+  coalesced into windows, failures never are. Where a connection was
+  established during the request, the record carries the client's own source
+  address and port. Embedders attach the same machinery through the new
+  `Sep2Client.connection_observer` seam, or implement
+  `py20305.client.observer.ConnectionObserver` to route outcomes elsewhere.
+- Southbound telemetry coverage: the DER resource manager and the telemetry
+  manager report the nameplate, configuration, status and availability reads
+  they issue themselves, and clear-control writes are audited through the
+  same path as every other control -- including the comms-loss safe default.
+- Wire correction: the device-telemetry envelope's catch-all `protocol` value
+  is `generic`, the spelling the consumer contract parses. It was `other`,
+  which failed enum parsing and schema validation on the receiving side.
+- Telemetry topic hygiene: `topic_suffix` fields reject MQTT wildcards, the
+  connection-telemetry topic rejects the protocol-message topic, and the two
+  telemetry channels refuse to share one effective topic.
+- Intrusion-detection wire tests: a scriptable MQTT 3.1.1 broker double joins
+  the scenario servers, and the three channels -- upstream 2030.5 capture,
+  connection-outcome session tracking, downstream device telemetry -- are
+  asserted end to end on the bytes that reach the broker.
+
 ## [0.2.0] — 2026-08-19
 
 - Subscribe/notify from the runner: a `subscription:` section constructs the

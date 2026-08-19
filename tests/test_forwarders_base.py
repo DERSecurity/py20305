@@ -160,6 +160,15 @@ class TestAbstractForwarder:
         assert stats["running"] is False
         assert stats["name"] == "test"
 
+    def test_events_queued_starts_at_an_explicit_zero(self) -> None:
+        """A forwarder that never carries events reports 0, not a missing key.
+
+        An operator reading the stats dict must be able to tell "no events
+        yet" from "this build does not count events at all".
+        """
+        forwarder = ConcreteForwarder("test")
+        assert forwarder.get_statistics()["events_queued"] == 0
+
     def test_record_queued_increments_counter(self) -> None:
         forwarder = ConcreteForwarder()
         frame = MessageFrame(

@@ -32,6 +32,7 @@ from py20305.xml.serialization import to_xml
 if TYPE_CHECKING:
     from py20305.client.http import Sep2Client
     from py20305.connectors.base import BaseConnector
+    from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class DerResourceManager:
         client: Sep2Client,
         connector_resolver: Callable[[str], BaseConnector | Awaitable[BaseConnector]],
         command_observer: CommandObserver | None = None,
+        device_telemetry: DeviceTelemetryEmitter | None = None,
     ) -> None:
         """Initialize the DerResourceManager.
 
@@ -86,6 +88,10 @@ class DerResourceManager:
                 Deliberately reuses the existing DERStatus read rather than
                 adding one -- a second read of the same device to confirm a
                 command would be a second acquisition path.
+            device_telemetry: Reports the nameplate, configuration and status
+                reads this manager issues to the monitoring system. These
+                reads do not pass through a measurement source, so no other
+                seam covers them. Optional and disabled by default.
         """
         self._client = client
         # Server timebase for telemetry timestamp defaults. isinstance guard
@@ -98,8 +104,30 @@ class DerResourceManager:
         # See ConnectorDispatcher: `is None` so a falsy-when-empty observer is
         # not silently swapped for the no-op.
         self._commands = NullCommandObserver() if command_observer is None else command_observer
+        self._telemetry = device_telemetry
         self._devices: dict[str, DeviceDerState] = {}
         self._scheduler = PollScheduler()
+
+    async def _read(self, connector: Any, method: str, lfdi: str) -> dict[str, Any]:
+        """Read one resource off a device, reporting it to the monitoring system.
+
+        These reads do not go through a measurement source -- that path covers
+        the metering poll only -- so without this they would be southbound
+        traffic a monitoring system never sees, which is exactly the half the
+        feature exists to close.
+
+        Args:
+            connector: The device connector to read from.
+            method: The connector method to call, e.g. ``"fetch_status"``.
+            lfdi: The device's LFDI, for attribution.
+
+        Returns:
+            Whatever the connector returned, unchanged.
+        """
+        values = await getattr(connector, method)()
+        if self._telemetry is not None and isinstance(values, dict):
+            self._telemetry.record_read(lfdi, values, connector=connector, lfdi=lfdi)
+        return values  # type: ignore[no-any-return]
 
     def start_device(
         self,
@@ -195,7 +223,7 @@ class DerResourceManager:
 
         try:
             connector = await self._resolve_connector_async(lfdi)
-            nameplate = await connector.fetch_nameplate()
+            nameplate = await self._read(connector, "fetch_nameplate", lfdi)
             model = build_der_capability(
                 nameplate,
                 der_type=connector.der_type,
@@ -256,7 +284,7 @@ class DerResourceManager:
 
         try:
             connector = await self._resolve_connector_async(lfdi)
-            configuration = await connector.fetch_configuration()
+            configuration = await self._read(connector, "fetch_configuration", lfdi)
             if configuration == state.last_settings_data:
                 logger.debug("DERSettings unchanged for %s, skipping PUT", lfdi[:8])
                 return
@@ -344,7 +372,7 @@ class DerResourceManager:
             # Stamped before the read: the plane discards an observation that
             # began before a command was issued, since it cannot reflect it.
             read_started_at = time.time()
-            status_data: dict[str, Any] = await connector.fetch_status()
+            status_data: dict[str, Any] = await self._read(connector, "fetch_status", lfdi)
             self._commands.record_readback(lfdi, status_data, read_started_at=read_started_at)
             model = build_der_status(
                 status_data,

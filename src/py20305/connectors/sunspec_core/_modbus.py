@@ -841,8 +841,8 @@ class SunSpecModbusConnector:
         merged into WMaxLimPct. ``"abs"`` is recorded for diagnostics only --
         SunSpec model 704 has no absorb-direction active-power limit -- and a
         per-device warning is logged the first time an operator enables it so
-        the misconfiguration is surfaced rather than swallowed. See
-            """
+        the misconfiguration is surfaced rather than swallowed.
+        """
         if slot not in ("inj", "abs"):
             msg = f"_update_p_lim_w_sync expects 'inj' or 'abs', got {slot!r}"
             raise ValueError(msg)
@@ -993,7 +993,7 @@ class SunSpecModbusConnector:
         # ``WSet`` is already a percent of WMax (e.g. 50.0 == 50%), matching
         # the convention the translator emits for every percent control
         # (p_lim, const_q). Write it straight to WSetPct.cvalue -- the earlier
-        # ``* 100`` drove a 50% setpoint to 5000% on the wire. See
+        # ``* 100`` drove a 50% setpoint to 5000% on the wire.
         model.WSetPct.cvalue = params.get("WSet", 0)
         model.write()
 

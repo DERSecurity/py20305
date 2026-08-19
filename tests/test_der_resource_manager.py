@@ -368,3 +368,97 @@ class TestDerResourceManagerShutdown:
         with patch.object(manager._scheduler, "cancel_all", new_callable=AsyncMock) as mock_cancel:
             await manager.shutdown()
             mock_cancel.assert_called_once()
+
+
+class _RecordingForwarder:
+    """Stands in for the forwarder manager, keeping what was queued."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def queue_event(self, event: Any) -> None:
+        self.events.append(event)
+
+
+def _make_telemetry() -> tuple[Any, _RecordingForwarder]:
+    """A live DeviceTelemetryEmitter backed by a recording forwarder."""
+    from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
+    from py20305.forwarders.config import DeviceTelemetryConfig
+
+    fw = _RecordingForwarder()
+    emitter = DeviceTelemetryEmitter(fw, DeviceTelemetryConfig(enabled=True), client_id="site-a")
+    return emitter, fw
+
+
+def _points_of(event: Any) -> dict[str, Any]:
+    import json
+
+    return json.loads(event.payload["payload"]["data"])["points"]
+
+
+class TestReadsAreReported:
+    """The manager's own capability/settings/status reads are southbound
+    traffic no measurement source covers; without this seam a monitoring
+    system never sees them."""
+
+    @pytest.mark.asyncio
+    async def test_capability_cycle_reports_the_nameplate_read(self) -> None:
+        client = AsyncMock()
+        client.put_bytes = AsyncMock(return_value=200)
+        emitter, fw = _make_telemetry()
+        manager = DerResourceManager(
+            client,
+            _aresolver(_make_connector(nameplate={"WMaxRtg": 15000})),
+            device_telemetry=emitter,
+        )
+
+        manager.start_device("ab", "/cap", None, None)
+        await manager._capability_cycle("ab")
+
+        assert len(fw.events) == 1
+        assert fw.events[0].payload["direction"] == "upstream"
+        assert _points_of(fw.events[0]) == {"WMaxRtg": 15000}
+
+    @pytest.mark.asyncio
+    async def test_settings_cycle_reports_the_configuration_read(self) -> None:
+        client = AsyncMock()
+        client.put_bytes = AsyncMock(return_value=200)
+        emitter, fw = _make_telemetry()
+        manager = DerResourceManager(
+            client,
+            _aresolver(_make_connector(configuration={"WMax": 10000})),
+            device_telemetry=emitter,
+        )
+
+        manager.start_device("ab", None, "/set", None)
+        await manager._settings_cycle("ab")
+
+        assert len(fw.events) == 1
+        assert _points_of(fw.events[0]) == {"WMax": 10000}
+
+    @pytest.mark.asyncio
+    async def test_status_cycle_reports_the_status_read(self) -> None:
+        client = AsyncMock()
+        client.put_bytes = AsyncMock(return_value=200)
+        emitter, fw = _make_telemetry()
+        manager = DerResourceManager(
+            client, _aresolver(_make_connector()), device_telemetry=emitter
+        )
+
+        manager.start_device("ab", None, None, "/stat")
+        await manager._status_cycle("ab")
+
+        assert len(fw.events) == 1
+        assert "genConnectStatus" in _points_of(fw.events[0])
+
+    @pytest.mark.asyncio
+    async def test_without_the_kwarg_cycles_run_unchanged(self) -> None:
+        """No emitter, no reporting -- and no change to the PUT path."""
+        client = AsyncMock()
+        client.put_bytes = AsyncMock(return_value=200)
+        manager = DerResourceManager(client, _aresolver(_make_connector()))
+
+        manager.start_device("ab", "/cap", None, None)
+        await manager._capability_cycle("ab")
+
+        client.put_bytes.assert_called_once()

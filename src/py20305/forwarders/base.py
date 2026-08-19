@@ -167,6 +167,9 @@ class AbstractForwarder(ABC):
         self._running = False
         self._stats: dict[str, Any] = {
             "messages_queued": 0,
+            # Seeded so a forwarder that never carries events reports an
+            # explicit zero rather than omitting the key.
+            "events_queued": 0,
             "messages_published": 0,
             "publish_errors": 0,
             "last_publish_time": None,

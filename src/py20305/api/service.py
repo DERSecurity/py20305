@@ -118,9 +118,9 @@ class ClientAPIService:
                 max(0, int(time.time()) - last_contact) if last_contact is not None else None
             ),
             "consecutive_failures": http_client.consecutive_failures,
-            # Application-level server timebase: offset/quality/age per scope
-            # . Lets an operator see live
-            # clock drift against the head-end.
+            # Application-level server timebase: offset/quality/age per
+            # scope. Lets an operator see live clock drift against the
+            # head-end.
             "timebase": timebase_snapshot,
         }
         if http_client.last_error is not None:

@@ -169,6 +169,10 @@ class MQTTForwarderAdapter(AbstractForwarder):
         """
         if not self._running:
             return
+        # Counted here as well as on the wrapped forwarder: the adapter is
+        # what the manager registers, so its stats are what an operator sees;
+        # the wrapped forwarder's own count appears under underlying_forwarder.
+        self._stats["events_queued"] = self._stats.get("events_queued", 0) + 1
         self._forwarder.queue_event(event)
 
     def queue_message(self, frame: MessageFrame) -> None:
