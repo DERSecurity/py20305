@@ -1,10 +1,20 @@
+<!-- Project Satori logo. Drop docs/assets/satori-logo.svg (see docs/assets/ASSETS.txt),
+     then replace this comment with:
+<p align="center"><img src="docs/assets/satori-logo.svg" alt="Satori" width="360"></p>
+-->
+
 # py20305
+
+**The IEEE 2030.5 / CSIP client of [Project Satori](https://dersec.io/satori)** —
+an open-source project led by the SunSpec Alliance, DER Security, and industry
+consortium members, proposed for LF Energy.
 
 [![CI](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml/badge.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
 [![Tests](.github/badges/tests.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
 [![Coverage](.github/badges/coverage.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![License](https://img.shields.io/github/license/DERSecurity/py20305)](LICENSE)
+[![Project Satori](https://img.shields.io/badge/Project-Satori-b7410e)](https://dersec.io/satori)
 
 An open IEEE 2030.5 client for distributed energy resources, with CSIP-AUS
 support. It speaks the utility's protocol so your device doesn't have to.
@@ -101,6 +111,21 @@ validation runs against them. The generated bindings track 2023; a
 The client maps one certificate identity to one end device. It registers and
 drives that device, and does not fan a server-side EndDevice out across several
 local ones.
+
+## Project Satori
+
+*Any certified DER. Any utility program.* Satori — “awakening” — is an
+open-source initiative to make any certified DER a compliant participant in
+utility DER programs: point it at the Modbus port of a UL 1741 SB device —
+inverter, battery, or EV — and it joins a program without a firmware rewrite.
+The bundle builds on SunSpec-certified implementations contributed by
+DER Security, and this repository is its IEEE 2030.5 half:
+
+| Project | Role |
+|---|---|
+| [PySunSpec2](https://github.com/sunspec/pysunspec2) | SunSpec Modbus reference library, used in more than 80% of inverter-based products shipped globally |
+| **py20305** (this repository) | IEEE 2030.5 client stack with CSIP and CSIP-AUS support, and a SunSpec Modbus bridge |
+| SunSpec DevKit CE | Discover, read and identify SunSpec devices on the wire |
 
 ## Documentation
 

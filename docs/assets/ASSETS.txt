@@ -1,0 +1,12 @@
+Brand assets for Project Satori live here.
+
+Expected files:
+  satori-logo.svg   the full lockup (mark + wordmark), used at the top of the README
+  satori-mark.svg   the mark alone, square; used as the docs-site logo and favicon
+
+After dropping them:
+  1. README.md: replace the HTML comment at the top with the <img> line it contains.
+  2. mkdocs.yml: under `theme:`, add
+       logo: assets/satori-mark.svg
+       favicon: assets/satori-mark.svg
+SVG preferred; a PNG at the same basename works in the README but not as the favicon.
