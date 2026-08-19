@@ -437,6 +437,26 @@ class TestEmitter:
         emitter.record_success(now_ms=2_000)
         assert "src_endpoint" not in fw.events[1].payload
 
+    def test_a_never_opened_failure_does_not_wear_an_earlier_sockets_port(self):
+        """An early retry attempt can connect and a later one fail to; the
+        Fail/Refuse record must not carry the earlier connection's local port,
+        because that connection is not the one that failed."""
+        emitter, fw = make_emitter()
+        emitter.begin_request()
+        emitter.on_connect(SOCKET)  # an early attempt connected
+        emitter.record_failure(Sep2ConnectionError("second attempt never connected"))
+        payload = fw.events[0].payload
+        assert "src_endpoint" not in payload
+        assert payload["dst_endpoint"]["ip"] == "10.0.0.9"  # the configured target
+
+    def test_an_exchange_failure_keeps_its_connections_socket(self):
+        """A 500 happened over the retained connection -- that one is the subject."""
+        emitter, fw = make_emitter()
+        emitter.begin_request()
+        emitter.on_connect(SOCKET)
+        emitter.record_failure(Sep2ProtocolError("boom", 500))
+        assert fw.events[0].payload["src_endpoint"]["port"] == 52511
+
     def test_a_failure_flushes_an_expired_success_window(self):
         """Successes must not wait for a next success that may never come."""
         emitter, fw = make_emitter(window=60.0)

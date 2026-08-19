@@ -670,11 +670,22 @@ class ConnectionTelemetryEmitter:
             outcome = classify(exc)
             if outcome is None:
                 return
+            # The retained socket belongs to a connection this request
+            # established. For an exchange failure (OPEN) or a teardown
+            # (RESET) that connection is the subject of the record; for a
+            # failure that never opened (FAIL, REFUSE) it is an earlier
+            # attempt's socket, and attaching its local port would attribute
+            # the failure to a connection that did not fail.
+            socket_pair = (
+                _request_socket.get()
+                if outcome.activity_id in (NetworkActivityId.OPEN, NetworkActivityId.RESET)
+                else None
+            )
             self._emit(
                 build_failure_event(
                     outcome,
                     metadata=self._metadata,
-                    socket_pair=_request_socket.get(),
+                    socket_pair=socket_pair,
                     server_endpoint=self._server_endpoint,
                     url=self._base_url,
                 )
