@@ -28,11 +28,14 @@ one assignment: ``client.http.connection_observer = emitter``.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import ssl
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+import aiohttp
 
 from py20305.client.connector import SocketPair
 from py20305.client.errors import (
@@ -91,10 +94,16 @@ MAX_STATUS_DETAIL_CHARS = 512
 
 
 def _bounded(detail: str) -> str:
-    """Clip reason text, marking it so a reader knows it was clipped."""
+    """Clip reason text, marking it so a reader knows it was clipped.
+
+    The cap is the total length on the wire, marker included -- appending the
+    marker after keeping the full cap would exceed the documented bound by
+    exactly the marker's length.
+    """
     if len(detail) <= MAX_STATUS_DETAIL_CHARS:
         return detail
-    return detail[:MAX_STATUS_DETAIL_CHARS] + f"... [truncated, {len(detail)} chars]"
+    marker = f"... [truncated, {len(detail)} chars]"
+    return detail[: MAX_STATUS_DETAIL_CHARS - len(marker)] + marker
 
 
 @dataclass(frozen=True)
@@ -167,11 +176,15 @@ def classify(exc: BaseException) -> Outcome | None:
         return Outcome(NetworkActivityId.FAIL, f"TLS failure: {exc}")
 
     if isinstance(exc, Sep2ConnectionError):
-        # ConnectionRefusedError is the one transport failure OCSF
-        # distinguishes: the host answered and declined, rather than never
-        # answering.
+        # The cause chain distinguishes the transport failures OCSF names.
+        # A refusal means the host answered and declined; a disconnect or
+        # reset means a connection *opened* and was torn down -- reporting
+        # that as Fail would tell a reader the client never reached the
+        # server, which is not what the socket saw.
         if _has_cause(exc, ConnectionRefusedError):
             return Outcome(NetworkActivityId.REFUSE, f"Connection refused: {exc}")
+        if _has_cause(exc, (aiohttp.ServerDisconnectedError, ConnectionResetError)):
+            return Outcome(NetworkActivityId.RESET, f"Connection reset by the server: {exc}")
         return Outcome(NetworkActivityId.FAIL, f"Connection failure: {exc}")
 
     if isinstance(exc, Sep2RateLimitError):
@@ -206,6 +219,9 @@ def classify(exc: BaseException) -> Outcome | None:
     if isinstance(exc, ConnectionRefusedError):
         return Outcome(NetworkActivityId.REFUSE, f"Connection refused: {exc}")
 
+    if isinstance(exc, ConnectionResetError):
+        return Outcome(NetworkActivityId.RESET, f"Connection reset by the server: {exc}")
+
     if isinstance(exc, TimeoutError):
         return Outcome(NetworkActivityId.FAIL, f"Connection timed out: {exc}")
 
@@ -215,7 +231,9 @@ def classify(exc: BaseException) -> Outcome | None:
     return None
 
 
-def _has_cause(exc: BaseException, wanted: type[BaseException]) -> bool:
+def _has_cause(
+    exc: BaseException, wanted: type[BaseException] | tuple[type[BaseException], ...]
+) -> bool:
     """Whether ``wanted`` appears anywhere in the exception's cause chain.
 
     ``with_retry`` wraps an exhausted transport failure in
@@ -488,10 +506,13 @@ class ConnectionTelemetryEmitter:
         self._forwarder = forwarder
         self._config = config
         self._metadata = build_metadata(product_version)
-        #: Emission failures since start. A reporting feature that goes dark
-        #: silently is the failure this counter exists to make visible; the
-        #: first one also logs at WARNING, and the rest at DEBUG so a broken
-        #: broker cannot flood the log.
+        #: Failures to *construct or hand off* an event since start -- a bug
+        #: in classification, the window, or serialization, or a directly
+        #: attached forwarder that raises. The first logs at WARNING, the
+        #: rest at DEBUG. A broker outage is not counted here: the forwarder
+        #: manager absorbs its forwarders' errors by design, and broker-level
+        #: delivery failure is visible in the transport's own statistics and
+        #: its failed-forwarder retry loop instead.
         self.emit_failures = 0
         self._window = CoalescingWindow(config.coalesce_window_seconds)
         self._server_endpoint: Endpoint | None = None
@@ -511,7 +532,15 @@ class ConnectionTelemetryEmitter:
         """
         self._base_url = base_url
         if host and port:
-            self._server_endpoint = Endpoint(ip=host, port=port)
+            # OCSF types the endpoint's `ip` as an IP address; a configured
+            # server URL usually names a host instead, and a DNS name in an
+            # `ip` field is a schema violation a consumer may reject.
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                self._server_endpoint = Endpoint(hostname=host, port=port)
+            else:
+                self._server_endpoint = Endpoint(ip=host, port=port)
         else:
             self._server_endpoint = None
 

@@ -104,6 +104,18 @@ class TestClassify:
     def test_a_plain_connection_error_reports_fail(self):
         assert classify(Sep2ConnectionError("timeout")).activity_id is NetworkActivityId.FAIL
 
+    def test_a_server_disconnect_after_the_handshake_reports_reset(self):
+        """The connection opened and was torn down; Fail would say it never did."""
+        import aiohttp
+
+        exc = Sep2ConnectionError("gave up")
+        exc.__cause__ = OSError("Server disconnected")
+        exc.__cause__.__cause__ = aiohttp.ServerDisconnectedError()
+        assert classify(exc).activity_id is NetworkActivityId.RESET
+
+    def test_a_raw_connection_reset_reports_reset(self):
+        assert classify(ConnectionResetError()).activity_id is NetworkActivityId.RESET
+
     def test_a_rate_limit_is_an_exchange_failure_with_the_peers_code(self):
         outcome = classify(Sep2RateLimitError("slow down"))
         assert outcome.activity_id is NetworkActivityId.OPEN
@@ -141,8 +153,12 @@ class TestOutcomeBounds:
     def test_reason_text_is_clipped_at_the_boundary(self):
         """Clipped in the dataclass, so no caller can route around it."""
         outcome = Outcome(NetworkActivityId.FAIL, "x" * (MAX_STATUS_DETAIL_CHARS + 100))
-        assert len(outcome.detail) < MAX_STATUS_DETAIL_CHARS + 50
         assert "truncated" in outcome.detail
+
+    def test_the_cap_is_the_total_length_marker_included(self):
+        """The documented bound is what lands on the wire, not a prefix of it."""
+        outcome = Outcome(NetworkActivityId.FAIL, "x" * (MAX_STATUS_DETAIL_CHARS * 3))
+        assert len(outcome.detail) == MAX_STATUS_DETAIL_CHARS
 
     def test_short_reasons_pass_through_untouched(self):
         assert Outcome(NetworkActivityId.FAIL, "short").detail == "short"
@@ -290,6 +306,32 @@ class TestBuilders:
 # -- The emitter ------------------------------------------------------------------
 
 
+class TestServerEndpoint:
+    """OCSF types `ip` as an IP address; a DNS name is a different attribute."""
+
+    def test_an_ip_literal_lands_in_ip(self):
+        emitter, fw = make_emitter()
+        emitter.record_failure(Sep2TlsError("bad chain"))
+        assert fw.events[0].payload["dst_endpoint"] == {
+            "ip": "10.0.0.9",
+            "port": 8443,
+            "svc_name": "ieee2030.5",
+        }
+
+    def test_a_dns_name_lands_in_hostname_not_ip(self):
+        """A hostname in an `ip` field is a schema violation a consumer may reject."""
+        emitter, fw = make_emitter()
+        emitter.set_server("utility.example.com", 8443, base_url="https://utility.example.com:8443")
+        emitter.record_failure(Sep2TlsError("bad chain"))
+        dst = fw.events[0].payload["dst_endpoint"]
+        assert dst["hostname"] == "utility.example.com"
+        assert "ip" not in dst
+
+    def test_an_endpoint_naming_nothing_is_rejected(self):
+        with pytest.raises(ValueError):
+            Endpoint(port=443)
+
+
 class TestEmitter:
     def test_it_satisfies_the_clients_observer_seam(self):
         emitter, _ = make_emitter()
@@ -388,6 +430,12 @@ class TestConnectionTelemetryConfig:
     def test_a_negative_window_is_rejected(self):
         with pytest.raises(ValidationError):
             ConnectionTelemetryConfig(coalesce_window_seconds=-0.1)
+
+    def test_non_finite_windows_are_rejected(self):
+        """NaN and infinity pass a bare `< 0` check and crash at startup instead."""
+        for bad in (float("nan"), float("inf")):
+            with pytest.raises(ValidationError, match="finite"):
+                ConnectionTelemetryConfig(coalesce_window_seconds=bad)
 
     def test_surrounding_slashes_are_normalized(self):
         assert ConnectionTelemetryConfig(topic_suffix="/out/events/").topic_suffix == "out/events"
@@ -502,7 +550,8 @@ class TestCliWiring:
         emitter = client.http.connection_observer
         endpoint = emitter._server_endpoint
         assert endpoint is not None
-        assert (endpoint.ip, endpoint.port) == ("server.example.com", 8443)
+        # A DNS name is carried as `hostname`; `ip` is reserved for addresses.
+        assert (endpoint.hostname, endpoint.port) == ("server.example.com", 8443)
 
     def test_disabled_telemetry_attaches_nothing(self, tmp_path):
         from py20305.cli import build_client

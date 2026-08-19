@@ -108,6 +108,11 @@ class Protocol(StrEnum):
     #: any other spelling fails enum parsing and schema validation on the
     #: receiving side.
     GENERIC = "generic"
+    #: Deprecated alias for :attr:`GENERIC`, kept so source written against
+    #: 0.2.x keeps importing -- the *wire* spelling was always the member
+    #: value, so nothing serialized changes and ``from_string("other")``
+    #: still rejects the obsolete wire value.
+    OTHER = "generic"
 
     @classmethod
     def from_string(cls, value: str) -> Protocol:

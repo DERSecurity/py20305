@@ -183,6 +183,12 @@ def now_epoch_ms() -> int:
 class Endpoint:
     """An OCSF ``network_endpoint`` -- one end of a connection.
 
+    ``ip`` and ``hostname`` are distinct OCSF attributes with typed meanings:
+    ``ip`` must hold an IP address, and a DNS name goes in ``hostname``. A
+    configured server URL usually names a host, while an established socket
+    reports addresses, so either alone identifies an endpoint -- but at least
+    one must be present, or the endpoint identifies nothing.
+
     ``port`` may be ``None``: an application-layer client frequently cannot
     determine the ephemeral local port its socket was assigned, and an unknown
     port is reported as unknown rather than invented. (This is why the OCSF
@@ -190,12 +196,22 @@ class Endpoint:
     whose wire contract requires a port.)
     """
 
-    ip: str
+    ip: str | None = None
+    hostname: str | None = None
     port: int | None = None
 
+    def __post_init__(self) -> None:
+        """Reject an endpoint that names nothing."""
+        if self.ip is None and self.hostname is None:
+            raise ValueError("an endpoint needs an ip or a hostname")
+
     def to_dict(self) -> dict[str, Any]:
-        """Serialize; ``port`` is omitted when unknown."""
-        result: dict[str, Any] = {"ip": self.ip}
+        """Serialize; unset attributes are omitted."""
+        result: dict[str, Any] = {}
+        if self.ip is not None:
+            result["ip"] = self.ip
+        if self.hostname is not None:
+            result["hostname"] = self.hostname
         if self.port is not None:
             result["port"] = self.port
         return result

@@ -40,6 +40,12 @@ class TestProtocol:
     def test_generic_parses_from_its_wire_value(self) -> None:
         assert Protocol.from_string("generic") == Protocol.GENERIC
 
+    def test_other_remains_a_source_alias_of_generic(self) -> None:
+        """`Protocol` is re-exported, so 0.2.x source importing OTHER must keep
+        working -- while everything it emits carries the corrected wire value."""
+        assert Protocol.OTHER is Protocol.GENERIC
+        assert Protocol.OTHER.value == "generic"
+
     def test_the_old_catch_all_spelling_is_rejected(self) -> None:
         """ "other" is not in the vocabulary; parsing it silently would let a
         producer keep emitting a value consumers cannot classify."""

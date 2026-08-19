@@ -584,10 +584,13 @@ class Sep2Client:
     async def _retry_observed(self, do_fn: Callable[[], Awaitable[T]]) -> T:
         """Run one logical request through retry, reporting its outcome.
 
-        Every request method funnels through here so the connection observer
-        is applied in one place rather than repeated down each method's
-        except ladder. With no observer attached this is exactly
-        ``with_retry``.
+        Every request method that signals its outcome by raising funnels
+        through here, so the connection observer is applied in one place
+        rather than repeated down each method's except ladder. The raw probe
+        methods (``get_raw``, ``request_raw``) are deliberately outside: they
+        are operator-driven diagnostics that report their outcome in-band to
+        their caller, not protocol traffic to account for. With no observer
+        attached this is exactly ``with_retry``.
 
         Reporting is per logical request, not per retry attempt: the retry
         wrapper collapses exhausted transport attempts into one

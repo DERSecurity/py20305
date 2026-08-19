@@ -6,6 +6,7 @@ Each forwarder type is an optional typed field on ForwarderConfig.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -137,8 +138,11 @@ class ConnectionTelemetryConfig(_StrictForwarderModel):
     @field_validator("coalesce_window_seconds")
     @classmethod
     def validate_window(cls, v: float) -> float:
-        if v < 0:
-            raise ValueError("coalesce_window_seconds must not be negative")
+        # NaN and infinity satisfy `not < 0` and then blow up downstream when
+        # the window converts to integer milliseconds -- reject them here,
+        # where the operator sees a configuration error instead of a crash.
+        if not math.isfinite(v) or v < 0:
+            raise ValueError("coalesce_window_seconds must be a finite, non-negative number")
         return v
 
     @field_validator("topic_suffix")
