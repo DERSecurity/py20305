@@ -214,12 +214,13 @@ def derp_list_xml(poll_rate: int = 1) -> str:
     )
 
 
+# opModMaxLimW is PerCentControlType: hundredths of a percent, so 8000 is 80%.
 def derc_list_xml(
     *,
     mrid: str = "CC00000000000000000000000000000001",
     start_offset: int = -5,
     duration: int = 3600,
-    op_mod_max_lim_w: int = 80,
+    op_mod_max_lim_w: int = 8000,
 ) -> str:
     start = int(time.time()) + start_offset
     return (
@@ -240,7 +241,7 @@ def dderc_xml() -> str:
     return (
         f'<DefaultDERControl {NS} href="/derp/1/dderc">'
         "<mRID>DD00000000000000000000000000000001</mRID>"
-        "<DERControlBase><opModMaxLimW>100</opModMaxLimW></DERControlBase>"
+        "<DERControlBase><opModMaxLimW>10000</opModMaxLimW></DERControlBase>"
         "</DefaultDERControl>"
     )
 

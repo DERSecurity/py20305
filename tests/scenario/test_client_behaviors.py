@@ -132,8 +132,8 @@ async def test_full_lifecycle_applies_a_control_and_responds(scenario):
     for path in ("/dcap", "/tm", "/edev", "/edev/1/fsa", "/edev/1/fsa/1/derp", "/derp/1/derc"):
         assert path in walked, f"client never fetched {path}; walk was {walked}"
 
-    # opModMaxLimW=80 arrives at the connector as the 0.8 fraction.
-    assert scenario.connector.controls[0].get("p_lim_w") == pytest.approx(0.8)
+    # opModMaxLimW=8000 hundredths of a percent arrives as 80 percent.
+    assert scenario.connector.controls[0].get("p_lim_w") == pytest.approx(80.0)
 
     await _wait_for(lambda: scenario.server.requests_for("/rsps", "POST"))
     response_xml = scenario.server.requests_for("/rsps", "POST")[0].body
@@ -232,7 +232,7 @@ async def test_malformed_xml_is_skipped_not_fatal(scenario):
     # connector holds the default's 100%, never the unreadable control.
     assert client.http.server_alive
     applied = [c.get("p_lim_w") for c in scenario.connector.controls]
-    assert 0.8 not in applied, "an unparseable control must not dispatch"
+    assert 80.0 not in applied, "an unparseable control must not dispatch"
 
     from tests.scenario.support import SEP_XML, derc_list_xml
 
@@ -240,7 +240,7 @@ async def test_malformed_xml_is_skipped_not_fatal(scenario):
     await client.poll_now()
     await _wait_for(
         lambda: any(
-            c.get("p_lim_w") == pytest.approx(0.8) for c in scenario.connector.controls
+            c.get("p_lim_w") == pytest.approx(80.0) for c in scenario.connector.controls
         )
     )
 

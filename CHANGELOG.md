@@ -11,6 +11,13 @@ below says so explicitly.
   subscription manager and notification listener and wires them into the
   client. Off by default; enabling it requires `notification_external_host`,
   the address the server delivers notifications to.
+- A lightweight SunSpec 700-series Modbus TCP server for wire tests,
+  packing its register image with sunspec2's own model definitions
+  (Common, 701, 702, 704). The connector is exercised over a real
+  socket -- scan, scaled measurement reads, nameplate, control writes,
+  Modbus exceptions -- and one test closes the whole loop: an IEEE
+  2030.5 control arriving over mutual TLS ends as registers written
+  into the controls model, with the Response posted back.
 - Registration PINs from the runner: `registration_pins` maps a device
   LFDI to the PIN its Registration resource should carry, verified at
   discovery. Scenario coverage for the auto-registration flow: register
