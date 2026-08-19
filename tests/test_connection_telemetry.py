@@ -331,6 +331,17 @@ class TestServerEndpoint:
         with pytest.raises(ValueError):
             Endpoint(port=443)
 
+    def test_credentials_in_the_server_url_never_reach_the_wire(self):
+        """A user:password@ URL published to the broker is a credential leak."""
+        emitter, fw = make_emitter()
+        emitter.set_server(
+            "utility.example.com", 8443, base_url="https://user:hunter2@utility.example.com:8443"
+        )
+        emitter.record_failure(Sep2TlsError("bad chain"))
+        url = fw.events[0].payload["url"]["url_string"]
+        assert "hunter2" not in url and "user" not in url
+        assert url == "https://utility.example.com:8443"
+
 
 class TestEmitter:
     def test_it_satisfies_the_clients_observer_seam(self):

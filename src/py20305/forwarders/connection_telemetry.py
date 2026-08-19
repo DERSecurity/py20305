@@ -34,6 +34,7 @@ import ssl
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
@@ -91,6 +92,22 @@ _request_socket: ContextVar[SocketPair | None] = ContextVar("_request_socket", d
 # have scoped for connection metadata rather than payload content. Enough to
 # identify the failure, not enough to ship a response body through it.
 MAX_STATUS_DETAIL_CHARS = 512
+
+
+def _redact_url(url: str | None) -> str | None:
+    """Strip userinfo from a URL before it can reach the wire.
+
+    The configured server URL is serialized into every event's
+    ``url.url_string``. A URL of the ``https://user:password@host`` form would
+    publish those credentials to the broker -- an event topic is connection
+    metadata, never a place for secrets.
+    """
+    if url is None:
+        return None
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
 
 
 def _bounded(detail: str) -> str:
@@ -530,7 +547,7 @@ class ConnectionTelemetryEmitter:
         address the client was trying to reach is exactly what the failure
         record needs to name.
         """
-        self._base_url = base_url
+        self._base_url = _redact_url(base_url)
         if host and port:
             # OCSF types the endpoint's `ip` as an IP address; a configured
             # server URL usually names a host instead, and a DNS name in an

@@ -218,6 +218,35 @@ PAIR = SocketPair(
 )
 
 
+class TestReplacingTheObserverFlushesIt:
+    """A replaced observer's buffered attempts must not be silently lost."""
+
+    def _client(self) -> Sep2Client:
+        return Sep2Client("https://10.0.0.9:8443")
+
+    def test_replacing_an_observer_flushes_the_outgoing_one(self):
+        client = self._client()
+        old = RecordingObserver()
+        client.connection_observer = old
+        client.connection_observer = RecordingObserver()
+        assert ("flush", None) in old.calls
+
+    def test_detaching_an_observer_flushes_it(self):
+        client = self._client()
+        old = RecordingObserver()
+        client.connection_observer = old
+        client.connection_observer = None
+        assert ("flush", None) in old.calls
+
+    def test_reassigning_the_same_observer_does_not_flush(self):
+        """Idempotent assignment must not force windows closed early."""
+        client = self._client()
+        observer = RecordingObserver()
+        client.connection_observer = observer
+        client.connection_observer = observer
+        assert ("flush", None) not in observer.calls
+
+
 class TestDispatchConnect:
     def test_an_established_socket_reaches_the_observer(self):
         observer = RecordingObserver()

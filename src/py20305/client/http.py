@@ -236,7 +236,16 @@ class Sep2Client:
         client. The connector's socket callback binds late, so connections
         established by an already-open session still reach a newly attached
         observer.
+
+        The outgoing observer is flushed first: anything it has buffered --
+        an open success window, say -- would otherwise be unreachable when
+        ``close()`` later flushes only the current observer, and silently
+        losing recorded attempts is the one failure a connection log must
+        not have.
         """
+        outgoing = self._connection_observer
+        if outgoing is not None and outgoing is not value:
+            outgoing.flush()
         self._connection_observer = value
 
     def _dispatch_connect(self, pair: SocketPair) -> None:
