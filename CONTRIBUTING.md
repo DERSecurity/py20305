@@ -60,6 +60,17 @@ belongs in `docs/`, in the same pull request.
 **Type annotations on public API.** `mypy` runs with `disallow_untyped_defs` on
 `src/`. Tests are exempt.
 
+## How changes land
+
+Every change to `main` arrives through a pull request -- including the
+maintainers' own. Direct pushes, force pushes and branch deletion are blocked
+by a repository ruleset, with no bypass for anyone. A pull request merges when
+CI is green: lint, the test matrix, the package build and the container image.
+
+Releases follow the same road: a pull request bumps the version and dates the
+changelog entry, and once it merges, pushing the `vX.Y.Z` tag builds, checks
+and publishes the release.
+
 ## Conventions
 
 - Line length 100, enforced by `ruff`.

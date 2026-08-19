@@ -26,8 +26,8 @@ an LF Energy open-source project led by the SunSpec Alliance, DER Security,
 and industry consortium members.
 
 [![CI](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml/badge.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDERSecurity%2Fpy20305%2Fmain%2F.github%2Fbadges%2Ftests.json)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDERSecurity%2Fpy20305%2Fmain%2F.github%2Fbadges%2Fcoverage.json)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDERSecurity%2Fpy20305%2Fbadges%2F.github%2Fbadges%2Ftests.json)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDERSecurity%2Fpy20305%2Fbadges%2F.github%2Fbadges%2Fcoverage.json)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/py20305)](https://pypi.org/project/py20305/)
 [![Python](https://img.shields.io/pypi/pyversions/py20305)](https://pypi.org/project/py20305/)
 [![License](https://img.shields.io/github/license/DERSecurity/py20305)](https://github.com/DERSecurity/py20305/blob/main/LICENSE)
