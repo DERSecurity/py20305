@@ -395,6 +395,18 @@ class DerResourceManager:
                 exc_info=True,
             )
 
+    def stop_device(self, lfdi: str) -> None:
+        """Stop the DER resource PUTs for one device.
+
+        Drops the device's state, which is what the cycles read -- each becomes
+        a no-op immediately, and the scheduler's tasks are cleaned up by
+        ``shutdown``. Mirrors ``TelemetryManager.stop_metering``.
+
+        Args:
+            lfdi: Device LFDI.
+        """
+        self._devices.pop(lfdi.lower(), None)
+
     @property
     def active_devices(self) -> list[str]:
         """Return list of LFDIs with active DER resource cycles."""

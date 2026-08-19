@@ -44,7 +44,7 @@ from py20305.version_info import get_version_string
 if TYPE_CHECKING:
     from py20305.config import LoggingConfig
     from py20305.forwarders import ForwarderConfig, ForwarderManager
-    from py20305.telemetry.manager import TelemetryManager
+    from py20305.telemetry.coordinator import TelemetryCoordinator
 
 logger = logging.getLogger("py20305.cli")
 
@@ -454,7 +454,11 @@ async def run(config: ClientConfig) -> int:
     # early would leak it -- along with the connector any device configuration
     # had already constructed.
     api_task: asyncio.Task[None] | None = None
-    telemetry: TelemetryManager | None = None
+    telemetry: TelemetryCoordinator | None = None
+    # Filled in by _serve_api. A dict rather than a return value so patching
+    # that function in a test keeps working, and so the service can be reached
+    # again once the managers it reports on exist.
+    api_service: dict[str, Any] = {}
     # Started before the connect attempt, so the exchanges of a connection that
     # never succeeds are forwarded too -- those are the ones worth having.
     forwarder = client.http.forwarder
@@ -475,7 +479,7 @@ async def run(config: ClientConfig) -> int:
         # outage is reporting that there is one -- and /reconnect exists to cut
         # the backoff short. Starting it only once connected means neither
         # works in the situation they were built for.
-        api_task = await _serve_api(config, client, connection, reconnect)
+        api_task = await _serve_api(config, client, connection, reconnect, api_service)
         if config.api.enabled and api_task is None:
             return EXIT_CONFIG_ERROR
 
@@ -529,7 +533,12 @@ async def run(config: ClientConfig) -> int:
         # all in the runner: without a metering cycle nothing calls the
         # connector's fetch_monitoring, so southbound telemetry would report
         # control writes and never the readings its documentation promises.
-        telemetry = _start_metering(client, config)
+        telemetry = _start_telemetry(client, config)
+        # The API is up before discovery, so it was built without the managers
+        # that only exist afterwards. Without this its telemetry endpoints
+        # report "not initialized" for a runner that is posting readings.
+        if telemetry is not None and (service := api_service.get("service")) is not None:
+            service.attach_telemetry(telemetry.telemetry, telemetry.der_resources)
 
         run_task: asyncio.Task[None] = asyncio.create_task(client.run(), name="csip-client")
         stop_task: asyncio.Task[bool] = asyncio.create_task(stop.wait(), name="stop-signal")
@@ -610,15 +619,19 @@ def _connector_resolver(dispatcher: ConnectorDispatcher) -> Callable[[str], Any]
     return resolve
 
 
-def _start_metering(
+def _start_telemetry(
     client: CsipClient,
     config: ClientConfig,
-) -> TelemetryManager | None:
-    """Begin reading each configured device and posting its readings.
+) -> TelemetryCoordinator | None:
+    """Begin reporting each configured device to the server.
 
-    Returns None when telemetry is off, or when the server exposed no
-    MirrorUsagePointList to post to -- there is nowhere to send readings in
-    that case, and saying so once is more use than a cycle that fails forever.
+    Both halves start together: readings mirrored as MirrorUsagePoints, and the
+    DER resources PUT per device. A server exposing no MirrorUsagePointList
+    stops the first only, which the coordinator says once rather than failing a
+    cycle forever.
+
+    Returns None when telemetry is off or no device is configured, because
+    there is nothing to read in either case.
     """
     if not config.telemetry.enabled or not config.devices:
         return None
@@ -631,34 +644,37 @@ def _start_metering(
         logger.warning("telemetry is enabled but this client has no connector registry")
         return None
 
-    mup_list_href = client.state.mup_list_href
-    if not mup_list_href:
-        logger.warning(
-            "telemetry is enabled but the server exposed no MirrorUsagePointList; "
-            "no readings will be posted"
-        )
-        return None
+    from py20305.telemetry import TelemetryCoordinator
 
-    from py20305.telemetry.manager import TelemetryManager
-
-    manager = TelemetryManager(
-        client=client.http,
-        # Read live: an upstream restart makes the client rediscover, and the
-        # MirrorUsagePointList can move. `or mup_list_href` keeps posting to
-        # the last known path across the window where state is cleared and
-        # rediscovery has not yet repopulated it.
-        mup_list_href=lambda: client.state.mup_list_href or mup_list_href,
+    coordinator = TelemetryCoordinator(
+        client,
+        lfdis=[device.lfdi for device in config.devices],
         connector_resolver=_connector_resolver(dispatcher),
+        post_rate_seconds=config.telemetry.post_rate_seconds,
+        der_capability_poll_rate_seconds=config.telemetry.der_capability_poll_rate_seconds,
+        der_settings_poll_rate_seconds=config.telemetry.der_settings_poll_rate_seconds,
         device_telemetry=dispatcher.telemetry,
     )
-    for device in config.devices:
-        manager.start_metering(device.lfdi, config.telemetry.post_rate_seconds)
+    coordinator.setup()
+    coordinator.start_device_telemetry()
+
+    # Attached after construction, not passed to the client's constructor: the
+    # coordinator reads the discovered state this function runs after, so it
+    # cannot exist before the client does. Looked up on each call rather than
+    # bound once, so replacing the method on the coordinator is honored.
+    async def on_structural_change() -> None:
+        await coordinator.restart_device_telemetry()
+
+    client.set_on_structural_change(on_structural_change)
     logger.info(
-        "posting readings for %d device(s) every %ds",
+        "reporting %d device(s): readings and DERStatus every %ds, "
+        "DERSettings every %ds, DERCapability every %ds",
         len(config.devices),
         config.telemetry.post_rate_seconds,
+        config.telemetry.der_settings_poll_rate_seconds,
+        config.telemetry.der_capability_poll_rate_seconds,
     )
-    return manager
+    return coordinator
 
 
 async def _retry_forwarders(
@@ -693,6 +709,7 @@ async def _serve_api(
     client: CsipClient,
     connection: ConnectionState,
     reconnect: asyncio.Event,
+    service_holder: dict[str, Any] | None = None,
 ) -> asyncio.Task[None] | None:
     """Start the management API when configured.
 
@@ -719,6 +736,8 @@ async def _serve_api(
     # leave every endpoint reporting "not_connected" for the lifetime of the
     # process, which looks like a broken client rather than a broken wiring.
     service = ClientAPIService(client=client)
+    if service_holder is not None:
+        service_holder["service"] = service
     app = create_app(lambda: service)
     pem = config.tls.client_cert.read_text()
     app.state.lfdi = compute_lfdi(pem)

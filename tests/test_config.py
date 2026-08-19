@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from py20305.config import ClientConfig, ConfigError, load_config
 
@@ -201,3 +202,26 @@ class TestDefaultsThatAreSecurityDecisions:
 
     def test_no_extra_ciphers_by_default(self) -> None:
         assert ClientConfig.model_validate(MINIMAL).tls.additional_ciphers == ()
+
+
+class TestTelemetryDefaults:
+    """What a configuration file that says nothing about telemetry gets."""
+
+    def test_reporting_is_on(self) -> None:
+        """A registered client that then says nothing looks failed to a server."""
+        assert ClientConfig.model_validate(MINIMAL).telemetry.enabled is True
+
+    def test_the_der_resource_rates(self) -> None:
+        telemetry = ClientConfig.model_validate(MINIMAL).telemetry
+        assert telemetry.post_rate_seconds == 300
+        assert telemetry.der_capability_poll_rate_seconds == 86400
+        assert telemetry.der_settings_poll_rate_seconds == 60
+
+    @pytest.mark.parametrize(
+        "field",
+        ["post_rate_seconds", "der_capability_poll_rate_seconds", "der_settings_poll_rate_seconds"],
+    )
+    def test_a_rate_of_zero_is_rejected(self, field: str) -> None:
+        """Zero would schedule a cycle that never waits."""
+        with pytest.raises(ValidationError):
+            ClientConfig.model_validate({**MINIMAL, "telemetry": {field: 0}})

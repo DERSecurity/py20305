@@ -171,21 +171,41 @@ class SubscriptionConfig(_Strict):
 
 
 class TelemetryConfig(_Strict):
-    """Posting measurements back to the server.
+    """Reporting each device's measurements and state back to the server.
 
-    Off by default. Turning it on makes the client read its devices on a
-    schedule and mirror the readings upstream, which is a conversation with
-    the utility that an operator should choose rather than inherit.
+    On by default: a utility program expects the devices in it to report, and a
+    client that registers and then says nothing looks to the server like one
+    that has failed. Set ``enabled: false`` for a deployment that should
+    observe and dispatch without reporting.
+
+    One switch covers both halves, because they are one conversation with the
+    utility: readings mirrored as MirrorUsagePoints, and the DER resources
+    (DERCapability, DERSettings, DERStatus, DERAvailability) PUT for each
+    device. A server exposing no MirrorUsagePointList disables the readings
+    only -- it still expects the DER resources.
     """
 
     enabled: bool = Field(
-        default=False,
-        description="Read each configured device on a schedule and post the readings",
+        default=True,
+        description="Read each configured device on a schedule and report it to the server",
     )
     post_rate_seconds: int = Field(
         default=300,
         gt=0,
-        description="How often each device is read and its readings posted",
+        description=(
+            "How often each device is read, its readings posted and its DERStatus PUT. "
+            "The server's EndDevice.postRate takes precedence when it specifies one."
+        ),
+    )
+    der_capability_poll_rate_seconds: int = Field(
+        default=86400,
+        gt=0,
+        description="How often DERCapability is PUT. Nameplate data, so a day by default.",
+    )
+    der_settings_poll_rate_seconds: int = Field(
+        default=60,
+        gt=0,
+        description="How often DERSettings is PUT, when it has changed",
     )
 
 

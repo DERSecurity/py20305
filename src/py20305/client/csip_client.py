@@ -249,6 +249,18 @@ class CsipClient:
             self._notification_server = notification_server
             notification_server.on_notification = self._handle_notification
 
+    def set_on_structural_change(
+        self, callback: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        """Set the structural-change callback after construction.
+
+        The same construction-order problem as ``attach_subscriptions``, one
+        step later: telemetry is started once discovery has produced the hrefs
+        it posts to, so what wants to hear about a later structural change does
+        not exist when this client is built.
+        """
+        self._on_structural_change = callback
+
     @property
     def http(self) -> Sep2Client:
         return self._http

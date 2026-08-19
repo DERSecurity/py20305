@@ -2,6 +2,8 @@
 
 Posting measurements and DER resources back to the server.
 
+::: py20305.telemetry.coordinator
+
 ::: py20305.telemetry.manager
 
 ::: py20305.telemetry.mup

@@ -970,10 +970,12 @@ class TestRunnerReadsDevices:
 
     @pytest.mark.asyncio
     async def test_metering_starts_when_telemetry_is_enabled(self, tmp_path):
-        from py20305.cli import _start_metering
+        from py20305.cli import _start_telemetry
 
         client, config = self._client_and_config(tmp_path, telemetry=True)
-        manager = _start_metering(client, config)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None
+        manager = coordinator.telemetry
 
         assert manager is not None
         # Not just "a manager exists" -- every configured device has to be
@@ -985,10 +987,12 @@ class TestRunnerReadsDevices:
     @pytest.mark.asyncio
     async def test_it_reports_reads_through_the_same_emitter_as_writes(self, tmp_path):
         """Both halves of a device's traffic land on one channel."""
-        from py20305.cli import _start_metering
+        from py20305.cli import _start_telemetry
 
         client, config = self._client_and_config(tmp_path, telemetry=True)
-        manager = _start_metering(client, config)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None
+        manager = coordinator.telemetry
 
         assert manager is not None
         assert manager._source._telemetry is client.dispatcher.telemetry
@@ -1009,24 +1013,34 @@ class TestRunnerReadsDevices:
         # The same registry hands back the same instance, which is the point.
         assert await resolve(LFDI_A) is connector
 
-    def test_no_metering_when_telemetry_is_off(self, tmp_path):
-        from py20305.cli import _start_metering
+    def test_nothing_starts_when_telemetry_is_off(self, tmp_path):
+        from py20305.cli import _start_telemetry
 
         client, config = self._client_and_config(tmp_path, telemetry=False)
-        assert _start_metering(client, config) is None
+        assert _start_telemetry(client, config) is None
 
-    def test_no_metering_and_a_warning_when_the_server_offers_nowhere_to_post(
+    @pytest.mark.asyncio
+    async def test_no_metering_and_a_warning_when_the_server_offers_nowhere_to_post(
         self, tmp_path, caplog
     ):
-        """A cycle that fails forever is worse than saying so once."""
-        from py20305.cli import _start_metering
+        """A cycle that fails forever is worse than saying so once.
+
+        The DER resource PUTs are a separate conversation and still start; only
+        the readings have nowhere to go.
+        """
+        from py20305.cli import _start_telemetry
 
         client, config = self._client_and_config(tmp_path, telemetry=True, mup=None)
-        with caplog.at_level("WARNING", logger="py20305.cli"):
-            manager = _start_metering(client, config)
+        with caplog.at_level("WARNING", logger="py20305.telemetry.coordinator"):
+            coordinator = _start_telemetry(client, config)
 
-        assert manager is None
-        assert any("MirrorUsagePointList" in r.message for r in caplog.records)
+        assert coordinator is not None
+        try:
+            assert coordinator.telemetry is None
+            assert coordinator.der_resources is not None
+            assert any("MirrorUsagePointList" in r.message for r in caplog.records)
+        finally:
+            await coordinator.shutdown()
 
 
 class TestMeteringSurvivesRediscovery:
@@ -1034,10 +1048,12 @@ class TestMeteringSurvivesRediscovery:
 
     @pytest.mark.asyncio
     async def test_a_moved_mup_list_is_picked_up(self, tmp_path):
-        from py20305.cli import _start_metering
+        from py20305.cli import _start_telemetry
 
         client, config = TestRunnerReadsDevices._client_and_config(tmp_path, telemetry=True)
-        manager = _start_metering(client, config)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None
+        manager = coordinator.telemetry
         assert manager is not None
         try:
             assert manager._mup_list_href_source() == "/mup"
@@ -1045,34 +1061,37 @@ class TestMeteringSurvivesRediscovery:
             client.state.mup_list_href = "/api/v2/mup"
             assert manager._mup_list_href_source() == "/api/v2/mup"
         finally:
-            await manager.shutdown()
+            await coordinator.shutdown()
 
     @pytest.mark.asyncio
     async def test_a_cleared_path_falls_back_to_the_last_known_one(self, tmp_path):
         """Rediscovery clears state before repopulating it; posting must not break."""
-        from py20305.cli import _start_metering
+        from py20305.cli import _start_telemetry
 
         client, config = TestRunnerReadsDevices._client_and_config(tmp_path, telemetry=True)
-        manager = _start_metering(client, config)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None
+        manager = coordinator.telemetry
         assert manager is not None
         try:
             client.state.mup_list_href = None
             assert manager._mup_list_href_source() == "/mup"
         finally:
-            await manager.shutdown()
+            await coordinator.shutdown()
 
     @pytest.mark.asyncio
     async def test_shutdown_cancels_the_scheduler(self, tmp_path):
         """stop_metering drops device state and leaves the poll tasks running."""
-        from py20305.cli import _start_metering
+        from py20305.cli import _start_telemetry
 
         client, config = TestRunnerReadsDevices._client_and_config(tmp_path, telemetry=True)
-        manager = _start_metering(client, config)
-        assert manager is not None
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None
 
-        await manager.shutdown()
+        await coordinator.shutdown()
 
-        assert not manager._scheduler._tasks
+        assert not coordinator.telemetry._scheduler._tasks
+        assert not coordinator.der_resources._scheduler._tasks
 
 
 class TestRunnerStopsMetering:
@@ -1098,7 +1117,7 @@ class TestRunnerStopsMetering:
         config = TestRunnerWiring._config(tmp_path, None)
         with (
             patch.object(cli_module, "build_client", return_value=(client, LFDI_A)),
-            patch.object(cli_module, "_start_metering", return_value=manager),
+            patch.object(cli_module, "_start_telemetry", return_value=manager),
             patch.object(cli_module, "_register_if_needed", new=AsyncMock()),
             patch.object(cli_module, "_install_signal_handlers"),
         ):

@@ -102,13 +102,19 @@ connection:
 #   notification_external_host: my-hostname.example.com
 #   notification_port: 10443
 
-# Read each configured device on a schedule and post the readings upstream.
-# Also what makes southbound read telemetry observable -- nothing else drives
-# a device read.
+# Read each configured device on a schedule and report it upstream: readings
+# mirrored as MirrorUsagePoints, and DERCapability, DERSettings, DERStatus and
+# DERAvailability PUT for the device. Also what makes southbound read telemetry
+# observable -- nothing else drives a device read.
+#
+# On by default. The rates below are the defaults; the server's
+# EndDevice.postRate overrides post_rate_seconds when it specifies one.
 #
 # telemetry:
 #   enabled: true
 #   post_rate_seconds: 300
+#   der_capability_poll_rate_seconds: 86400
+#   der_settings_poll_rate_seconds: 60
 
 # forwarders:
 #   mqtt:
