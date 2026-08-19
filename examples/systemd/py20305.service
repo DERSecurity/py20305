@@ -1,0 +1,56 @@
+[Unit]
+Description=IEEE 2030.5 / CSIP client
+Documentation=https://github.com/DERSecurity/py20305
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/py20305/venv/bin/py20305 --config /etc/py20305/client.yaml
+
+# Exit 2 means the configuration is wrong, and no amount of restarting fixes
+# that. Exit 3 means the server could not be reached, which is worth retrying.
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=2
+
+User=py20305
+Group=py20305
+
+# The client opens outbound connections and reads its configuration. It writes
+# nothing outside its log directory and needs no privilege, so take the rest
+# away. Drop any line here that a local deployment actually needs rather than
+# working around it elsewhere.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+# A SunSpec device on a serial port needs its tty, which PrivateDevices hides.
+# Reach one by removing PrivateDevices above and naming the port:
+#   DeviceAllow=/dev/ttyUSB0 rw
+# DeviceAllow lifts systemd's own device policy and nothing else. The port
+# keeps its Unix ownership -- /dev/ttyUSB0 is typically root:dialout mode
+# 0660 -- so the service account needs that group as well:
+#   SupplementaryGroups=dialout
+# Check the group on the actual port: `stat -c '%G' /dev/ttyUSB0`. A device
+# reached over Modbus TCP needs none of these lines.
+
+# Creates and owns /var/log/py20305, the only writable path this unit gets.
+# Needed only when the configuration sets logging.file; logs go to the journal
+# either way.
+LogsDirectory=py20305
+
+[Install]
+WantedBy=multi-user.target

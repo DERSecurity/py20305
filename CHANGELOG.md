@@ -1,0 +1,105 @@
+# Changelog
+
+Notable changes to this project, newest first. Versions follow
+[semantic versioning](https://semver.org/spec/v2.0.0.html): while the major
+version is `0`, a minor bump may carry a breaking change and the release note
+below says so explicitly.
+
+## [0.1.0] — unreleased
+
+First release.
+
+### Protocol client
+
+- IEEE 2030.5 discovery from a DeviceCapability document, through
+  EndDevice, FunctionSetAssignments, DERProgram and DERControl.
+- Mutual-TLS transport with retry and exponential backoff, redirect probing,
+  and a connection heartbeat.
+- In-band EndDevice registration for the client's own certificate identity,
+  performed only when the server does not already have that device, so a
+  restart cannot create a duplicate.
+- Server timebase: time-sensitive behavior follows the server's `Time`
+  resource, and the host clock is never modified.
+- LFDI and SFDI derivation from a client certificate.
+
+### Event engine
+
+- DERControl scheduling as a five-state machine, with supersession across
+  overlapping programs and across DERControl and DefaultDERControl.
+- Randomized start and duration per the standard's randomization fields.
+- `Response` acknowledgments at each state transition, gated on what the
+  server asked to be told about.
+- Communication-loss detection over a configurable silence window, which gates
+  control application while upstream contact is lost and, on recovery, resumes
+  at the schedule that follows the outage rather than replaying it.
+- Pricing: TariffProfile and TimeTariffInterval, off by default.
+
+### Telemetry
+
+- DERStatus, DERCapability, DERSettings and DERAvailability posting.
+- Metered readings published as MirrorUsagePoints, with scaling and quality
+  flags applied per reading type.
+- LogEvent posting.
+
+### Connectors
+
+- SunSpec Modbus over TCP, RTU and TLS.
+- A print connector that needs no hardware, for exercising the full discovery,
+  event and telemetry path before a device is wired up.
+- Custom connectors by subclass or by factory, resolved from configuration.
+- Control-mode translation between the standard's vocabulary and device
+  points.
+
+### Subscriptions
+
+- Subscribe/notify as an alternative to polling, with a notification listener,
+  renewal ahead of server-side expiry, and reconciliation against the server's
+  subscription list.
+- An active subscription suppresses the corresponding poll, with a slow
+  heartbeat poll retained as a safety net for missed notifications.
+
+### Runner
+
+- A `py20305` command driven by one YAML or JSON configuration file.
+- `--check` validates the configuration, resolves the certificate and prints
+  the LFDI without connecting.
+- Connection retry while the server is unreachable, and ordered shutdown on
+  `SIGINT` or `SIGTERM`.
+- Exit codes distinguish a configuration error from a runtime failure, so a
+  supervisor can decline to restart on the former.
+
+### Optional surfaces
+
+- Telemetry posting from the runner, off by default: each configured device is
+  read on a schedule and its readings mirrored upstream. This is also what
+  makes southbound read telemetry observable from the packaged command, since
+  nothing else drives a device read.
+
+- An HTTP management API for observing and nudging a running client, mountable
+  into a host application's own app. Requires the `api` extra.
+- MQTT forwarding of captured protocol exchanges. Requires the `mqtt` extra.
+- Southbound device telemetry, off by default: the Modbus reads and control
+  writes between this client and its device, reported on the same channel and
+  in the same envelope as the 2030.5 traffic, distinguished by `protocol`.
+  Rejected writes are reported with their error; failed and empty reads are
+  not reported at all.
+
+### Standards
+
+- IEEE 2030.5-2018 and IEEE 2030.5-2023. Both schemas ship with the package
+  and validation runs against them; generated bindings track 2023, and a
+  compatibility flag adjusts behavior for servers still on 2018.
+- CSIP-AUS, including dynamic operating envelope limits.
+
+### Container
+
+- A `Dockerfile` building an image that carries the client alone: the wheel is
+  built in one stage and installed in another, so no build backend or source
+  tree reaches the runtime. Runs as a non-root user with a fixed uid, takes its
+  configuration from a mounted directory, and receives `SIGTERM` directly so it
+  shuts down in order rather than being killed. A compose example is in
+  `examples/`.
+
+### Supported Python
+
+- 3.11, 3.12 and 3.13, on Linux, macOS and Windows.

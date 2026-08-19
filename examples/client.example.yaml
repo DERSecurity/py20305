@@ -1,0 +1,116 @@
+# A production client configuration.
+#
+# Paths are resolved relative to this file, so the deployment can be moved
+# without rewriting them.
+#
+# Validate it without connecting:
+#     py20305 --config client.yaml --check
+#
+# A log file needs a writable directory. The shipped systemd unit creates
+# /var/log/py20305 via LogsDirectory and makes nothing else writable, so a
+# path outside it fails to open and the client exits. The journal and
+# `docker logs` collect stderr either way.
+
+server:
+  url: https://server.example.com:8443
+
+  # Standard servers publish DeviceCapability at /dcap. Override only if told to.
+  # dcap_path: /dcap
+
+  # Set for a server implementing IEEE 2030.5-2018 rather than 2023.
+  # server_2018_compat: false
+
+  # Poll once immediately after connecting rather than waiting for the first
+  # scheduled cycle.
+  # poll_now_on_start: true
+
+  # Follow the server's Time resource for scheduling rather than the local
+  # clock. The local clock is never modified either way.
+  # use_server_time: true
+
+tls:
+  # The LFDI derived from this certificate is what the utility registers.
+  # `--check` prints it.
+  client_cert: certs/client.pem
+  client_key: certs/client.key
+  ca_cert: certs/ca.pem
+
+  # Leave on unless the server is reached by an address its certificate does
+  # not name. Turning it off accepts a certificate issued for any other host
+  # that chains to the same CA.
+  # check_hostname: true
+
+  # IEEE 2030.5 mandates ECDSA-only suites. A peer fronted by enterprise PKI
+  # may present an RSA certificate and need one added. Each entry must name
+  # exactly one TLS 1.2 suite.
+  # additional_ciphers:
+  #   - ECDHE-RSA-AES256-GCM-SHA384
+
+devices:
+  # A SunSpec Modbus device over TCP.
+  - type: sunspec
+    lfdi: "0000000000000000000000000000000000000000"
+    host: 192.168.1.50
+    port: 502
+    unit_id: 1
+
+  # Needs no hardware: logs the controls it would have applied. Useful for
+  # bringing up a server connection before an inverter is wired in.
+  # - type: print_demo
+  #   lfdi: "1111111111111111111111111111111111111111"
+
+logging:
+  level: INFO
+  # file: /var/log/py20305/client.log
+
+# Unauthenticated: bound to loopback unless you have a reason otherwise.
+api:
+  enabled: false
+  host: 127.0.0.1
+  port: 8080
+
+# A client on a gateway outlives the server's outages, so it retries the
+# initial connection indefinitely by default.
+connection:
+  retry_forever: true
+  initial_delay_seconds: 5
+  max_delay_seconds: 300
+
+  # Multiplier applied to the delay after each failed attempt, up to
+  # max_delay_seconds.
+  # backoff_factor: 2.0
+
+  # Give up after this many attempts instead of retrying forever. 0 means
+  # never give up, and is only meaningful with retry_forever: true.
+  # max_attempts: 0
+
+# Register an EndDevice for this client's certificate identity if the server
+# does not already have one. Registering when it does would create a duplicate,
+# so this is safe to leave on across restarts.
+# register_on_start: true
+
+# Publish captured traffic to a monitoring system. Omit the whole section and
+# the client forwards nothing and never opens a broker connection.
+#
+# Read each configured device on a schedule and post the readings upstream.
+# Also what makes southbound read telemetry observable -- nothing else drives
+# a device read.
+#
+# telemetry:
+#   enabled: true
+#   post_rate_seconds: 300
+
+# forwarders:
+#   mqtt:
+#     endpoint: broker.example.com
+#     port: 8883
+#     topic_base: py20305
+#     # All three, or none for a plain broker. Relative paths resolve against
+#     # this file, the same as the client certificate above.
+#     ca_path: broker-ca.pem
+#     cert_path: broker.pem
+#     key_path: broker.key
+#   # The Modbus reads and writes between this client and its device, reported
+#   # in the same envelope as the 2030.5 traffic. Off unless asked for.
+#   device_telemetry:
+#     enabled: true

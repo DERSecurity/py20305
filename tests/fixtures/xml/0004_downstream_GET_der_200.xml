@@ -1,0 +1,1 @@
+<DERList xmlns="urn:ieee:std:2030.5:ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" schemaVer="2.2" href="/der" all="1" results="1" pollRate="60"><DER href="/der/1"><DERAvailabilityLink href="/der/1/dera" /><DERCapabilityLink href="/der/1/dercap" /><DERSettingsLink href="/der/1/derg" /><DERStatusLink href="/der/1/ders" /></DER></DERList>

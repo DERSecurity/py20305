@@ -1,0 +1,164 @@
+SunSpec Points Used by ConnectorSunSpec
+=======================================
+Generated from: src/py20305/connectors/sunspec.py
+
+
+MODEL 701 — DER AC Measurements (Inverter)
+-------------------------------------------
+Read points (fetch_monitoring, fetch_status):
+  W               Active power (Watts)
+  Var             Reactive power (Var)
+  Hz              Frequency (Hz)
+  LLV             Line-to-line voltage (V)
+  PF              Power factor
+  VA              Apparent power (VA)
+  A               Current (A)
+  ConnSt          Connection status
+  InvSt           Inverter status
+  St              Operating state
+  Alrm            Alarm status
+
+
+MODEL 702 — DER Nameplate / Capability / Configuration
+------------------------------------------------------
+Read points (fetch_nameplate, fetch_configuration):
+
+  Scale factors:
+    W_SF            Watts scale factor
+    VA_SF           Volt-amps scale factor
+    Var_SF          Var scale factor
+    PF_SF           Power factor scale factor
+    V_SF            Voltage scale factor
+    S_SF            Susceptance scale factor
+
+  Nameplate ratings (fetch_nameplate):
+    WMaxRtg         Max active power rating (W)
+    WOvrExtRtg      Over-excited max active power rating (W)
+    WOvrExtRtgPF    Over-excited rating power factor
+    WUndExtRtg      Under-excited max active power rating (W)
+    WUndExtRtgPF    Under-excited rating power factor
+    VAMaxRtg        Max apparent power rating (VA)
+    VarMaxInjRtg    Max reactive power injection rating (Var)
+    VarMaxAbsRtg    Max reactive power absorption rating (Var)
+    WChaRteMaxRtg   Max charge rate rating (W)
+    VAChaRteMaxRtg  Max charge rate rating (VA)
+    VNomRtg         Nominal voltage rating (V)
+    VMaxRtg         Max voltage rating (V)
+    VMinRtg         Min voltage rating (V)
+    ReactSusceptRtg Reactive susceptance rating
+    NorOpCatRtg     Normal operating category
+    AbnOpCatRtg     Abnormal operating category
+    CtrlModes       Supported control modes (bitmask)
+
+  Configured settings (fetch_configuration):
+    WMax            Max active power setting (W)
+    WMaxOvrExt      Over-excited max active power (W)
+    WOvrExtPF       Over-excited power factor
+    WMaxUndExt      Under-excited max active power (W)
+    WUndExtPF       Under-excited power factor
+    VAMax           Max apparent power (VA)
+    VarMaxInj       Max reactive power injection (Var)
+    VarMaxAbs       Max reactive power absorption (Var)
+    WChaRteMax      Max charge rate (W)
+    VAChaRteMax     Max charge rate (VA)
+    VNom            Nominal voltage (V)
+    VMax            Max voltage (V)
+    VMin            Min voltage (V)
+    CtrlModes       Control modes (bitmask)
+
+
+MODEL 704 — DER Controls
+-------------------------
+Read/Write points:
+
+  Active power limit:
+    WMaxLimPctEna   Enable limit max active power (R/W)
+    WMaxLimPct      Limit max active power (% WMax) (R/W)
+
+  Fixed active power (WSet):
+    WSetEna         Enable fixed active power (R/W)
+    WSetMod         Active power mode (0=%WMax, 1=Watts) (R/W)
+    WSetPct         Active power setpoint (%) (R/W)
+
+  Constant reactive power (VarSet):
+    VarSetEna       Enable constant reactive power (R/W)
+    VarSetPct       Reactive power setpoint (%) (R/W)
+    VarSetMod       Reactive power mode (R/W)
+    VarSetPri       Priority (1=reactive) (R/W)
+
+  Constant power factor:
+    PFWInjEna       Enable PF when injecting (R/W)
+    PFWInj.PF       Power factor value (injection) (R/W)
+    PFWInj.Ext      Excitation (injection) (R/W)
+    PFWAbsEna       Enable PF when absorbing (R/W)
+    PFWAbs.PF       Power factor value (absorption) (R/W)
+    PFWAbs.Ext      Excitation (absorption) (R/W)
+
+
+MODEL 705 — Volt-Var (Q(V)) Curve
+----------------------------------
+Read/Write points:
+    Ena             Enable volt-var function (R/W)
+    Crv[1].ActPt    Number of active curve points (R/W)
+    Crv[1].DeptRef  Dependent reference (3=% VA Max) (R/W)
+    Crv[1].Pri      Priority (1=reactive) (R/W)
+    Crv[1].VRef     Voltage reference (R/W)
+    Crv[1].VRefAutoEna  Auto VRef enable (R/W)
+    Crv[1].VRefAutoTms  Auto VRef time (R/W)
+    Crv[1].RspTms   Response time / OLRT (R/W)
+    Crv[1].Pt[i].V  Voltage point (R/W)
+    Crv[1].Pt[i].Var  Reactive power point (R/W)
+    AdptCrvReq      Adopt curve request (W)
+    AdptCrvRslt     Adopt curve result (R)
+
+
+MODEL 706 — Volt-Watt (P(V)) Curve
+-----------------------------------
+Read/Write points:
+    Ena             Enable volt-watt function (R/W)
+    Crv[1].ActPt    Number of active curve points (R/W)
+    Crv[1].DeptRef  Dependent reference (0=% W Max) (R/W)
+    Crv[1].RspTms   Response time / OLRT (R/W)
+    Crv[1].Pt[i].V  Voltage point (R/W)
+    Crv[1].Pt[i].W  Active power point (R/W)
+    AdptCrvReq      Adopt curve request (W)
+    AdptCrvRslt     Adopt curve result (R)
+
+
+MODEL 711 — Frequency Droop (Freq-Watt)
+----------------------------------------
+Read/Write points:
+    Ena             Enable frequency droop (R/W)
+    Ctl[1].RspTms   Response time / OLRT (R/W)
+    Ctl[1].DbOf     Over-frequency deadband (R/W)
+    Ctl[1].DbUf     Under-frequency deadband (R/W)
+    Ctl[1].KOf      Over-frequency droop coefficient (R/W)
+    Ctl[1].KUf      Under-frequency droop coefficient (R/W)
+    Ctl[1].PMin     Minimum power (R/W)
+    AdptCtlReq      Adopt control request (W)
+    AdptCtlRslt     Adopt control result (R)
+
+
+MODEL 712 — Watt-Var (Q(P)) Curve
+----------------------------------
+Read/Write points:
+    Ena             Enable watt-var function (R/W)
+    Crv[1].ActPt    Number of active curve points (R/W)
+    Crv[1].DeptRef  Dependent reference (3=% VA Max) (R/W)
+    Crv[1].Pt[i].W  Active power point (R/W)
+    Crv[1].Pt[i].Var  Reactive power point (R/W)
+    AdptCrvReq      Adopt curve request (W)
+    AdptCrvRslt     Adopt curve result (R)
+
+
+SUMMARY BY MODEL
+=================
+  Model 701:  11 read points (monitoring + status)
+  Model 702:  30 read points (nameplate + configuration, incl. scale factors)
+  Model 704:  12 read/write points (DER controls)
+  Model 705:  12 read/write points (volt-var curves)
+  Model 706:   8 read/write points (volt-watt curves)
+  Model 711:   8 read/write points (frequency droop)
+  Model 712:   8 read/write points (watt-var curves)
+  -------
+  Total:      89 unique SunSpec points across 7 models

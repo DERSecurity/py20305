@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DERStatus xmlns="urn:ieee:std:2030.5:ns"><genConnectStatus><dateTime>1773768814</dateTime><value>01</value></genConnectStatus><inverterStatus><dateTime>1773768814</dateTime><value>3</value></inverterStatus><manufacturerStatus><dateTime>1773768814</dateTime><value>NoErr</value></manufacturerStatus><operationalModeStatus><dateTime>1773768814</dateTime><value>1</value></operationalModeStatus><readingTime>1773768814</readingTime></DERStatus>

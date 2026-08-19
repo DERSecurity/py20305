@@ -1,0 +1,31 @@
+# The build stage copies what it needs explicitly; everything else only makes
+# the context slower to send and risks baking local state into an image.
+.git
+.github
+.venv*
+venv*
+site/
+dist/
+build/
+.e2e/
+tests/
+docs/
+examples/
+*.egg-info
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+junit.xml
+.coverage*
+
+# Certificates and configuration belong to the deployment, mounted at run time.
+# A stray key in the build context is the mistake worth making impossible.
+*.pem
+*.key
+*.p12
+*.pfx
+client.yaml
+client.yml

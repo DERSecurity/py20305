@@ -1,0 +1,1 @@
+<DeviceCapability xmlns="urn:ieee:std:2030.5:ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" schemaVer="2.2" href="/dcap"><DERProgramListLink href="/edev/1/fsa/1/derp" all="1" /><TimeLink href="/tm" /><UsagePointListLink href="/upt" all="0" /><EndDeviceListLink href="/edev" all="1" /><MirrorUsagePointListLink href="/mup" all="0" /></DeviceCapability>

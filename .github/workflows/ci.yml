@@ -1,0 +1,207 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes an in-flight run redundant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: ruff
+        run: ruff check src tests examples scripts
+      - name: mypy
+        run: mypy src/py20305
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor and the ceiling of the supported range on Linux, plus one
+        # Windows and one macOS run: the TLS and file-path code is where the
+        # platforms actually differ, and it is exercised on every job.
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: pytest
+        run: >-
+          pytest tests -q
+          --cov=py20305 --cov-report=term --cov-report=xml
+          --junitxml=junit.xml
+      - name: Upload reports
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            coverage.xml
+            junit.xml
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install build twine
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Check package metadata
+        run: twine check dist/*
+      - name: Verify the schemas ship inside the wheel
+        # The XSDs are package data. A packaging mistake that drops them leaves
+        # every import working and schema validation silently unavailable, so
+        # it has to be checked against the built artifact rather than the tree.
+        run: |
+          python -m zipfile -l dist/*.whl | grep -c 'schemas/.*\.xsd' | \
+            xargs -I{} sh -c 'test {} -eq 8 || { echo "expected 8 XSDs in the wheel, found {}"; exit 1; }'
+          echo "8 XSDs present in the wheel"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  docker:
+    # Builds the image and runs the client inside it. The unit suite checks
+    # what the Dockerfile says; this checks that the thing it produces starts,
+    # reads a mounted configuration and reports the right exit codes -- which
+    # is where a base-image or packaging change actually breaks.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t py20305:ci .
+      - name: It reports its own version
+        run: docker run --rm py20305:ci --version
+      - name: It runs unprivileged
+        run: |
+          uid=$(docker run --rm --entrypoint id py20305:ci -u)
+          test "$uid" = "10005" || { echo "expected uid 10005, got $uid"; exit 1; }
+      - name: It carries no source tree
+        run: |
+          if docker run --rm --entrypoint test py20305:ci -d /src; then
+            echo "the runtime image contains the build stage's source tree"
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Generate a configuration and certificate
+        run: |
+          pip install --quiet cryptography
+          mkdir -p ci-config
+          python scripts/make_test_config.py ci-config
+      - name: It validates a mounted configuration
+        run: |
+          docker run --rm -v "$PWD/ci-config:/etc/py20305:ro" py20305:ci --config /etc/py20305/client.yaml --check
+      - name: A bad configuration exits 2, not 1
+        # The distinction is what lets a supervisor decline to restart: no
+        # number of restarts fixes a malformed file, and a restart loop buries
+        # the message saying what was wrong.
+        run: |
+          cp ci-config/client.yaml ci-config/bad.yaml
+          echo "bogus_key: 1" >> ci-config/bad.yaml
+          set +e
+          docker run --rm -v "$PWD/ci-config:/etc/py20305:ro" py20305:ci --config /etc/py20305/bad.yaml --check
+          code=$?
+          set -e
+          test "$code" = "2" || { echo "expected exit 2, got $code"; exit 1; }
+
+  e2e:
+    # Runs this client against envoy, the open-source CSIP-AUS utility server
+    # from the Australian National University, in Docker. The unit suite checks
+    # this client against transports we wrote; this checks it against an
+    # implementation nobody here wrote, which is the only place a shared
+    # misreading of the standard shows up.
+    #
+    # Not in the `test` matrix: it needs Docker, takes minutes rather than
+    # seconds, and a failure means something different -- an interop
+    # disagreement rather than a broken unit.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: Start the IEEE 2030.5 server
+        run: python scripts/e2e_server.py up
+      - name: Run the end-to-end tests
+        run: |
+          export PY20305_E2E_SERVER_URL=https://localhost:8443
+          export PY20305_E2E_CERT_DIR="$PWD/.e2e/envoy/demo/tls-termination/test_certs"
+          pytest tests/e2e -v
+      - name: Server logs
+        if: failure()
+        run: docker compose -f .e2e/envoy/demo/docker-compose.yaml logs --tail 200
+      - name: Stop the server
+        if: always()
+        run: python scripts/e2e_server.py down
+
+  badges:
+    # Regenerates the test-count and coverage badges the README points at.
+    # They are committed rather than fetched from a badge service so they
+    # render while the repository is private and add no third-party
+    # dependency; swapping to a hosted service later is a README edit.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: reports
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "genbadge[coverage,tests]"
+      - name: Regenerate badges
+        run: |
+          genbadge coverage -i coverage.xml -o .github/badges/coverage.svg
+          genbadge tests -i junit.xml -o .github/badges/tests.svg
+      - name: Commit if changed
+        run: |
+          if git diff --quiet -- .github/badges; then
+            echo "badges unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/badges
+          git commit -m "chore: refresh test and coverage badges [skip ci]"
+          git push

@@ -1,0 +1,41 @@
+# A container running one client against one utility server.
+#
+#   docker compose up -d
+#
+# Everything the deployment owns -- the configuration file and the certificate
+# it names -- lives in ./config on the host and is mounted read-only. Nothing
+# in the image needs editing to point it at a different server.
+
+services:
+  py20305:
+    build: ..
+    image: py20305:latest
+    # `--check` first, if you want to validate before starting for real:
+    #   docker compose run --rm py20305 --config /etc/py20305/client.yaml --check
+    volumes:
+      - ./config:/etc/py20305:ro
+    # No ports. The packaged runner only makes outbound connections: it polls,
+    # and nothing reaches in. The subscribe/notify path needs a listener the
+    # runner does not build and the configuration file cannot ask for, so
+    # publishing a port would not enable it -- an application embedding the
+    # client and serving its own listener is a different deployment.
+    restart: unless-stopped
+    # Restarts on any non-zero exit, including the 2 the runner uses for a
+    # configuration error -- Compose has no per-exit-code policy, so a
+    # malformed file does become a restart loop, and the message saying what
+    # was wrong scrolls past in the logs.
+    #
+    # `--check` is the guard, and it costs one command before starting:
+    #   docker compose run --rm py20305 --config /etc/py20305/client.yaml --check
+    #
+    # Under systemd, `RestartPreventExitStatus=2` expresses this properly and
+    # is worth preferring where the choice exists.
+    stop_grace_period: 30s
+    # The client shuts down in order on SIGTERM -- finishing what it is doing
+    # and closing its session -- and 30s leaves room for that rather than
+    # having the runtime kill it mid-exchange after the 10s default.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
