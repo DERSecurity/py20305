@@ -124,3 +124,12 @@ connection:
 #   # in the same envelope as the 2030.5 traffic. Off unless asked for.
 #   device_telemetry:
 #     enabled: true
+#   # The client's own connection outcomes -- TLS failures, refusals, error
+#   # statuses -- as OCSF Network Activity events on their own topic
+#   # (out/connection-events under the topic base). The one record a passive
+#   # sensor cannot produce. Off unless asked for.
+#   connection_telemetry:
+#     enabled: true
+#     # Successes are collapsed into one record per window; failures never
+#     # are. Zero emits one record per success.
+#     coalesce_window_seconds: 60
