@@ -6,8 +6,8 @@
 # py20305
 
 **The IEEE 2030.5 / CSIP client of [Project Satori](https://dersec.io/satori)** —
-an open-source project led by the SunSpec Alliance, DER Security, and industry
-consortium members, proposed for LF Energy.
+an LF Energy open-source project led by the SunSpec Alliance, DER Security,
+and industry consortium members.
 
 [![CI](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml/badge.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
 [![Tests](.github/badges/tests.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)

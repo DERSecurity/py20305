@@ -45,9 +45,8 @@ several local ones.
 
 ## Part of Project Satori
 
-Satori — “awakening” — is an open-source project led by the SunSpec
-Alliance, DER Security, and industry consortium members, proposed for LF
-Energy. It pairs this IEEE 2030.5 / CSIP client with
+Satori — “awakening” — is an LF Energy open-source project led by
+the SunSpec Alliance, DER Security, and industry consortium members. It pairs this IEEE 2030.5 / CSIP client with
 [PySunSpec2](https://github.com/sunspec/pysunspec2), the SunSpec Modbus
 reference library, so a certified Modbus device can join a utility DER
 program without a firmware rewrite.
