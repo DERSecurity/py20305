@@ -1,6 +1,6 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/satori-white.png">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/satori-dark.png">
     <img src="docs/assets/satori.png" alt="Satori" height="88">
   </picture>
 </p>
