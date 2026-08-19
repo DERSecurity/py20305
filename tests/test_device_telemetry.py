@@ -1186,3 +1186,67 @@ class TestRunnerDrivesTheRetry:
             await cli_module.run(config)
 
         assert flaky.attempts == 1
+
+
+# -- The runner can subscribe -------------------------------------------------
+
+
+class TestRunnerSubscriptionWiring:
+    """Config must reach the client, or the packaged command stays poll-only."""
+
+    @staticmethod
+    def _config(tmp_path, sub: dict | None):
+        from py20305.config import ClientConfig
+
+        cert = _write_client_cert(tmp_path)
+        raw: dict = {
+            "server": {"url": "https://server.example.com:8443"},
+            "tls": {
+                "client_cert": str(cert),
+                "client_key": str(cert),
+                "ca_cert": str(cert),
+            },
+        }
+        if sub is not None:
+            raw["subscription"] = sub
+        return ClientConfig.model_validate(raw)
+
+    def test_enabled_wires_manager_and_listener(self, tmp_path):
+        from py20305.cli import build_client
+
+        config = self._config(
+            tmp_path,
+            {"enabled": True, "notification_external_host": "dut.example.com"},
+        )
+        client, _ = build_client(config)
+
+        assert client.subscription_manager is not None
+        assert client._notification_server is not None
+        # The advertised callback carries the configured external host, not
+        # the bind address -- a server cannot deliver to 0.0.0.0.
+        assert "dut.example.com" in client.subscription_manager._notification_uri
+
+    def test_listener_delivers_into_the_client(self, tmp_path):
+        """The wiring the aggregator does by private pokes, now by the seam."""
+        from py20305.cli import build_client
+
+        config = self._config(
+            tmp_path,
+            {"enabled": True, "notification_external_host": "dut.example.com"},
+        )
+        client, _ = build_client(config)
+
+        assert client._notification_server.on_notification == client._handle_notification
+
+    def test_disabled_stays_poll_only(self, tmp_path):
+        from py20305.cli import build_client
+
+        client, _ = build_client(self._config(tmp_path, None))
+        assert client.subscription_manager is None
+
+    def test_enabled_without_external_host_is_a_config_error(self, tmp_path):
+        """Advertising 0.0.0.0 would subscribe with an unreachable callback."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            self._config(tmp_path, {"enabled": True})

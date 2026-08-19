@@ -386,6 +386,43 @@ class ClientAPIService:
             "devices_discovered": len(self._client.state.end_devices),
         }
 
+    def get_subscriptions(self) -> dict[str, Any]:
+        """Return active subscriptions for the /subscriptions endpoint."""
+        mgr = self._client.subscription_manager
+        if mgr is None:
+            return {"subscriptions": []}
+        return {
+            "subscriptions": [
+                {
+                    "subscription_uri": s.subscription_uri,
+                    "subscribed_resource": s.subscribed_resource,
+                    "notification_uri": s.notification_uri,
+                    "resource_type": s.resource_type,
+                    "status": s.status,
+                    "created_at": s.created_at,
+                }
+                for s in mgr.active_subscriptions
+            ]
+        }
+
+    def get_notifications(self) -> dict[str, Any]:
+        """Return received notifications for the /notifications endpoint."""
+        mgr = self._client.subscription_manager
+        if mgr is None:
+            return {"notifications": []}
+        return {
+            "notifications": [
+                {
+                    "subscribed_resource": n.subscribed_resource,
+                    "status": n.status,
+                    "subscription_uri": n.subscription_uri,
+                    "new_resource_uri": n.new_resource_uri,
+                    "created_at": n.created_at,
+                }
+                for n in mgr.notifications
+            ]
+        }
+
     async def poll_now(self) -> dict[str, Any]:
         """Trigger an immediate DER control poll."""
         programs_polled = await self._run_on_loop(self._client.poll_now())

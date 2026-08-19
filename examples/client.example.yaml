@@ -92,6 +92,16 @@ connection:
 # Publish captured traffic to a monitoring system. Omit the whole section and
 # the client forwards nothing and never opens a broker connection.
 #
+# Subscribe to server resources instead of relying on polling alone. The
+# listener binds notification_host:notification_port; notification_external_host
+# is the address the SERVER delivers to, and is required -- it becomes each
+# subscription's notificationURI.
+#
+# subscription:
+#   enabled: true
+#   notification_external_host: my-hostname.example.com
+#   notification_port: 10443
+
 # Read each configured device on a schedule and post the readings upstream.
 # Also what makes southbound read telemetry observable -- nothing else drives
 # a device read.

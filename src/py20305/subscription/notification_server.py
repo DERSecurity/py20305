@@ -79,6 +79,15 @@ class NotificationServer:
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     @property
+    def on_notification(self) -> NotificationCallback | None:
+        """The coroutine invoked with each parsed, accepted notification."""
+        return self._on_notification
+
+    @on_notification.setter
+    def on_notification(self, callback: NotificationCallback | None) -> None:
+        self._on_notification = callback
+
+    @property
     def port(self) -> int:
         return self._port
 

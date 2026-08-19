@@ -227,6 +227,29 @@ class CsipClient:
         return self._dispatcher
 
     @property
+    def subscription_manager(self) -> SubscriptionManager | None:
+        """The subscription manager, when subscriptions are wired."""
+        return self._subscription_manager
+
+    def attach_subscriptions(
+        self,
+        manager: SubscriptionManager,
+        notification_server: NotificationServer | None = None,
+    ) -> None:
+        """Wire subscribe/notify into this client after construction.
+
+        The manager needs this client's transport, which exists only once the
+        client does, so a caller building both cannot pass them to
+        ``__init__`` -- construction order forces attachment to come second.
+        Attach before ``connect()``: auto-subscription and poll suppression
+        consult the manager during connection.
+        """
+        self._subscription_manager = manager
+        if notification_server is not None:
+            self._notification_server = notification_server
+            notification_server.on_notification = self._handle_notification
+
+    @property
     def http(self) -> Sep2Client:
         return self._http
 

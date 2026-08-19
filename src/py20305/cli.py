@@ -23,7 +23,7 @@ import logging
 import signal
 import ssl
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -180,6 +180,38 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
     # back to start and stop the transport -- so the manager needs no second
     # channel out of here and this function keeps its shape.
     client.http.forwarder = forwarder
+
+    # Subscribe/notify. Attached after construction because the manager needs
+    # the client's transport, which exists only once the client does. The
+    # client starts and stops the listener with its own lifecycle.
+    if config.subscription.enabled:
+        from py20305.subscription.manager import SubscriptionManager
+        from py20305.subscription.notification_server import NotificationServer
+
+        notification_server = NotificationServer(
+            host=config.subscription.notification_host,
+            port=config.subscription.notification_port,
+            tls=tls,
+            client_cert_mode=config.subscription.notification_client_cert_mode,
+        )
+        # The validator guarantees external_host when enabled.
+        external_host = config.subscription.notification_external_host
+        assert external_host is not None
+        manager = SubscriptionManager(
+            client=client.http,
+            notification_uri=notification_server.build_notification_uri(external_host),
+            server_2018_compat=config.server.server_2018_compat,
+            # A renewal answered 401/404 means the server has forgotten us;
+            # rediscovery re-subscribes against its current state. Wrapped to
+            # drop the bool trigger_rediscovery returns, which the manager's
+            # callback contract does not carry.
+            on_subscription_lost=_rediscover_quietly(client),
+        )
+        client.attach_subscriptions(manager, notification_server)
+        logger.info(
+            "subscriptions on; notifications delivered to %s",
+            notification_server.build_notification_uri(external_host),
+        )
     # Configuring a schema directory has to actually turn validation on.
     # Without this the validator stays unset and every forwarded frame is
     # reported valid, which is worse than not offering the setting at all.
@@ -548,6 +580,15 @@ async def run(config: ClientConfig) -> int:
         if forwarder is not None:
             await forwarder.stop()
         logger.info("stopped")
+
+
+def _rediscover_quietly(client: CsipClient) -> Callable[[], Awaitable[None]]:
+    """Adapt trigger_rediscovery to the manager's no-result callback shape."""
+
+    async def rediscover() -> None:
+        await client.trigger_rediscovery()
+
+    return rediscover
 
 
 def _connector_resolver(dispatcher: ConnectorDispatcher) -> Callable[[str], Any]:

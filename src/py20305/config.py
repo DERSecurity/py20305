@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from py20305.connectors.config import DeviceConfig
 from py20305.forwarders.config import ForwarderConfig
@@ -117,6 +124,52 @@ class TlsFileConfig(_Strict):
     )
 
 
+class SubscriptionConfig(_Strict):
+    """Subscribe/notify instead of relying on polling alone.
+
+    Off by default: enabling it opens a listening socket for the server's
+    notifications, which a deployment should choose rather than inherit.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Subscribe to server resources and receive notifications",
+    )
+    notification_host: str = Field(
+        default="0.0.0.0",
+        description="Address the notification listener binds",
+    )
+    notification_port: int = Field(
+        default=10443,
+        ge=1,
+        le=65535,
+        description="Port the notification listener binds",
+    )
+    notification_external_host: str | None = Field(
+        default=None,
+        description=(
+            "Hostname or IP the server should deliver notifications to -- what goes "
+            "into each subscription's notificationURI. Required when enabled: the "
+            "bind address is not it, and advertising 0.0.0.0 would subscribe with a "
+            "callback no server can reach."
+        ),
+    )
+    notification_client_cert_mode: Literal["off", "warn", "enforce"] = Field(
+        default="warn",
+        description="How strictly the listener checks the notifying server's client certificate",
+    )
+
+    @model_validator(mode="after")
+    def _external_host_when_enabled(self) -> SubscriptionConfig:
+        """The advertised callback host cannot be guessed, so it must be stated."""
+        if self.enabled and not self.notification_external_host:
+            raise ValueError(
+                "subscription.enabled requires subscription.notification_external_host -- "
+                "it becomes the notificationURI the server delivers to"
+            )
+        return self
+
+
 class TelemetryConfig(_Strict):
     """Posting measurements back to the server.
 
@@ -193,6 +246,7 @@ class ClientConfig(_Strict):
     api: ApiConfig = Field(default_factory=ApiConfig)
     connection: ConnectionConfig = Field(default_factory=ConnectionConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    subscription: SubscriptionConfig = Field(default_factory=SubscriptionConfig)
     forwarders: ForwarderConfig | None = Field(
         default=None,
         description=(

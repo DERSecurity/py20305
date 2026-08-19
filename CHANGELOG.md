@@ -5,6 +5,18 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
+## [0.2.0] — unreleased
+
+- Subscribe/notify from the runner: a `subscription:` section constructs the
+  subscription manager and notification listener and wires them into the
+  client. Off by default; enabling it requires `notification_external_host`,
+  the address the server delivers notifications to.
+- Two management-API endpoints, `GET /api/v1/subscriptions` and
+  `GET /api/v1/notifications`, reporting the client's active subscriptions
+  and received notifications.
+- A public seam for embedders: `CsipClient.attach_subscriptions()` and a
+  `subscription_manager` property replace reaching into private attributes.
+
 ## [0.1.1] — 2026-08-19
 
 No functional changes. The README now uses absolute image and link

@@ -270,6 +270,22 @@ def create_client_router(
     # System Operations
     # -----------------------------------------------------------------
 
+    @router.get("/subscriptions")
+    async def get_subscriptions() -> dict[str, Any]:
+        """Return the client's active subscriptions."""
+        service = service_getter()
+        if service is None:
+            return {"subscriptions": []}
+        return service.get_subscriptions()
+
+    @router.get("/notifications")
+    async def get_notifications() -> dict[str, Any]:
+        """Return the notifications the client has received."""
+        service = service_getter()
+        if service is None:
+            return {"notifications": []}
+        return service.get_notifications()
+
     @router.post("/reconnect")
     async def reconnect(request: Request) -> dict[str, Any]:
         """Retry the upstream server connection immediately.

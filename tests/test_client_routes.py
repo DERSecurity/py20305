@@ -226,8 +226,9 @@ class TestAggregatorRoutesAbsent:
             "/api/v1/groups",
             "/api/v1/connectors",
             "/api/v1/device-connectors",
-            "/api/v1/subscriptions",
-            "/api/v1/notifications",
+            # /subscriptions and /notifications are deliberately NOT here:
+            # subscribe/notify is a client conformance feature, and the
+            # certification suite drives a client DUT through both.
             "/api/v1/server-info",
         ],
     )
@@ -235,3 +236,75 @@ class TestAggregatorRoutesAbsent:
         r = connected_client.get(path)
         # FastAPI returns 404 for unregistered routes
         assert r.status_code == 404, f"{path} should not be registered on client router"
+
+
+# ---------------------------------------------------------------------------
+# Subscribe/notify surface -- what the certification suite drives a DUT with
+# ---------------------------------------------------------------------------
+
+
+class TestSubscriptionRoutes:
+    """The conformance suite's DutActions read these two endpoints."""
+
+    def test_subscriptions_shape(self, connected_client: TestClient) -> None:
+        r = connected_client.get("/api/v1/subscriptions")
+        assert r.status_code == 200
+        body = r.json()
+        assert "subscriptions" in body and isinstance(body["subscriptions"], list)
+
+    def test_notifications_shape(self, connected_client: TestClient) -> None:
+        r = connected_client.get("/api/v1/notifications")
+        assert r.status_code == 200
+        body = r.json()
+        assert "notifications" in body and isinstance(body["notifications"], list)
+
+    def test_subscription_entries_carry_the_fields_the_suite_reads(self) -> None:
+        """Field names are the contract; the suite indexes them by name."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from py20305.api.service import ClientAPIService
+
+        sub = SimpleNamespace(
+            subscription_uri="/edev/1/sub/1",
+            subscribed_resource="/edev/1/fsa",
+            notification_uri="https://dut:10443/notify",
+            resource_type="FSAList",
+            status="active",
+            created_at=123.0,
+        )
+        notif = SimpleNamespace(
+            subscribed_resource="/edev/1/fsa",
+            status=0,
+            subscription_uri="/edev/1/sub/1",
+            new_resource_uri=None,
+            created_at=124.0,
+        )
+        client = MagicMock()
+        client.subscription_manager.active_subscriptions = [sub]
+        client.subscription_manager.notifications = [notif]
+        service = ClientAPIService(client)
+
+        s = service.get_subscriptions()["subscriptions"][0]
+        assert s == {
+            "subscription_uri": "/edev/1/sub/1",
+            "subscribed_resource": "/edev/1/fsa",
+            "notification_uri": "https://dut:10443/notify",
+            "resource_type": "FSAList",
+            "status": "active",
+            "created_at": 123.0,
+        }
+        n = service.get_notifications()["notifications"][0]
+        assert n["new_resource_uri"] is None
+        assert n["subscribed_resource"] == "/edev/1/fsa"
+
+    def test_no_manager_means_empty_lists_not_errors(self) -> None:
+        from unittest.mock import MagicMock
+
+        from py20305.api.service import ClientAPIService
+
+        client = MagicMock()
+        client.subscription_manager = None
+        service = ClientAPIService(client)
+        assert service.get_subscriptions() == {"subscriptions": []}
+        assert service.get_notifications() == {"notifications": []}
