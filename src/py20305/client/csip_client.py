@@ -202,6 +202,7 @@ class CsipClient:
         self._subscription_manager = subscription_manager
         self._notification_server = notification_server
         self._on_structural_change = on_structural_change
+        self._on_rediscovered: Callable[[], Awaitable[None]] | None = None
         self._on_device_removed = on_device_removed
         self._dcap_path = dcap_path
         #: LFDI hex -> expected registration PIN. Verified once during the
@@ -248,6 +249,38 @@ class CsipClient:
         if notification_server is not None:
             self._notification_server = notification_server
             notification_server.on_notification = self._handle_notification
+
+    def set_on_structural_change(
+        self, callback: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        """Set the structural-change callback after construction.
+
+        The same construction-order problem as ``attach_subscriptions``, one
+        step later: telemetry is started once discovery has produced the hrefs
+        it posts to, so what wants to hear about a later structural change does
+        not exist when this client is built.
+
+        Note what this callback replaces. Where a structural notification would
+        otherwise call ``trigger_rediscovery()``, it calls this instead, so a
+        callback that does not rediscover leaves the state it was called about
+        unrefreshed. To act on rebuilt state, use ``set_on_rediscovered``.
+        """
+        self._on_structural_change = callback
+
+    def set_on_rediscovered(self, callback: Callable[[], Awaitable[None]] | None) -> None:
+        """Set a callback to run after any rediscovery pass that completed.
+
+        Every path that rebuilds discovered state ends here -- a structural
+        notification, 404 recovery, comms-loss recovery, a subscription lost,
+        an operator's request through the management API -- so anything holding
+        hrefs from the previous state refreshes once, in one place, rather than
+        each trigger remembering to say so.
+
+        Not called when discovery raised, because the state was not rebuilt,
+        nor when the call coalesced into a running rediscovery, because that
+        one calls it on completion.
+        """
+        self._on_rediscovered = callback
 
     @property
     def http(self) -> Sep2Client:
@@ -1439,6 +1472,10 @@ class CsipClient:
                 logger.info(
                     "Re-running rediscovery (structural change received during previous run)"
                 )
+        if self._on_rediscovered:
+            # Outside the pass loop: a re-run means the state is still moving,
+            # and a listener that rescheduled work per pass would do it twice.
+            await self._on_rediscovered()
         return True
 
     async def shutdown(self, timeout: float = 10.0) -> None:

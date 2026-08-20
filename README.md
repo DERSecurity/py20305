@@ -110,7 +110,7 @@ Swap in `SunSpecDeviceConfig` when you have one. Full walkthrough in the
 |---|---|
 | **Protocol client** | Discovery, registration, mTLS transport, retry with backoff, redirect probing, server timebase |
 | **Event engine** | DERControl five-state machine, supersession across programs, randomized start and duration, `Response` acknowledgments |
-| **Telemetry** | DERStatus, DERCapability, DERSettings, DERAvailability, metered readings as MirrorUsagePoints |
+| **Telemetry** | DERStatus, DERCapability, DERSettings, DERAvailability, metered readings as MirrorUsagePoints, started and rediscovered for you by the runner |
 | **Connectors** | SunSpec Modbus over TCP, RTU and TLS; a no-hardware print connector; your own by subclass or factory |
 | **Subscriptions** | Subscribe/notify as an alternative to polling, with a notification listener |
 | **Runner** | A CLI, config file, connection retry and signal-handled shutdown |
