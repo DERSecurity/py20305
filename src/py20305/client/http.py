@@ -242,6 +242,11 @@ class Sep2Client:
         ``close()`` later flushes only the current observer, and silently
         losing recorded attempts is the one failure a connection log must
         not have.
+
+        Replace observers between requests, not during them: a request in
+        flight pinned the observer it started with, so a mid-request swap can
+        attribute that request's completion to the flushed outgoing observer.
+        Observation is wired at assembly time, where this cannot arise.
         """
         outgoing = self._connection_observer
         if outgoing is not None and outgoing is not value:
@@ -428,15 +433,12 @@ class Sep2Client:
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            # When TLS is configured, use the connector that runs the IEEE 2030.5
-            # PKI-profile chain audit at handshake time, so it gates every request
-            # method uniformly (not just the first GET). Plain-HTTP sessions
-            # (self._ssl is False) use aiohttp's default connector.
-            connector = (
-                Ieee2030TCPConnector(on_connect=self._dispatch_connect)
-                if isinstance(self._ssl, ssl.SSLContext)
-                else None
-            )
+            # This connector runs the IEEE 2030.5 PKI-profile chain audit at
+            # handshake time, gating every request method uniformly (not just
+            # the first GET). Plain-HTTP sessions use it too: the audit is a
+            # documented no-op without a TLS object, and the socket observer
+            # must see every established connection, not only encrypted ones.
+            connector = Ieee2030TCPConnector(on_connect=self._dispatch_connect)
             self._session = aiohttp.ClientSession(
                 timeout=self._timeout,
                 headers=self._default_headers(),

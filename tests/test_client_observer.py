@@ -52,6 +52,15 @@ class RecordingObserver:
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
 
+    def funnel(self) -> list[str]:
+        """The request-outcome sequence, with connection callbacks filtered.
+
+        ``on_connect`` interleaves wherever a TCP connection happens to be
+        established -- plain HTTP included -- so the funnel assertions ignore
+        it and test it separately.
+        """
+        return [name for name in self.names() if name != "on_connect"]
+
 
 async def _serve(aiohttp_server, app):
     """Boot ``app`` on a random port and return its base URL as a string."""
@@ -83,7 +92,7 @@ class TestRequestOutcomeReporting:
         async with Sep2Client(base_url, connection_observer=observer) as client:
             await client.get("/tm", Time)
 
-        assert observer.names()[:2] == ["begin_request", "record_success"]
+        assert observer.funnel()[:2] == ["begin_request", "record_success"]
 
     async def test_a_failing_get_reports_the_exception(self, aiohttp_server):
         """The failure record carries the real exception, not a summary of it."""
@@ -100,8 +109,8 @@ class TestRequestOutcomeReporting:
             with pytest.raises(Sep2ProtocolError):
                 await client.get("/missing", Time)
 
-        assert observer.names()[:2] == ["begin_request", "record_failure"]
-        recorded_exc = observer.calls[1][1]
+        assert observer.funnel()[:2] == ["begin_request", "record_failure"]
+        recorded_exc = next(args for name, args in observer.calls if name == "record_failure")
         assert isinstance(recorded_exc, Sep2ProtocolError)
 
     async def test_a_204_counts_as_success_and_still_raises(self, aiohttp_server):
@@ -124,7 +133,7 @@ class TestRequestOutcomeReporting:
             with pytest.raises(Sep2NoContentError):
                 await client.get("/empty", Time)
 
-        assert observer.names()[:2] == ["begin_request", "record_success"]
+        assert observer.funnel()[:2] == ["begin_request", "record_success"]
 
     async def test_a_non_get_request_reports_through_the_same_seam(self, aiohttp_server):
         """POST funnels through _send_tracked; the observer must see it too."""
@@ -140,7 +149,7 @@ class TestRequestOutcomeReporting:
         async with Sep2Client(base_url, connection_observer=observer) as client:
             await client.post("/mup", make_time())
 
-        assert observer.names()[:2] == ["begin_request", "record_success"]
+        assert observer.funnel()[:2] == ["begin_request", "record_success"]
 
     async def test_get_with_body_reports_through_the_same_seam(self, aiohttp_server):
         """The raw-body GET variant is its own funnel and must not be a gap."""
@@ -151,7 +160,7 @@ class TestRequestOutcomeReporting:
             result, body = await client.get_with_body("/tm", Time)
 
         assert result.current_time.value == 999
-        assert observer.names()[:2] == ["begin_request", "record_success"]
+        assert observer.funnel()[:2] == ["begin_request", "record_success"]
 
     async def test_an_observer_attached_via_the_property_reports(self, aiohttp_server):
         """An embedder reads the config that decides on observation later than
@@ -164,7 +173,22 @@ class TestRequestOutcomeReporting:
             assert client.connection_observer is observer
             await client.get("/tm", Time)
 
-        assert observer.names()[:2] == ["begin_request", "record_success"]
+        assert observer.funnel()[:2] == ["begin_request", "record_success"]
+
+    async def test_plain_http_sessions_report_their_sockets_too(self, aiohttp_server):
+        """The observer contract covers every established connection, not just
+        TLS ones -- the audit connector is a no-op without a TLS object, so
+        plain-HTTP sessions use it as well."""
+        base_url = await _serve(aiohttp_server, _time_app())
+        observer = RecordingObserver()
+
+        async with Sep2Client(base_url, connection_observer=observer) as client:
+            await client.get("/tm", Time)
+
+        connects = [args for name, args in observer.calls if name == "on_connect"]
+        assert connects, "no socket was reported for a plain-HTTP connection"
+        pair = connects[0]
+        assert pair.remote is not None and pair.remote.ip == "127.0.0.1"
 
     async def test_without_an_observer_requests_behave_as_before(self, aiohttp_server):
         """No observer, no reporting -- and no change to the request path."""

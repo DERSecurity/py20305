@@ -94,20 +94,38 @@ _request_socket: ContextVar[SocketPair | None] = ContextVar("_request_socket", d
 MAX_STATUS_DETAIL_CHARS = 512
 
 
+def _safe_url_reference(url: str) -> str:
+    """A peer-controlled URL reduced to what identifies it: scheme, host, path.
+
+    Userinfo and the query string are dropped, not just the password:
+    a redirect ``Location`` is chosen by the peer and can carry credentials
+    or signed query parameters, and this reference lands on a topic scoped
+    for connection metadata.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        # The value is peer-controlled, so a malformed one must neither raise
+        # into the caller nor pass through verbatim -- either would let the
+        # peer shape the record. An opaque marker says what happened without
+        # carrying any of it.
+        return "<unparseable url>"
+    return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+
+
 def _redact_url(url: str | None) -> str | None:
-    """Strip userinfo from a URL before it can reach the wire.
+    """Reduce a URL to connection metadata before it can reach the wire.
 
     The configured server URL is serialized into every event's
-    ``url.url_string``. A URL of the ``https://user:password@host`` form would
-    publish those credentials to the broker -- an event topic is connection
-    metadata, never a place for secrets.
+    ``url.url_string``, and the configuration accepts any string -- so
+    userinfo (``https://user:password@host``) and query parameters
+    (``?token=...``) would both publish secrets to the broker. What
+    identifies the interface is scheme, host, port and path; nothing else
+    is retained.
     """
     if url is None:
         return None
-    parts = urlsplit(url)
-    if "@" not in parts.netloc:
-        return url
-    return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
+    return _safe_url_reference(url)
 
 
 def _bounded(detail: str) -> str:
@@ -210,23 +228,39 @@ def classify(exc: BaseException) -> Outcome | None:
         return Outcome(NetworkActivityId.OPEN, f"Rate limited by the server{suffix}: {exc}", "429")
 
     if isinstance(exc, Sep2RedirectError):
+        # The Location header is peer-controlled: it can carry userinfo or
+        # signed query parameters, so only a stripped-down reference to it is
+        # reported -- and the exception text, which embeds the raw header, is
+        # not interpolated at all.
         status = getattr(exc, "status_code", None)
         location = getattr(exc, "location", None)
-        where = f" to {location}" if location else ""
+        where = f" to {_safe_url_reference(location)}" if location else ""
         return Outcome(
             NetworkActivityId.OPEN,
-            f"Redirected{where}, triggering re-discovery: {exc}",
+            f"Redirected{where}, triggering re-discovery",
             str(status) if status is not None else None,
         )
 
     if isinstance(exc, Sep2PayloadError):
-        return Outcome(NetworkActivityId.OPEN, f"Unusable response body: {exc}")
+        # The exception text can embed the unparseable body; identify the
+        # failure by where and how big instead of by content.
+        path = getattr(exc, "path", None)
+        size = getattr(exc, "body_length", None)
+        at = f" from GET {path}" if path else ""
+        of = f" ({size} bytes)" if size is not None else ""
+        return Outcome(NetworkActivityId.OPEN, f"Unusable response body{at}{of}")
 
     if isinstance(exc, Sep2ProtocolError):
+        # The exception text embeds the peer's response body, and a length
+        # cap limits volume but not content -- the status code alone is what
+        # identifies this failure, so nothing else is reported.
         status = getattr(exc, "status_code", None)
+        detail = "Server returned an unexpected status"
+        if status is not None:
+            detail += f": HTTP {status}"
         return Outcome(
             NetworkActivityId.OPEN,
-            f"Server returned an unexpected status: {exc}",
+            detail,
             str(status) if status is not None else None,
         )
 
@@ -364,6 +398,25 @@ class CoalescingWindow:
         """The current window as it stands, for emission."""
         assert self._start_ms is not None
         return Window(self._count, self._start_ms, self._end_ms or self._start_ms, self._socket)
+
+    def take_expired(self, now_ms: int) -> Window | None:
+        """Close the window if its configured length has elapsed.
+
+        The window normally closes when the success *after* it arrives. A
+        client whose successes stop -- it starts failing, or goes idle --
+        would otherwise hold its last successes unreported until shutdown, so
+        anything else passing through the emitter offers the clock a chance
+        to close an expired window.
+
+        Returns:
+            The expired window, or ``None`` when nothing is open or it is
+            still inside its length.
+        """
+        if self._window_ms == 0 or self._start_ms is None or self._count == 0:
+            return None
+        if now_ms - self._start_ms < self._window_ms:
+            return None
+        return self.flush()
 
     def flush(self) -> Window | None:
         """Close the open window, if any.
@@ -607,14 +660,44 @@ class ConnectionTelemetryEmitter:
         if not self.enabled:
             return
         try:
+            # The failure is also the clock's chance to close an expired
+            # success window: those successes happened before this failure,
+            # and holding them until the next success -- which may never
+            # come -- would leave them unreported until shutdown. Guarded on
+            # its own: a problem emitting the window must not cost the
+            # failure record, which is the more important of the two.
+            try:
+                expired = self._window.take_expired(_now_ms())
+                if expired is not None:
+                    self._emit(
+                        build_coalesced_success_event(
+                            expired,
+                            metadata=self._metadata,
+                            server_endpoint=self._server_endpoint,
+                            url=self._base_url,
+                        )
+                    )
+            except Exception:
+                self._record_emit_failure("close an expired window")
             outcome = classify(exc)
             if outcome is None:
                 return
+            # The retained socket belongs to a connection this request
+            # established. For an exchange failure (OPEN) or a teardown
+            # (RESET) that connection is the subject of the record; for a
+            # failure that never opened (FAIL, REFUSE) it is an earlier
+            # attempt's socket, and attaching its local port would attribute
+            # the failure to a connection that did not fail.
+            socket_pair = (
+                _request_socket.get()
+                if outcome.activity_id in (NetworkActivityId.OPEN, NetworkActivityId.RESET)
+                else None
+            )
             self._emit(
                 build_failure_event(
                     outcome,
                     metadata=self._metadata,
-                    socket_pair=_request_socket.get(),
+                    socket_pair=socket_pair,
                     server_endpoint=self._server_endpoint,
                     url=self._base_url,
                 )

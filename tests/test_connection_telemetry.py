@@ -125,12 +125,52 @@ class TestClassify:
         outcome = classify(Sep2RedirectError("moved", "https://elsewhere/dcap", 301))
         assert outcome.activity_id is NetworkActivityId.OPEN
 
+    def test_a_malformed_location_cannot_suppress_the_event(self):
+        """The Location is peer-controlled; an unparseable one must neither
+        raise into the request path nor pass through verbatim."""
+        outcome = classify(Sep2RedirectError("moved", "http://[invalid", 302))
+        assert outcome is not None
+        assert "[invalid" not in outcome.detail
+        assert "unparseable" in outcome.detail
+
+    def test_a_redirect_reports_a_stripped_location(self):
+        """The Location header is peer-controlled: no userinfo, no query."""
+        outcome = classify(
+            Sep2RedirectError(
+                "moved", "https://user:hunter2@elsewhere/dcap?sig=SECRETTOKEN", 302
+            )
+        )
+        assert "https://elsewhere/dcap" in outcome.detail
+        for secret in ("hunter2", "user:", "SECRETTOKEN", "sig="):
+            assert secret not in outcome.detail
+        assert outcome.status_code == "302"
+
     def test_a_payload_error_is_an_exchange_failure(self):
         outcome = classify(Sep2PayloadError("bad xml", path="/dcap", body_length=10))
         assert outcome.activity_id is NetworkActivityId.OPEN
 
+    def test_a_payload_error_reports_where_not_what(self):
+        """The exception text can embed the unparseable body itself."""
+        outcome = classify(
+            Sep2PayloadError(
+                "could not parse: <secret>hunter2</secret>", path="/dcap", body_length=31
+            )
+        )
+        assert "/dcap" in outcome.detail and "31" in outcome.detail
+        assert "hunter2" not in outcome.detail
+
     def test_a_protocol_error_is_an_exchange_failure(self):
         assert classify(Sep2ProtocolError("500", 500)).activity_id is NetworkActivityId.OPEN
+
+    def test_a_protocol_error_reports_the_status_not_the_body(self):
+        """The exception text embeds the peer's response body; a length cap
+        limits volume but not content, so only the status code is reported."""
+        outcome = classify(
+            Sep2ProtocolError("GET /dcap returned 500: <body>password=hunter2</body>", 500)
+        )
+        assert "500" in outcome.detail
+        assert "hunter2" not in outcome.detail
+        assert outcome.status_code == "500"
 
     def test_raw_transport_exceptions_are_classified_too(self):
         assert classify(ssl.SSLError("bad cert")).activity_id is NetworkActivityId.FAIL
@@ -342,6 +382,17 @@ class TestServerEndpoint:
         assert "hunter2" not in url and "user" not in url
         assert url == "https://utility.example.com:8443"
 
+    def test_query_strings_in_the_server_url_never_reach_the_wire(self):
+        """The configuration accepts any string, token-bearing URLs included."""
+        emitter, fw = make_emitter()
+        emitter.set_server(
+            "utility.example.com", 8443, base_url="https://utility.example.com:8443/api?token=SECRET"
+        )
+        emitter.record_failure(Sep2TlsError("bad chain"))
+        url = fw.events[0].payload["url"]["url_string"]
+        assert "SECRET" not in url and "token" not in url
+        assert url == "https://utility.example.com:8443/api"
+
 
 class TestEmitter:
     def test_it_satisfies_the_clients_observer_seam(self):
@@ -393,6 +444,82 @@ class TestEmitter:
         emitter.begin_request()  # next request reuses the pool: no connect fires
         emitter.record_success(now_ms=2_000)
         assert "src_endpoint" not in fw.events[1].payload
+
+    def test_a_never_opened_failure_does_not_wear_an_earlier_sockets_port(self):
+        """An early retry attempt can connect and a later one fail to; the
+        Fail/Refuse record must not carry the earlier connection's local port,
+        because that connection is not the one that failed."""
+        emitter, fw = make_emitter()
+        emitter.begin_request()
+        emitter.on_connect(SOCKET)  # an early attempt connected
+        emitter.record_failure(Sep2ConnectionError("second attempt never connected"))
+        payload = fw.events[0].payload
+        assert "src_endpoint" not in payload
+        assert payload["dst_endpoint"]["ip"] == "10.0.0.9"  # the configured target
+
+    def test_an_exchange_failure_keeps_its_connections_socket(self):
+        """A 500 happened over the retained connection -- that one is the subject."""
+        emitter, fw = make_emitter()
+        emitter.begin_request()
+        emitter.on_connect(SOCKET)
+        emitter.record_failure(Sep2ProtocolError("boom", 500))
+        assert fw.events[0].payload["src_endpoint"]["port"] == 52511
+
+    def test_a_window_emission_problem_does_not_cost_the_failure_record(self):
+        """The failure record is the more important of the two."""
+
+        class FailsOnSuccessEvents:
+            def __init__(self):
+                self.events = []
+
+            def queue_event(self, event):
+                if event.payload["status"] == "Success":
+                    raise RuntimeError("broker rejected the window")
+                self.events.append(event)
+
+        fw = FailsOnSuccessEvents()
+        emitter, _ = make_emitter(window=60.0, forwarder=fw)
+        emitter.record_success(now_ms=1_000)
+
+        import py20305.forwarders.connection_telemetry as ct
+
+        original = ct._now_ms
+        ct._now_ms = lambda: 200_000
+        try:
+            emitter.record_failure(Sep2TlsError("bad chain"))
+        finally:
+            ct._now_ms = original
+        assert [e.payload["status"] for e in fw.events] == ["Failure"]
+        assert emitter.emit_failures == 1
+
+    def test_a_failure_flushes_an_expired_success_window(self):
+        """Successes must not wait for a next success that may never come."""
+        emitter, fw = make_emitter(window=60.0)
+        emitter.record_success(now_ms=1_000)
+        emitter.record_success(now_ms=2_000)
+        assert fw.events == []
+
+        # Well past the window, the client starts failing. The buffered
+        # successes are reported first, then the failure.
+        import py20305.forwarders.connection_telemetry as ct
+
+        original = ct._now_ms
+        ct._now_ms = lambda: 200_000
+        try:
+            emitter.record_failure(Sep2TlsError("bad chain"))
+        finally:
+            ct._now_ms = original
+        assert [e.payload["status"] for e in fw.events] == ["Success", "Failure"]
+        assert fw.events[0].payload["count"] == 2
+
+    def test_a_failure_leaves_a_fresh_window_alone(self):
+        """Only an expired window closes early; coalescing otherwise holds."""
+        emitter, fw = make_emitter(window=3600.0)
+        emitter.record_success()
+        emitter.record_failure(Sep2TlsError("bad chain"))
+        assert [e.payload["status"] for e in fw.events] == ["Failure"]
+        emitter.flush()
+        assert [e.payload["status"] for e in fw.events] == ["Failure", "Success"]
 
     def test_flush_reports_the_open_window(self):
         emitter, fw = make_emitter(window=3600.0)

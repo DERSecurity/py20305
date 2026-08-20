@@ -5,6 +5,17 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
+## [Unreleased]
+
+- Connection-telemetry hardening: peer-controlled content stays off the
+  metadata topic (protocol errors report the status code alone, payload
+  errors report where and how big, a redirect's Location is stripped to
+  scheme/host/path, and the retained server URL drops userinfo, query and
+  fragment); plain-HTTP sessions report their sockets through the observer
+  seam too; a failure closes an expired success window so buffered attempts
+  do not wait for a next success that may never come; and a never-opened
+  failure no longer wears an earlier attempt's local port.
+
 ## [0.3.0] — 2026-08-19
 
 - Connection telemetry: the client reports its own connection outcomes as
