@@ -49,8 +49,8 @@ logger = logging.getLogger(__name__)
 #: ``connectors.modes._translate_csipaus_power_limit``.
 _DOE_ENVELOPE_NAMES = ("opModExpLimW", "opModImpLimW", "opModGenLimW", "opModLoadLimW")
 
-#: Ceiling on how long a device's activation response waits on its dispatch
-#:. ACTIVE is now posted only after the device's apply returns, so this
+#: Ceiling on how long a device's activation response waits on its
+#: dispatch. ACTIVE is now posted only after the device's apply returns, so this
 #: bounds how far past the event's effective start that response can land -- the
 #: instant CORE-022 measures against. Deliberately far below the connector layer's
 #: 30s CONTROL_DEADLINE. It gates the *response* only: a slower device is

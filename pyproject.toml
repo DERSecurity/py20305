@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py20305"
-version = "0.1.1"
+version = "0.3.0"
 description = "An open IEEE 2030.5 / CSIP client for distributed energy resources"
 readme = "README.md"
 license = "Apache-2.0"
@@ -85,7 +85,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-py20305 = ["schemas/*.xsd", "connectors/*.txt"]
+py20305 = ["schemas/*.xsd", "connectors/*.txt", "py.typed"]
 
 [tool.ruff]
 line-length = 100

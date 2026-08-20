@@ -5,7 +5,45 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
-## [0.2.0] — unreleased
+## [Unreleased]
+
+- Connection-telemetry hardening: peer-controlled content stays off the
+  metadata topic (protocol errors report the status code alone, payload
+  errors report where and how big, a redirect's Location is stripped to
+  scheme/host/path, and the retained server URL drops userinfo, query and
+  fragment); plain-HTTP sessions report their sockets through the observer
+  seam too; a failure closes an expired success window so buffered attempts
+  do not wait for a next success that may never come; and a never-opened
+  failure no longer wears an earlier attempt's local port.
+
+## [0.3.0] — 2026-08-19
+
+- Connection telemetry: the client reports its own connection outcomes as
+  OCSF Network Activity (4001) events on their own MQTT topic
+  (`forwarders.connection_telemetry`, off by default). Transport failures
+  report `Fail`/`Refuse` with the reason; application-layer failures over a
+  connection that opened stay `Open` with a `Failure` status; successes are
+  coalesced into windows, failures never are. Where a connection was
+  established during the request, the record carries the client's own source
+  address and port. Embedders attach the same machinery through the new
+  `Sep2Client.connection_observer` seam, or implement
+  `py20305.client.observer.ConnectionObserver` to route outcomes elsewhere.
+- Southbound telemetry coverage: the DER resource manager and the telemetry
+  manager report the nameplate, configuration, status and availability reads
+  they issue themselves, and clear-control writes are audited through the
+  same path as every other control -- including the comms-loss safe default.
+- Wire correction: the device-telemetry envelope's catch-all `protocol` value
+  is `generic`, the spelling the consumer contract parses. It was `other`,
+  which failed enum parsing and schema validation on the receiving side.
+- Telemetry topic hygiene: `topic_suffix` fields reject MQTT wildcards, the
+  connection-telemetry topic rejects the protocol-message topic, and the two
+  telemetry channels refuse to share one effective topic.
+- Intrusion-detection wire tests: a scriptable MQTT 3.1.1 broker double joins
+  the scenario servers, and the three channels -- upstream 2030.5 capture,
+  connection-outcome session tracking, downstream device telemetry -- are
+  asserted end to end on the bytes that reach the broker.
+
+## [0.2.0] — 2026-08-19
 
 - The runner now PUTs DERCapability, DERSettings and DERStatus, and posts
   LogEvents and DERAvailability. The managers behind them existed and were
@@ -35,6 +73,25 @@ below says so explicitly.
   subscription manager and notification listener and wires them into the
   client. Off by default; enabling it requires `notification_external_host`,
   the address the server delivers notifications to.
+- A lightweight SunSpec 700-series Modbus TCP server for wire tests,
+  packing its register image with sunspec2's own model definitions
+  (Common, 701, 702, 704). The connector is exercised over a real
+  socket -- scan, scaled measurement reads, nameplate, control writes,
+  Modbus exceptions -- and one test closes the whole loop: an IEEE
+  2030.5 control arriving over mutual TLS ends as registers written
+  into the controls model, with the Response posted back.
+- Registration PINs from the runner: `registration_pins` maps a device
+  LFDI to the PIN its Registration resource should carry, verified at
+  discovery. Scenario coverage for the auto-registration flow: register
+  once when absent, never duplicate, and report a PIN mismatch without
+  taking the device off the program.
+- Scenario integration tests: a scriptable IEEE 2030.5 test double under
+  `tests/scenario/` serves a resource tree over real mutual TLS, records
+  every request, and injects faults on demand. The client is driven end
+  to end through discovery, control dispatch and Response posting,
+  in-band registration and its refusals, error bursts, malformed
+  payloads, an outage with recovery, a CA rotation, and a real
+  HTTP-to-HTTPS redirect.
 - `POST /api/v1/proxy/http-probe`: issue an HTTP GET to the configured
   server, follow its 301/302 to HTTPS, and report both legs -- the
   instrumentation call the IEEE 2030.5 error-handling conformance test

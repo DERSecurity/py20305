@@ -26,8 +26,8 @@ an LF Energy open-source project led by the SunSpec Alliance, DER Security,
 and industry consortium members.
 
 [![CI](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml/badge.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDERSecurity%2Fpy20305%2Fmain%2F.github%2Fbadges%2Ftests.json)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDERSecurity%2Fpy20305%2Fmain%2F.github%2Fbadges%2Fcoverage.json)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDERSecurity%2Fpy20305%2Fbadges%2F.github%2Fbadges%2Ftests.json)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDERSecurity%2Fpy20305%2Fbadges%2F.github%2Fbadges%2Fcoverage.json)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/py20305)](https://pypi.org/project/py20305/)
 [![Python](https://img.shields.io/pypi/pyversions/py20305)](https://pypi.org/project/py20305/)
 [![License](https://img.shields.io/github/license/DERSecurity/py20305)](https://github.com/DERSecurity/py20305/blob/main/LICENSE)
@@ -128,6 +128,16 @@ validation runs against them. The generated bindings track 2023; a
 The client maps one certificate identity to one end device. It registers and
 drives that device, and does not fan a server-side EndDevice out across several
 local ones.
+
+## Certification
+
+py20305 is not SunSpec CSIP certified, and using it does not make a product
+certified. Certification is a property of the *product* -- the assembled
+client device or system, tested as a whole -- not of a library inside it.
+
+If you are building a client product that needs SunSpec CSIP certification,
+follow the SunSpec Alliance's certification process:
+[IEEE 2030.5 / CSIP certification](https://sunspec.org/ieee-2030-5-csip-certification/).
 
 ## Project Satori
 

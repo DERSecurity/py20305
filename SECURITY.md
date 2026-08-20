@@ -33,4 +33,11 @@ deliberately enabled is not a finding. A report that either is applied when
 
 ## Supported versions
 
-Until 1.0, fixes land on the latest release only.
+| Version | Supported |
+|---|---|
+| latest release on [PyPI](https://pypi.org/project/py20305/) | yes |
+| anything older | no -- upgrade first |
+
+Until 1.0, fixes land on the latest release only; a report against an older
+version is still welcome, but the fix ships as a new release rather than a
+backport.

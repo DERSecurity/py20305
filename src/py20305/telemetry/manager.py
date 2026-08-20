@@ -177,9 +177,11 @@ class TelemetryManager:
                 cycle and a concurrent management-API request collapse onto one
                 device poll -- the manager does not know which it was given.
             device_telemetry: Reports each device read to the monitoring
-                system. Applies to the source constructed here; a caller
-                passing its own ``source`` configures it there instead.
-                Optional and disabled by default.
+                system. Covers the LogEvent-cycle status and availability
+                reads this manager issues itself, and — when no ``source`` is
+                passed — the metering reads of the source constructed here; a
+                caller passing its own ``source`` configures that source's
+                reporting there instead. Optional and disabled by default.
         """
         self._client = client
         # Server timebase for telemetry timestamp defaults. isinstance guard
@@ -197,8 +199,10 @@ class TelemetryManager:
         )
         self._resolve_connector = connector_resolver
         self._is_provisioned = is_provisioned
-        # `device_telemetry` reaches the read path only through the source
-        # built here; a caller supplying its own `source` wires it there.
+        # Held for the status/availability reads this manager issues itself;
+        # the metering-poll reads reach it only through the source built here,
+        # and a caller supplying its own `source` wires it there.
+        self._telemetry = device_telemetry
         self._source = source or DirectConnectorSource(
             connector_resolver, telemetry=device_telemetry
         )
@@ -275,6 +279,27 @@ class TelemetryManager:
             del self._devices[lfdi_norm]
             self._source.release(lfdi_norm)
             # Scheduler will handle task cleanup on next cancel_all
+
+    async def _read(self, connector: Any, method: str, lfdi: str) -> dict[str, Any]:
+        """Read one resource off a device, reporting it to the monitoring system.
+
+        These reads run on every metering cycle and do not pass through the
+        measurement source, so without this they are routine client-initiated
+        southbound traffic a monitoring system never sees. Mirrors
+        ``DerResourceManager._read``.
+
+        Args:
+            connector: The device connector to read from.
+            method: The connector method to call, e.g. ``"fetch_status"``.
+            lfdi: The device's LFDI, for attribution.
+
+        Returns:
+            Whatever the connector returned, unchanged.
+        """
+        values = await getattr(connector, method)()
+        if self._telemetry is not None and isinstance(values, dict):
+            self._telemetry.record_read(lfdi, values, connector=connector, lfdi=lfdi)
+        return values  # type: ignore[no-any-return]
 
     async def _metering_cycle(self, lfdi: str) -> None:
         """Single metering cycle: MUP/readings, then LogEvent and DERAvailability.
@@ -693,7 +718,7 @@ class TelemetryManager:
             return
 
         try:
-            status = await connector.fetch_status()
+            status = await self._read(connector, "fetch_status", state.lfdi)
             alarm = extract_alarm_status(status)
             events = alarm_bits_to_log_events(state.last_alarm_status, alarm)
             # Sync bits that can never produce a LogEvent (IEEE-reserved, 11+)
@@ -909,7 +934,7 @@ class TelemetryManager:
             return
 
         try:
-            data = await connector.fetch_availability()
+            data = await self._read(connector, "fetch_availability", state.lfdi)
             model = build_der_availability(data, default_time=int(self._timebase.now()))
             await self._client.put_bytes(
                 state.der_availability_href,

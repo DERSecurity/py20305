@@ -123,10 +123,11 @@ class BaseConnector:
     der_type: int = 83
 
     #: What this connector speaks to its device, as reported in southbound
-    #: telemetry. Defaults to "other" because the base class makes no claim
-    #: about a wire: a connector that talks Modbus says so, and one that
-    #: prints to a log should not be recorded as though it reached hardware.
-    telemetry_protocol: str = "other"
+    #: telemetry. Defaults to "generic" — the consumer contract's catch-all —
+    #: because the base class makes no claim about a wire: a connector that
+    #: talks Modbus says so, and one that prints to a log should not be
+    #: recorded as though it reached hardware.
+    telemetry_protocol: str = "generic"
 
     # ------------------------------------------------------------------
     # Telemetry

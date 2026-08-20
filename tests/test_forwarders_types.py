@@ -6,6 +6,8 @@ appear only when set, and how the loosely-typed constructor arguments are
 normalized.
 """
 
+import pytest
+
 from py20305.forwarders.types import (
     _VERSION,
     NetworkEndpoint,
@@ -29,6 +31,26 @@ class TestProtocol:
 
     def test_from_string(self) -> None:
         assert Protocol.from_string("2030.5") == Protocol.IEEE_2030_5
+
+    def test_the_catch_all_wire_value_is_generic(self) -> None:
+        """The consumer contract's catch-all spelling; any other value fails
+        enum parsing and schema validation on the receiving side."""
+        assert Protocol.GENERIC.value == "generic"
+
+    def test_generic_parses_from_its_wire_value(self) -> None:
+        assert Protocol.from_string("generic") == Protocol.GENERIC
+
+    def test_other_remains_a_source_alias_of_generic(self) -> None:
+        """`Protocol` is re-exported, so 0.2.x source importing OTHER must keep
+        working -- while everything it emits carries the corrected wire value."""
+        assert Protocol.OTHER is Protocol.GENERIC
+        assert Protocol.OTHER.value == "generic"
+
+    def test_the_old_catch_all_spelling_is_rejected(self) -> None:
+        """ "other" is not in the vocabulary; parsing it silently would let a
+        producer keep emitting a value consumers cannot classify."""
+        with pytest.raises(ValueError):
+            Protocol.from_string("other")
 
 
 class TestWireDirection:

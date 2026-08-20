@@ -172,10 +172,11 @@ jobs:
         run: python scripts/e2e_server.py down
 
   badges:
-    # Regenerates the test-count and coverage badges the README points at.
-    # They are committed rather than fetched from a badge service so they
-    # render while the repository is private and add no third-party
-    # dependency; swapping to a hosted service later is a README edit.
+    # Publishes test-count and coverage numbers as shields endpoint JSON on a
+    # dedicated history-free branch. Main takes no direct pushes -- every
+    # change to it comes through a pull request -- so badge data cannot live
+    # there; force-pushing one fresh commit to `badges` keeps the data current
+    # without accumulating history nobody reads.
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: test
     runs-on: ubuntu-latest
@@ -193,14 +194,12 @@ jobs:
         # shields.io draws the badges from these JSON files, so the README row
         # keeps one renderer and one style; only the numbers live here.
         run: python scripts/make_badges.py junit.xml coverage.xml
-      - name: Commit if changed
+      - name: Publish to the badges branch
         run: |
-          if git diff --quiet -- .github/badges; then
-            echo "badges unchanged"
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/badges
-          git commit -m "chore: refresh test and coverage badges [skip ci]"
-          git push
+          git checkout --orphan badge-data
+          git reset
+          git add -f .github/badges/tests.json .github/badges/coverage.json
+          git commit -m "badge data"
+          git push --force origin badge-data:badges

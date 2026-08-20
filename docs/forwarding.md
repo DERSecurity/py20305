@@ -96,7 +96,7 @@ forwarders:
 ```
 
 The `protocol` field carries what the connector speaks, not an assumption:
-`modbus` for a SunSpec device, and `other` for a connector that reaches no
+`modbus` for a SunSpec device, and `generic` for a connector that reaches no
 wire, such as the hardware-free demo. Recording those as Modbus would put a
 false claim on the channel and mislead a consumer filtering by protocol.
 
@@ -107,6 +107,63 @@ disable) rather than staying off for the life of the process.
 A device is identified by its address where the connector exposes one:
 `host:port` for Modbus TCP, and for a serial device the line itself
 (`rtu:/dev/ttyUSB0`) rather than a fabricated IP.
+
+## The client's own connection outcomes
+
+The two channels above describe traffic the client carried. A third reports
+the client's own connection outcomes -- the one record a passive network
+sensor beside it cannot produce, because a certificate that fails validation,
+a redirect loop or a 500 from the server are conditions known only inside the
+TLS session.
+
+```yaml
+forwarders:
+  mqtt:
+    endpoint: broker.example.com
+  connection_telemetry:
+    enabled: true
+```
+
+Off by default, and like device telemetry it rides the forwarder's transport,
+so the `mqtt` block is required for it to have anywhere to publish.
+
+Events are [OCSF Network Activity](https://schema.ocsf.io/) (`class_uid`
+4001) records, published to their own topic (`out/connection-events` under
+the forwarder's topic base by default -- `topic_suffix` moves it, and the
+configuration rejects the protocol-message topic, since OCSF envelopes and
+`ProtocolMessage` envelopes must not mix on one subscription). Each record
+carries the server endpoint, the service label `ieee2030.5`, and where a
+connection was established during the request, the client's own source
+address and port -- a fact only the client can report.
+
+What becomes an event:
+
+- A **transport failure** -- connect, timeout, TLS handshake -- reports
+  activity `Fail` (or `Refuse` when the peer refused) with status `Failure`
+  and the reason in `status_detail`. The reason is the record's entire value,
+  so it is required, and it is capped at 512 characters so a peer's response
+  body cannot ride through it.
+- An **application-layer failure** over a connection that did open -- a 500,
+  a 429, a redirect, an unusable body -- keeps activity `Open` with status
+  `Failure`. Reporting it as `Fail` would tell a reader the client never
+  reached the server, which is not what happened.
+- **Successes** are coalesced: within `coalesce_window_seconds` (60 by
+  default) they collapse into one record carrying the window's bounds and an
+  attempt count, so a polling client does not out-publish the passive capture
+  beside it. Zero disables coalescing. Failures are never coalesced -- each
+  keeps its own reason.
+
+A 204 No Content counts as a success: it is a validated contact that happens
+to signal itself by raising. Outcomes are reported per logical request, not
+per retry attempt, and the open success window is flushed when the client
+closes.
+
+Embedders not using the runner attach the same machinery through the
+client's observer seam: construct a
+`py20305.forwarders.connection_telemetry.ConnectionTelemetryEmitter` and
+assign it to `Sep2Client.connection_observer` -- or implement
+`py20305.client.observer.ConnectionObserver` to route outcomes anywhere
+else.
 
 ## Round-tripping
 

@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from py20305.commands import CommandOrigin
 from py20305.connectors.base import BaseConnector
 from py20305.connectors.device_telemetry import (
     MAX_ERROR_CHARS,
@@ -138,14 +139,14 @@ class TestEmittedEnvelope:
         """The demo connector reaches no wire; recording it as Modbus is a lie."""
         emitter, fw = make_emitter()
         emitter.record_read("dev1", {"W": 1500}, connector=object())
-        assert fw.events[0].payload["protocol"] == "other"
+        assert fw.events[0].payload["protocol"] == "generic"
 
     def test_an_unknown_protocol_does_not_break_the_data_path(self):
         emitter, fw = make_emitter()
         connector = Mock()
         connector.telemetry_protocol = "smoke-signals"
         emitter.record_read("dev1", {"W": 1500}, connector=connector)
-        assert fw.events[0].payload["protocol"] == "other"
+        assert fw.events[0].payload["protocol"] == "generic"
 
     def test_read_carries_the_points_verbatim(self):
         emitter, fw = make_emitter()
@@ -381,6 +382,134 @@ class TestWriteChokepoint:
         )
 
         assert connector.applied == [{"value": 80}]
+
+
+class RecordingCommandObserver:
+    """Keeps every command the dispatcher reports, for audit assertions."""
+
+    def __init__(self) -> None:
+        self.commands: list[dict[str, Any]] = []
+
+    def record_command(
+        self,
+        device: str,
+        control: str,
+        params: Any,
+        *,
+        origin: Any,
+        at: float,
+        error: str | None = None,
+    ) -> None:
+        self.commands.append(
+            {
+                "device": device,
+                "control": control,
+                "params": dict(params),
+                "origin": origin,
+                "error": error,
+            }
+        )
+
+    def record_readback(self, device: str, observed: Any, *, read_started_at: float) -> None:
+        pass
+
+
+class _NativeClearConnector:
+    """A connector with its own single-round-trip clear, like a remote proxy."""
+
+    endpoint_id = "10.0.0.7:1502"
+    telemetry_protocol = "modbus"
+
+    def __init__(self) -> None:
+        self.cleared = 0
+
+    async def clear_control(self) -> None:
+        self.cleared += 1
+
+
+class _FanOutConnector:
+    """A connector with no native clear: the dispatcher disables mode by mode."""
+
+    endpoint_id = "10.0.0.8:1502"
+    telemetry_protocol = "modbus"
+
+    def __init__(self) -> None:
+        self.applied: list[tuple[str, dict[str, Any]]] = []
+
+    async def update_p_lim(self, params: dict[str, Any]) -> None:
+        self.applied.append(("update_p_lim", params))
+
+    async def update_pf(self, params: dict[str, Any]) -> None:
+        self.applied.append(("update_pf", params))
+
+
+class TestClearControlAudit:
+    """A clear reaches the device like any other write, so it is recorded like
+    one. It is the comms-loss safe default -- the single control action most
+    worth being able to account for after the fact."""
+
+    @pytest.mark.asyncio
+    async def test_native_clear_is_one_audited_command(self):
+        connector = _NativeClearConnector()
+        observer = RecordingCommandObserver()
+        emitter, fw = make_emitter()
+        dispatcher = ConnectorDispatcher(
+            _registry_for({LFDI_A: connector}),
+            lambda _h: LFDI_A,
+            command_observer=observer,
+            telemetry=emitter,
+        )
+
+        await dispatcher.clear_control_by_lfdi(LFDI_A)
+
+        assert connector.cleared == 1
+        assert len(observer.commands) == 1
+        assert observer.commands[0]["device"] == LFDI_A
+        assert observer.commands[0]["control"] == "clear_control"
+        assert observer.commands[0]["origin"] == CommandOrigin.COMMS_LOSS
+
+    @pytest.mark.asyncio
+    async def test_native_clear_keeps_the_connector_attribution(self):
+        """The native path wraps the call in a lambda, which has no bound
+        connector to introspect. Losing the attribution there would report the
+        one write that most needs it as generic with no destination."""
+        connector = _NativeClearConnector()
+        emitter, fw = make_emitter()
+        dispatcher = ConnectorDispatcher(
+            _registry_for({LFDI_A: connector}),
+            lambda _h: LFDI_A,
+            telemetry=emitter,
+        )
+
+        await dispatcher.clear_control_by_lfdi(LFDI_A)
+
+        assert len(fw.events) == 1
+        assert fw.events[0].payload["protocol"] == "modbus"
+        # A clear is written *to* the device, so its address is the destination.
+        assert fw.events[0].payload["destination"] == {"ip": "10.0.0.7", "port": 1502}
+        assert body_of(fw.events[0])["control"] == "clear_control"
+
+    @pytest.mark.asyncio
+    async def test_fan_out_records_every_disable_write(self):
+        connector = _FanOutConnector()
+        observer = RecordingCommandObserver()
+        emitter, fw = make_emitter()
+        dispatcher = ConnectorDispatcher(
+            _registry_for({LFDI_A: connector}),
+            lambda _h: LFDI_A,
+            command_observer=observer,
+            telemetry=emitter,
+        )
+
+        await dispatcher.clear_control_by_lfdi(LFDI_A)
+
+        # The connector exposes two modes, so the fan-out disables exactly those.
+        assert {name for name, _ in connector.applied} == {"update_p_lim", "update_pf"}
+        assert {c["control"] for c in observer.commands} == {"p_lim", "pf"}
+        assert all(c["origin"] == CommandOrigin.COMMS_LOSS for c in observer.commands)
+        # And each write reaches the monitoring stream with the device's address.
+        assert len(fw.events) == 2
+        assert all(e.payload["destination"] == {"ip": "10.0.0.8", "port": 1502} for e in fw.events)
 
 
 class _ReadableConnector(BaseConnector):

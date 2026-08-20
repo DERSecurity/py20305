@@ -10,7 +10,7 @@ import pytest
 
 from py20305 import diagnostics
 from py20305.diagnostics import DiagnosticsStore
-from py20305.forwarders.base import MessageDirection, MessageFrame
+from py20305.forwarders.base import EventFrame, MessageDirection, MessageFrame
 from py20305.forwarders.config import MQTTForwarderConfig
 from py20305.forwarders.mqtt_adapter import MQTTForwarderAdapter
 from py20305.forwarders.mqtt_forwarder import MQTTForwarder
@@ -387,6 +387,29 @@ class TestStatistics:
         assert stats["messages_queued"] == 2  # both valid and invalid forwarded
         assert stats["client_lfdi"] == "test_agg"
         assert "underlying_forwarder" in stats
+
+    def test_queue_event_counts_on_the_adapter_itself(
+        self, mock_mqtt_forwarder: MQTTForwarder
+    ) -> None:
+        """The adapter is what the manager registers, so its own stats are
+        what an operator sees; counting only on the wrapped forwarder would
+        bury the number under ``underlying_forwarder``."""
+        adapter = MQTTForwarderAdapter(mock_mqtt_forwarder)
+        adapter._running = True
+        mock_mqtt_forwarder.queue_event = MagicMock()
+
+        event = EventFrame(payload={"protocol": "modbus"}, topic_suffix="out/device")
+        adapter.queue_event(event)
+        adapter.queue_event(event)
+
+        assert adapter.get_statistics()["events_queued"] == 2
+        assert mock_mqtt_forwarder.queue_event.call_count == 2
+
+    def test_events_queued_reports_zero_before_any_event(
+        self, mock_mqtt_forwarder: MQTTForwarder
+    ) -> None:
+        adapter = MQTTForwarderAdapter(mock_mqtt_forwarder)
+        assert adapter.get_statistics()["events_queued"] == 0
 
 
 class TestWireFormatRoundTrip:
