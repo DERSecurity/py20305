@@ -165,6 +165,44 @@ assign it to `Sep2Client.connection_observer` -- or implement
 `py20305.client.observer.ConnectionObserver` to route outcomes anywhere
 else.
 
+## Measured device state
+
+A third payload kind rides the same transport: `TelemetryFrame`, a device's
+measured values as of one acquisition. It is a separate kind rather than a
+`MessageFrame` because nine of that type's fields describe an HTTP exchange and
+none of them mean anything for a measurement.
+
+```python
+from py20305.forwarders.base import TelemetryFrame, TelemetryPoint
+
+forwarder.queue_telemetry(
+    TelemetryFrame(
+        device=lfdi,
+        points={"W": TelemetryPoint(value=4200, source_timestamp=read_at, quality="good")},
+        quality="good",
+        last_success=read_at,
+    )
+)
+```
+
+Frames publish to `out/telemetry` under the forwarder's topic base, and are
+counted separately from protocol messages, so a subscriber that wants only
+measurements says so at the broker rather than filtering every message on
+arrival.
+
+Two fields carry more than they appear to. `source_timestamp` is when the device
+was read, not when the frame was published: a consumer judging freshness cannot
+get that from arrival time, because a retained value arrives just as promptly as
+a fresh one. And `protocol_quality` is the device's own opinion of the reading,
+kept separate from `quality`, which is whether it was read recently enough --
+they answer different questions and a consumer usually cares about both.
+
+Declining is the default. A forwarder built to carry protocol capture is not
+wrong to ignore telemetry, so `queue_telemetry` drops the frame unless the
+forwarder overrides it. The direction holds as it does for every other kind: a
+forwarder is a sink, fed by whoever produced the frame, with no read path back
+into it.
+
 ## Round-tripping
 
 `to_dict()` and `from_dict()` are inverses, and unknown keys under
