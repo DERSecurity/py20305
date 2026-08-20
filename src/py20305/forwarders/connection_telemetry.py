@@ -102,7 +102,14 @@ def _safe_url_reference(url: str) -> str:
     or signed query parameters, and this reference lands on a topic scoped
     for connection metadata.
     """
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        # The value is peer-controlled, so a malformed one must neither raise
+        # into the caller nor pass through verbatim -- either would let the
+        # peer shape the record. An opaque marker says what happened without
+        # carrying any of it.
+        return "<unparseable url>"
     return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
 
 
@@ -656,17 +663,22 @@ class ConnectionTelemetryEmitter:
             # The failure is also the clock's chance to close an expired
             # success window: those successes happened before this failure,
             # and holding them until the next success -- which may never
-            # come -- would leave them unreported until shutdown.
-            expired = self._window.take_expired(_now_ms())
-            if expired is not None:
-                self._emit(
-                    build_coalesced_success_event(
-                        expired,
-                        metadata=self._metadata,
-                        server_endpoint=self._server_endpoint,
-                        url=self._base_url,
+            # come -- would leave them unreported until shutdown. Guarded on
+            # its own: a problem emitting the window must not cost the
+            # failure record, which is the more important of the two.
+            try:
+                expired = self._window.take_expired(_now_ms())
+                if expired is not None:
+                    self._emit(
+                        build_coalesced_success_event(
+                            expired,
+                            metadata=self._metadata,
+                            server_endpoint=self._server_endpoint,
+                            url=self._base_url,
+                        )
                     )
-                )
+            except Exception:
+                self._record_emit_failure("close an expired window")
             outcome = classify(exc)
             if outcome is None:
                 return

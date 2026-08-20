@@ -125,6 +125,14 @@ class TestClassify:
         outcome = classify(Sep2RedirectError("moved", "https://elsewhere/dcap", 301))
         assert outcome.activity_id is NetworkActivityId.OPEN
 
+    def test_a_malformed_location_cannot_suppress_the_event(self):
+        """The Location is peer-controlled; an unparseable one must neither
+        raise into the request path nor pass through verbatim."""
+        outcome = classify(Sep2RedirectError("moved", "http://[invalid", 302))
+        assert outcome is not None
+        assert "[invalid" not in outcome.detail
+        assert "unparseable" in outcome.detail
+
     def test_a_redirect_reports_a_stripped_location(self):
         """The Location header is peer-controlled: no userinfo, no query."""
         outcome = classify(
@@ -456,6 +464,33 @@ class TestEmitter:
         emitter.on_connect(SOCKET)
         emitter.record_failure(Sep2ProtocolError("boom", 500))
         assert fw.events[0].payload["src_endpoint"]["port"] == 52511
+
+    def test_a_window_emission_problem_does_not_cost_the_failure_record(self):
+        """The failure record is the more important of the two."""
+
+        class FailsOnSuccessEvents:
+            def __init__(self):
+                self.events = []
+
+            def queue_event(self, event):
+                if event.payload["status"] == "Success":
+                    raise RuntimeError("broker rejected the window")
+                self.events.append(event)
+
+        fw = FailsOnSuccessEvents()
+        emitter, _ = make_emitter(window=60.0, forwarder=fw)
+        emitter.record_success(now_ms=1_000)
+
+        import py20305.forwarders.connection_telemetry as ct
+
+        original = ct._now_ms
+        ct._now_ms = lambda: 200_000
+        try:
+            emitter.record_failure(Sep2TlsError("bad chain"))
+        finally:
+            ct._now_ms = original
+        assert [e.payload["status"] for e in fw.events] == ["Failure"]
+        assert emitter.emit_failures == 1
 
     def test_a_failure_flushes_an_expired_success_window(self):
         """Successes must not wait for a next success that may never come."""
