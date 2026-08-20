@@ -1,6 +1,7 @@
 """Tests for MQTT forwarder adapter."""
 # mypy: disable-error-code="method-assign"
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -10,11 +11,17 @@ import pytest
 
 from py20305 import diagnostics
 from py20305.diagnostics import DiagnosticsStore
-from py20305.forwarders.base import EventFrame, MessageDirection, MessageFrame
+from py20305.forwarders.base import (
+    EventFrame,
+    MessageDirection,
+    MessageFrame,
+    TelemetryFrame,
+    TelemetryPoint,
+)
 from py20305.forwarders.config import MQTTForwarderConfig
 from py20305.forwarders.mqtt_adapter import MQTTForwarderAdapter
 from py20305.forwarders.mqtt_forwarder import MQTTForwarder
-from py20305.forwarders.types import _VERSION, ProtocolMessage
+from py20305.forwarders.types import _VERSION, ProtocolMessage, WireDirection
 
 # The envelope's `version` moves with every release, so it is imported rather
 # than written as a literal: a literal would assert nothing and would fail on
@@ -656,3 +663,78 @@ class TestForwarderIdAndSourceHost:
         assert v2_dict["forwarder_id"] == "site-alpha-agg-01"
         assert v2_dict["source"]["ip"] == "aggregator"
         assert v2_dict["destination"]["ip"] == "test-server"
+
+
+class TestTelemetryConversion:
+    """Measured device state, wrapped in the same envelope as everything else.
+
+    The adapter is what turns each payload kind into the wire form. Telemetry
+    rides the envelope rather than defining its own, so a consumer parses one
+    shape regardless of which subsystem produced the payload.
+    """
+
+    @staticmethod
+    def _frame() -> TelemetryFrame:
+        return TelemetryFrame(
+            device="ab" * 20,
+            points={
+                "W": TelemetryPoint(value=4200, source_timestamp=100.0, quality="good"),
+                "Hz": TelemetryPoint(
+                    value=60.0, source_timestamp=100.0, quality="good", protocol_quality=0
+                ),
+            },
+            quality="good",
+            last_success=100.0,
+        )
+
+    def test_a_frame_becomes_a_protocol_message(self, mock_mqtt_forwarder: MQTTForwarder) -> None:
+        adapter = MQTTForwarderAdapter(mock_mqtt_forwarder, client_lfdi="cd" * 20)
+
+        message = adapter._convert_telemetry(self._frame())
+
+        assert isinstance(message, ProtocolMessage)
+        assert message.to_dict()["version"] == COMMON_VERSION
+
+    def test_the_device_identifies_the_reading(self, mock_mqtt_forwarder: MQTTForwarder) -> None:
+        """The client id is the device the values came from, not the aggregator:
+        a consumer correlating readings needs to know which DER produced them."""
+        adapter = MQTTForwarderAdapter(mock_mqtt_forwarder, client_lfdi="cd" * 20)
+
+        message = adapter._convert_telemetry(self._frame())
+
+        assert message.client_id == "ab" * 20
+
+    def test_telemetry_is_always_upstream(self, mock_mqtt_forwarder: MQTTForwarder) -> None:
+        """Measurements only ever flow outward. There is no downstream case to
+        represent, so the direction is not derived from anything."""
+        adapter = MQTTForwarderAdapter(mock_mqtt_forwarder)
+
+        message = adapter._convert_telemetry(self._frame())
+
+        assert message.direction == WireDirection.UPSTREAM
+
+    def test_the_measurements_survive_the_envelope(
+        self, mock_mqtt_forwarder: MQTTForwarder
+    ) -> None:
+        """What a consumer actually reads: the points, their values, and the
+        time the device was read rather than the time this was published."""
+        adapter = MQTTForwarderAdapter(mock_mqtt_forwarder)
+
+        message = adapter._convert_telemetry(self._frame())
+        payload = json.loads(message.payload.data)
+
+        assert payload["device"] == "ab" * 20
+        assert payload["points"]["W"]["value"] == 4200
+        assert payload["points"]["W"]["source_timestamp"] == 100.0
+        assert payload["quality"] == "good"
+
+    def test_queueing_telemetry_reaches_the_forwarder(
+        self, mock_mqtt_forwarder: MQTTForwarder
+    ) -> None:
+        mock_mqtt_forwarder.queue_telemetry = MagicMock()
+        adapter = MQTTForwarderAdapter(mock_mqtt_forwarder)
+        adapter._running = True
+
+        adapter.queue_telemetry(self._frame())
+
+        mock_mqtt_forwarder.queue_telemetry.assert_called_once()

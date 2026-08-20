@@ -9,7 +9,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from py20305.forwarders.base import BaseForwarder, EventFrame, MessageFrame
+from py20305.forwarders.base import (
+    BaseForwarder,
+    EventFrame,
+    MessageFrame,
+    TelemetryFrame,
+)
 
 if TYPE_CHECKING:
     from py20305.forwarders.config import ForwarderConfig
@@ -262,6 +267,23 @@ class ForwarderManager:
                 forwarder.queue_event(event)
             except Exception as e:
                 logger.error("Error queueing event to forwarder %s: %s", forwarder.name, e)
+
+    def queue_telemetry(self, frame: TelemetryFrame) -> None:
+        """Route measured device state to all registered forwarders.
+
+        A forwarder that does not carry telemetry drops it (the default
+        implementation on ``AbstractForwarder``), so this is safe to call
+        regardless of which forwarders are registered.
+        """
+        if not self._running:
+            logger.debug("ForwarderManager not running, dropping telemetry")
+            return
+
+        for forwarder in self._forwarders:
+            try:
+                forwarder.queue_telemetry(frame)
+            except Exception as e:
+                logger.error("Error queueing telemetry to forwarder %s: %s", forwarder.name, e)
 
     def get_statistics(self) -> dict[str, Any]:
         """Return aggregated statistics from all forwarders."""

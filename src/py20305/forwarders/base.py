@@ -61,6 +61,48 @@ class MessageFrame:
 
 
 @dataclass
+class TelemetryPoint:
+    """One measured value as published upstream."""
+
+    value: Any
+    #: When the device was read, not when this was published. A consumer
+    #: judging freshness needs the former; the latter only says when we got
+    #: around to sending it.
+    source_timestamp: float
+    #: Store quality -- ``good``, ``stale`` or ``comm_lost``.
+    quality: str
+    #: The connector's own quality bits for this point, when it supplied any.
+    #: Kept separate from :attr:`quality` because they answer different
+    #: questions: whether the device trusts the reading, and whether we read it
+    #: recently enough.
+    protocol_quality: int | None = None
+
+
+@dataclass
+class TelemetryFrame:
+    """A device's measured state, for publication to a monitoring upstream.
+
+    Deliberately not a :class:`MessageFrame`. Nine of that type's twelve fields
+    describe an HTTP exchange -- method, URI, status code, host, port,
+    direction, resource type, validity -- and none of them mean anything for a
+    measurement. Reusing it would leave every telemetry message carrying nine
+    empty fields and a ``message_type`` that lies about what it holds.
+    """
+
+    device: str
+    points: dict[str, TelemetryPoint]
+    #: Device-level quality. ``comm_lost`` means the points are last-known
+    #: values retained deliberately, not current ones (D10) -- a consumer that
+    #: ignores this republishes stale numbers as though they were fresh.
+    quality: str
+    #: Epoch seconds of the last acquisition that succeeded, or None if none
+    #: ever has.
+    last_success: float | None = None
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class EventFrame:
     """A pre-serialized event carried on the same transport as message frames.
 
@@ -143,6 +185,16 @@ class BaseForwarder(Protocol):
         """
         ...
 
+    def queue_telemetry(self, frame: TelemetryFrame) -> None:
+        """Queue measured device state for forwarding.
+
+        A separate entry point rather than an overload of
+        :meth:`queue_message`, so a forwarder that carries protocol capture and
+        nothing else can decline telemetry by simply not implementing it.
+        Non-blocking, like ``queue_message``.
+        """
+        ...
+
     def get_statistics(self) -> dict[str, Any]:
         """Return forwarding statistics.
 
@@ -206,6 +258,16 @@ class AbstractForwarder(ABC):
         protocol messages is unaffected by a subsystem that emits events.
         """
         logger.debug("%s does not carry events; dropping %s", self._name, event.kind)
+
+    def queue_telemetry(self, frame: TelemetryFrame) -> None:
+        """Discard telemetry by default.
+
+        Concrete rather than abstract: telemetry arrived after these forwarders
+        did, and a forwarder built to carry protocol capture is not wrong to
+        ignore it. Making it abstract would break every existing implementation
+        to no benefit.
+        """
+        logger.debug("%s does not carry telemetry; dropping frame", self._name)
 
     def get_statistics(self) -> dict[str, Any]:
         """Return forwarding statistics."""

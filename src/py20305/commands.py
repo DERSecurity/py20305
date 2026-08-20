@@ -37,6 +37,10 @@ class CommandOrigin(StrEnum):
 
     IEEE2030_5 = "ieee2030_5"
     LOCAL_API = "local_api"
+    #: A SunSpec Modbus master writing a control register. Its own origin because
+    #: "who moved this setpoint" is the question the record exists to answer, and
+    #: a second command protocol is exactly when that stops being obvious.
+    SUNSPEC = "sunspec"
     #: DdercTracker reapplying DefaultDERControl on the fallback path after an
     #: event completes. The classic "my setpoint reverted and nothing says why".
     DDERC_REAPPLY = "dderc_reapply"
@@ -140,3 +144,37 @@ class NullCommandObserver:
         self, device: str, observed: Mapping[str, Any], *, read_started_at: float
     ) -> None:
         """No-op."""
+
+
+@runtime_checkable
+class CommandGate(Protocol):
+    """Whether an origin may command a device.
+
+    A deployment may serve several command interfaces while intending only one of
+    them to command any given device. Deciding that in configuration alone leaves
+    it unenforced at the write: every interface still reaches the dispatcher, so
+    one interface's events and another's setpoints overwrite each other while the
+    configuration reads as though a single one were in charge.
+
+    Injected rather than imported, for the same reason :class:`CommandObserver`
+    is. Which interface holds authority over a device is the consuming
+    application's concern, and the dispatcher is client code, so the dependency
+    points that way.
+    """
+
+    def may_command(self, device: str, origin: CommandOrigin) -> bool:
+        """Whether ``origin`` holds the command role for ``device``."""
+        ...
+
+
+class AllowAllCommands:
+    """Permits everything. The default where no authority is wired.
+
+    A consumer with a single command interface, or a test concerned with the
+    write rather than with who was allowed to make it, behaves exactly as it did
+    before the gate existed.
+    """
+
+    def may_command(self, device: str, origin: CommandOrigin) -> bool:
+        """Always True."""
+        return True
