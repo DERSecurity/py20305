@@ -1,5 +1,6 @@
 """Telemetry module for IEEE 2030.5 MirrorUsagePoint, meter readings, and status."""
 
+from py20305.telemetry.coordinator import TelemetryCoordinator
 from py20305.telemetry.der_availability import build_der_availability
 from py20305.telemetry.der_capability import build_der_capability
 from py20305.telemetry.der_resource_manager import DerResourceManager
@@ -13,6 +14,7 @@ from py20305.telemetry.scaling import ScaledReading
 __all__ = [
     "DerResourceManager",
     "ScaledReading",
+    "TelemetryCoordinator",
     "TelemetryManager",
     "build_der_availability",
     "build_der_capability",

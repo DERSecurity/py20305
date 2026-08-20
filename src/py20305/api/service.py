@@ -71,6 +71,21 @@ class ClientAPIService:
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._loop = loop
 
+    def attach_telemetry(
+        self,
+        telemetry: TelemetryManager | None = None,
+        der_resources: DerResourceManager | None = None,
+    ) -> None:
+        """Supply the telemetry managers after construction.
+
+        An API served during an outage has to start before discovery, and the
+        managers report on hrefs discovery finds -- so they exist only later.
+        Without this the telemetry endpoints would answer "not initialized" for
+        the lifetime of a process that is posting readings.
+        """
+        self._telemetry = telemetry
+        self._der_resources = der_resources
+
     async def _run_on_loop(self, coro: Coroutine[Any, Any, T]) -> T:
         """Await *coro* on the correct event loop.
 

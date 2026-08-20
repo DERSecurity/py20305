@@ -62,7 +62,33 @@ error: invalid configuration in client.yaml:
    duplicate on every restart and the utility would see one device as several.
    A server that refuses in-band registration is not fatal; many provision out
    of band.
-4. Polls once, then runs the schedule until stopped.
+4. Starts reporting each configured device, unless `telemetry.enabled` is
+   `false`.
+5. Polls once, then runs the schedule until stopped.
+
+## What it reports
+
+With `telemetry.enabled` — on by default — each configured device is read on a
+schedule and reported to the server:
+
+| Resource | How often |
+|---|---|
+| Meter readings, as MirrorUsagePoints | `post_rate_seconds` |
+| DERStatus | `post_rate_seconds` |
+| DERAvailability | `post_rate_seconds` |
+| DERSettings, when it has changed | `der_settings_poll_rate_seconds` |
+| DERCapability, when it has changed | `der_capability_poll_rate_seconds` |
+| LogEvents, when a device raises an alarm | On the reading cycle |
+
+The server has the final say on the posting rate: an `EndDevice.postRate` above
+zero replaces `post_rate_seconds` for that device, which is what IEEE 2030.5
+specifies. A server exposing no MirrorUsagePointList stops the readings only —
+the DER resources are a separate conversation and are still PUT — and the client
+says so once rather than failing a cycle forever.
+
+Rediscovery re-reads every path. A server that moves its resources, or that
+brings the MirrorUsagePoint function set online only after the client
+connected, is picked up without a restart.
 
 ## Stopping
 

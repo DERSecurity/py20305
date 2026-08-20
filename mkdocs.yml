@@ -54,6 +54,11 @@ markdown_extensions:
   - toc:
       permalink: true
 
+# Feature plans live in the repository for whoever picks the work up next.
+# They are not product documentation, so they stay out of the site.
+exclude_docs: |
+  planning/
+
 nav:
   - Home: index.md
   - Quickstart: quickstart.md
