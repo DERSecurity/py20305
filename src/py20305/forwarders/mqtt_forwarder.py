@@ -444,7 +444,7 @@ class MQTTForwarder(AbstractForwarder):
     def _telemetry_to_dict(self, frame: TelemetryFrame) -> dict[str, Any]:
         """Convert a TelemetryFrame to a dict for publishing.
 
-        Fallback for a forwarder used without the Sentry adapter; the adapter
+        Fallback for a forwarder used without an envelope adapter; an adapter
         supplies a converter producing the ProtocolMessage v2.0 envelope.
         """
         return {

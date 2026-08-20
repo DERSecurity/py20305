@@ -111,6 +111,14 @@ class MQTTForwarderAdapter(AbstractForwarder):
         # to avoid clobbering a converter supplied at construction.
         if not self._forwarder.has_message_converter:
             self._forwarder.set_message_converter(lambda frame: frame.content)
+        # Telemetry converts in the publish loop rather than at queue time, so
+        # the converter has to be installed here. `to_dict()` and not the
+        # message itself: the loop serializes what the converter returns, and a
+        # dataclass would land on the wire as its repr.
+        if not self._forwarder.has_telemetry_converter:
+            self._forwarder.set_telemetry_converter(
+                lambda frame: self._convert_telemetry(frame).to_dict()
+            )
 
     @property
     def client_lfdi(self) -> str | None:
@@ -185,8 +193,9 @@ class MQTTForwarderAdapter(AbstractForwarder):
         """
         if not self._running:
             return
-
-        self._record_queued()
+        # Its own counter, for the same reason events have one: folding these
+        # into the message count would misreport both.
+        self._stats["telemetry_queued"] = self._stats.get("telemetry_queued", 0) + 1
         self._forwarder.queue_telemetry(frame)
 
     def queue_message(self, frame: MessageFrame) -> None:
@@ -282,7 +291,7 @@ class MQTTForwarderAdapter(AbstractForwarder):
         )
 
     def _convert_telemetry(self, frame: TelemetryFrame) -> ProtocolMessage:
-        """Convert a TelemetryFrame to the Sentry v2.0 envelope.
+        """Convert a TelemetryFrame to the ProtocolMessage v2.0 envelope.
 
         ``Protocol.GENERIC`` rather than ``IEEE_2030_5``: these are measured
         values read from a device over whatever the connector speaks, not a
@@ -313,7 +322,8 @@ class MQTTForwarderAdapter(AbstractForwarder):
         source, destination = self._telemetry_endpoints()
         return ProtocolMessage(
             protocol=Protocol.GENERIC,
-            # Always upstream: telemetry only ever flows aggregator -> Sentry.
+            # Always upstream: measurements only ever flow from this client to
+            # its collector, so there is no downstream case to represent.
             direction=WireDirection.UPSTREAM,
             client_id=frame.device or self._client_lfdi or "Unknown",
             payload=payload,
@@ -409,7 +419,7 @@ class MQTTForwarderAdapter(AbstractForwarder):
     def _telemetry_endpoints(self) -> tuple[NetworkEndpoint, NetworkEndpoint]:
         """Endpoints for a telemetry frame.
 
-        The aggregator is the source; there is no 2030.5 server involved, so
+        This client is the source; there is no 2030.5 server involved, so
         the destination is the uplink rather than a protocol peer.
         """
         return (

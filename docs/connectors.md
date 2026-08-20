@@ -137,6 +137,12 @@ It goes through the same funnel, so everything an event-driven write gets applie
 the command is recorded with its origin, and a failure is recorded as rejected and
 re-raised. Reaching a connector directly would bypass both.
 
+Unlike a server-issued control, a refusal here raises
+`CommandNotPermittedError`. This caller named one control and has somewhere to
+put the answer -- a protocol server owes its own client the difference between a
+write that failed and one that was not permitted, and cannot report either from
+silence.
+
 ### Who may command
 
 An application serving more than one command interface usually intends only one
@@ -157,11 +163,17 @@ so the dependency points that way — as it does for `CommandObserver`. Omitted,
 every origin may command everything, which is right for a single-interface
 consumer.
 
-A refused command is reported through `diagnostics` and dropped rather than
-raised: an interface posting to a device another one commands is a configuration
-being honored, not a fault, and raising would make every such control an error for
-the caller to interpret. Nothing is recorded for it either, because a command that
-never left must not appear in the audit trail.
+A refused *server-issued* control is reported through `diagnostics` and dropped
+rather than raised: an interface posting to a device another one commands is a
+configuration being honored, not a fault, and raising would make every such
+control an error for the event engine to interpret. Nothing is recorded for it
+either, because a command that never left must not appear in the audit trail.
+
+One case is deliberately ungated. Authority is held per device, so a control the
+resolver cannot name a device for has no rule to apply -- an href that resolves
+to a connector but not to an LFDI. Those writes proceed, and say so at debug
+level. Denying them would fail closed by accident rather than by decision, and
+would drop writes that worked before the gate existed.
 
 ### What counts as an implemented mode
 

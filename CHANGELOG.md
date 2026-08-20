@@ -30,6 +30,15 @@ below says so explicitly.
   quality separately from freshness. Forwarders that carry only protocol messages
   decline it by default.
 - `CommandOrigin.SUNSPEC`, for a SunSpec Modbus master writing a control register.
+- `CommandNotPermittedError`, raised by `apply_operation` when a gate refuses the
+  write. A caller that named one control needs to tell a refusal from a failure;
+  a server-issued control is still reported and dropped rather than raised.
+- **Compatibility:** `queue_telemetry` joins `BaseForwarder`, so a forwarder that
+  satisfies that protocol structurally -- without inheriting `AbstractForwarder`
+  -- must define it to keep satisfying `isinstance`. Inheriting the abstract base
+  needs no change, since it declines by default. This follows `queue_event` in
+  0.3.0 rather than making telemetry a second-class kind routed by capability
+  check.
 
 - Connection-telemetry hardening: peer-controlled content stays off the
   metadata topic (protocol errors report the status code alone, payload

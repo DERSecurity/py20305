@@ -16,6 +16,7 @@ from typing import Any
 from py20305.commands import (
     AllowAllCommands,
     CommandGate,
+    CommandNotPermittedError,
     CommandObserver,
     CommandOrigin,
     NullCommandObserver,
@@ -240,8 +241,13 @@ class ConnectorDispatcher:
         origin: CommandOrigin,
         label: str,
         connector: BaseConnector | None = None,
-    ) -> None:
+    ) -> bool:
         """Apply one translated mode and report it to the command observer.
+
+        Returns True when the control reached the connector, False when the gate
+        refused it. A caller dispatching a server-issued control ignores the
+        result, since a refusal there is reported rather than raised; a caller
+        that named one control needs to tell the two apart.
 
         Stamped before the call, like an acquisition: the write shadow compares
         this against when a readback *started*, so a command has to be marked at
@@ -261,9 +267,17 @@ class ConnectorDispatcher:
         # named operation. Checking at each caller instead would mean the DDERC
         # reapply and comms-loss routes each needing their own gate, which is
         # exactly how a write path ends up ungated.
-        if lfdi and not self._gate.may_command(lfdi, origin):
-            self._report_not_commanding(lfdi, control, origin)
-            return
+        if lfdi:
+            if not self._gate.may_command(lfdi, origin):
+                self._report_not_commanding(lfdi, control, origin)
+                return False
+        else:
+            # Deliberately ungated: authority is held per device, and there is no
+            # device here to hold it over. Denying instead would drop writes for
+            # an href that resolves to a connector but not to an LFDI -- a case
+            # that predates the gate and is handled below -- so the choice is to
+            # let it through and say so rather than to fail closed by accident.
+            logger.debug("Ungated %s on %s: no LFDI to resolve authority for", control, label)
         issued_at = time.time()
         # A bound method carries its connector, so the device's address and
         # protocol are reachable without widening every call site. A caller
@@ -294,6 +308,7 @@ class ConnectorDispatcher:
             # No LFDI means no key to file the record under. Rare (an href that
             # resolves to a connector but not to an LFDI) and worth seeing.
             logger.debug("Applied %s to %s with no LFDI; not recorded", control, label)
+        return True
 
     async def apply_operation(
         self,
@@ -314,6 +329,11 @@ class ConnectorDispatcher:
         Raises:
             ConnectorError: no connector is registered for ``lfdi``, or the
                 connector does not implement this control.
+            CommandNotPermittedError: a gate refused this origin authority over
+                this device. Raised rather than reported because this caller
+                named the control and has somewhere to put the answer -- a
+                protocol server owes its own client the distinction between a
+                write that failed and one that was not permitted.
         """
         connector = await self._resolve_connector_by_lfdi(lfdi)
         if connector is None:
@@ -322,7 +342,14 @@ class ConnectorDispatcher:
         method, _reason = self._control_support(connector, method_name)
         if method is None:
             raise ConnectorError(f"connector for {lfdi} does not implement {method_name}")
-        await self._apply_one(method, method_name, params, lfdi=lfdi, origin=origin, label=lfdi)
+        applied = await self._apply_one(
+            method, method_name, params, lfdi=lfdi, origin=origin, label=lfdi
+        )
+        if not applied:
+            raise CommandNotPermittedError(
+                f"{origin.value} may not command {lfdi}: another interface holds the "
+                f"command role, so {control!r} was not applied"
+            )
 
     async def apply_default_control(
         self,
@@ -515,8 +542,8 @@ class ConnectorDispatcher:
 
         report(
             "warnings",
-            f"{origin.value} may not command {lfdi[:8]}: another northbound "
-            f"interface holds the command role. '{control}' was not applied.",
+            f"{origin.value} may not command {lfdi[:8]}: another interface holds "
+            f"the command role. '{control}' was not applied.",
             source="dispatcher",
             dedup_key=f"not-commanding-{origin.value}-{lfdi}",
             details={"device": lfdi, "origin": origin.value, "control": control},

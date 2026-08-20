@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from py20305.commands import CommandOrigin
+from py20305.commands import CommandNotPermittedError, CommandOrigin
 from py20305.connectors.base import BaseConnector
 from py20305.connectors.dispatcher import BY_DESIGN, OFFER_MISSING, ConnectorDispatcher
 from py20305.connectors.errors import ConnectorError
@@ -149,17 +149,58 @@ class TestCommandGate:
     """Authority is checked at the one funnel every apply path shares."""
 
     @pytest.mark.asyncio
-    async def test_a_refused_origin_never_reaches_the_connector(self) -> None:
+    async def test_a_refused_named_control_raises_rather_than_returning(self) -> None:
+        """This caller named one control and has an error channel. Returning
+        quietly would have it report success for a write that never happened --
+        a protocol server would acknowledge its client for nothing."""
         connector = _Implements()
         gate = _Gate(CommandOrigin.SUNSPEC)
         dispatcher = _dispatcher(connector, gate)
 
-        await dispatcher.apply_operation(
-            LFDI, "fixed_w", {"WSetEna": 1}, origin=CommandOrigin.SUNSPEC
-        )
+        with pytest.raises(CommandNotPermittedError, match="may not command"):
+            await dispatcher.apply_operation(
+                LFDI, "fixed_w", {"WSetEna": 1}, origin=CommandOrigin.SUNSPEC
+            )
 
         assert connector.seen == []
         assert (LFDI, CommandOrigin.SUNSPEC) in gate.asked
+
+    @pytest.mark.asyncio
+    async def test_a_refused_server_control_is_dropped_not_raised(self) -> None:
+        """The other half of the contract: an interface posting to a device
+        another one commands is a configuration being honored, so the event
+        engine is not handed an exception to interpret."""
+        connector = _Implements()
+        dispatcher = _dispatcher(connector, _Gate(CommandOrigin.COMMS_LOSS))
+
+        await dispatcher.clear_control_by_lfdi(LFDI)
+
+        assert connector.seen == []
+
+    @pytest.mark.asyncio
+    async def test_a_device_with_no_lfdi_is_ungated(self) -> None:
+        """Stated rather than incidental: authority is held per device, and there
+        is no device here to hold it over. Denying would drop writes for an href
+        that resolves to a connector but not to an LFDI."""
+        connector = _Implements()
+        gate = _Gate(CommandOrigin.SUNSPEC)
+        dispatcher = ConnectorDispatcher(
+            _registry_for(connector),
+            lfdi_resolver=lambda _href: None,
+            command_gate=gate,
+        )
+
+        await dispatcher._apply_one(
+            connector.update_fixed_w,
+            "update_fixed_w",
+            {"WSetEna": 1},
+            lfdi=None,
+            origin=CommandOrigin.SUNSPEC,
+            label="/edev/1",
+        )
+
+        assert len(connector.seen) == 1
+        assert gate.asked == []
 
     @pytest.mark.asyncio
     async def test_a_permitted_origin_still_applies(self) -> None:
@@ -185,9 +226,10 @@ class TestCommandGate:
             command_gate=_Gate(CommandOrigin.SUNSPEC),
         )
 
-        await dispatcher.apply_operation(
-            LFDI, "fixed_w", {"WSetEna": 1}, origin=CommandOrigin.SUNSPEC
-        )
+        with pytest.raises(CommandNotPermittedError):
+            await dispatcher.apply_operation(
+                LFDI, "fixed_w", {"WSetEna": 1}, origin=CommandOrigin.SUNSPEC
+            )
 
         observer.record_command.assert_not_called()
 

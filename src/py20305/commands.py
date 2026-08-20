@@ -178,3 +178,19 @@ class AllowAllCommands:
     def may_command(self, device: str, origin: CommandOrigin) -> bool:
         """Always True."""
         return True
+
+
+class CommandNotPermittedError(Exception):
+    """A gate refused this origin authority over this device.
+
+    Distinct from a connector error because the cause and the remedy are
+    different: nothing is wrong with the device or the transport, and the caller
+    cannot retry its way out of it. A caller serving a protocol client needs the
+    distinction to answer that client honestly -- refused is not the same answer
+    as failed.
+
+    Raised only by the entry points whose caller has somewhere to put it. A
+    control arriving from an event engine is reported and dropped instead, since
+    an interface posting to a device another one commands is a configuration
+    being honored rather than a fault.
+    """

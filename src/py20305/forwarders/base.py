@@ -92,7 +92,7 @@ class TelemetryFrame:
     device: str
     points: dict[str, TelemetryPoint]
     #: Device-level quality. ``comm_lost`` means the points are last-known
-    #: values retained deliberately, not current ones (D10) -- a consumer that
+    #: values retained deliberately, not current ones -- a consumer that
     #: ignores this republishes stale numbers as though they were fresh.
     quality: str
     #: Epoch seconds of the last acquisition that succeeded, or None if none
