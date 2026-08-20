@@ -14,12 +14,16 @@ from collections.abc import Callable
 from typing import Any
 
 from py20305.commands import (
+    AllowAllCommands,
+    CommandGate,
+    CommandNotPermittedError,
     CommandObserver,
     CommandOrigin,
     NullCommandObserver,
 )
 from py20305.connectors.base import BaseConnector, ScheduleNotification
 from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
+from py20305.connectors.errors import ConnectorError
 from py20305.connectors.modes import (
     translate_controls,
     translate_default_controls,
@@ -34,6 +38,15 @@ from py20305.models.sep.sep import (
 logger = logging.getLogger(__name__)
 
 
+#: The connector inherits ``BaseConnector``'s no-op for this mode, so it has no
+#: register for it and never claimed one. Expected, not actionable.
+BY_DESIGN = "by_design"
+
+#: No implementation resolves at all. For a plugin-backed connector that means
+#: the live offer is missing a mode it should carry. Actionable.
+OFFER_MISSING = "offer_missing"
+
+
 class ConnectorDispatcher:
     """Implements ControlDispatcher protocol using the connector system.
 
@@ -46,6 +59,7 @@ class ConnectorDispatcher:
         registry: ConnectorConfigRegistry,
         lfdi_resolver: Callable[[str], str | None],
         command_observer: CommandObserver | None = None,
+        command_gate: CommandGate | None = None,
         telemetry: DeviceTelemetryEmitter | None = None,
     ) -> None:
         """
@@ -65,6 +79,7 @@ class ConnectorDispatcher:
         # `is None`, not `or`: an observer accumulates records, so a
         # collection-backed one is falsy while empty and `or` would silently
         # replace it with the no-op.
+        self._gate = AllowAllCommands() if command_gate is None else command_gate
         self._commands = NullCommandObserver() if command_observer is None else command_observer
         self._telemetry = telemetry
 
@@ -195,11 +210,21 @@ class ConnectorDispatcher:
                 p["ramp_tms"] = ramp_tms
 
         for method_name, params in translations:
-            method = getattr(connector, method_name, None)
+            method, reason = self._control_support(connector, method_name)
             if method is not None:
                 logger.debug("  %s.%s(%s)", connector.connector_name, method_name, params)
                 await self._apply_one(
                     method, method_name, params, lfdi=lfdi, origin=origin, label=label
+                )
+            elif reason == BY_DESIGN:
+                # This connector has no register for the mode and never claimed
+                # one. Nothing an operator can do, so it does not belong in a
+                # warnings surface -- and a control carrying it alongside modes
+                # the connector does implement is normal traffic, not a fault.
+                logger.debug(
+                    "  %s does not implement %s; skipped",
+                    connector.connector_name,
+                    method_name,
                 )
             else:
                 self._report_unimplemented_mode(
@@ -216,8 +241,13 @@ class ConnectorDispatcher:
         origin: CommandOrigin,
         label: str,
         connector: BaseConnector | None = None,
-    ) -> None:
+    ) -> bool:
         """Apply one translated mode and report it to the command observer.
+
+        Returns True when the control reached the connector, False when the gate
+        refused it. A caller dispatching a server-issued control ignores the
+        result, since a refusal there is reported rather than raised; a caller
+        that named one control needs to tell the two apart.
 
         Stamped before the call, like an acquisition: the write shadow compares
         this against when a readback *started*, so a command has to be marked at
@@ -231,6 +261,23 @@ class ConnectorDispatcher:
         # the management API's operation vocabulary -- one name per control,
         # whichever interface issued it.
         control = method_name.removeprefix("update_")
+
+        # Authority is checked here because this is the one place every apply
+        # path passes through -- a control, a default control, a clear and a
+        # named operation. Checking at each caller instead would mean the DDERC
+        # reapply and comms-loss routes each needing their own gate, which is
+        # exactly how a write path ends up ungated.
+        if lfdi:
+            if not self._gate.may_command(lfdi, origin):
+                self._report_not_commanding(lfdi, control, origin)
+                return False
+        else:
+            # Deliberately ungated: authority is held per device, and there is no
+            # device here to hold it over. Denying instead would drop writes for
+            # an href that resolves to a connector but not to an LFDI -- a case
+            # that predates the gate and is handled below -- so the choice is to
+            # let it through and say so rather than to fail closed by accident.
+            logger.debug("Ungated %s on %s: no LFDI to resolve authority for", control, label)
         issued_at = time.time()
         # A bound method carries its connector, so the device's address and
         # protocol are reachable without widening every call site. A caller
@@ -261,6 +308,48 @@ class ConnectorDispatcher:
             # No LFDI means no key to file the record under. Rare (an href that
             # resolves to a connector but not to an LFDI) and worth seeing.
             logger.debug("Applied %s to %s with no LFDI; not recorded", control, label)
+        return True
+
+    async def apply_operation(
+        self,
+        lfdi: str,
+        control: str,
+        params: dict[str, Any],
+        *,
+        origin: CommandOrigin,
+    ) -> None:
+        """Apply one named control to one device by LFDI, and record it.
+
+        The write funnel for callers that already know which control they want,
+        rather than a DERControl to be translated -- a Modbus master writing a
+        register, for instance. Everything an event-driven write gets applies:
+        the command is recorded with its origin, a failure is recorded as
+        rejected and re-raised.
+
+        Raises:
+            ConnectorError: no connector is registered for ``lfdi``, or the
+                connector does not implement this control.
+            CommandNotPermittedError: a gate refused this origin authority over
+                this device. Raised rather than reported because this caller
+                named the control and has somewhere to put the answer -- a
+                protocol server owes its own client the distinction between a
+                write that failed and one that was not permitted.
+        """
+        connector = await self._resolve_connector_by_lfdi(lfdi)
+        if connector is None:
+            raise ConnectorError(f"no connector for LFDI {lfdi}")
+        method_name = f"update_{control}"
+        method, _reason = self._control_support(connector, method_name)
+        if method is None:
+            raise ConnectorError(f"connector for {lfdi} does not implement {method_name}")
+        applied = await self._apply_one(
+            method, method_name, params, lfdi=lfdi, origin=origin, label=lfdi
+        )
+        if not applied:
+            raise CommandNotPermittedError(
+                f"{origin.value} may not command {lfdi}: another interface holds the "
+                f"command role, so {control!r} was not applied"
+            )
 
     async def apply_default_control(
         self,
@@ -312,10 +401,20 @@ class ConnectorDispatcher:
         translations = translate_default_controls(dderc, curves)
         logger.debug("Applying DDERC fallback to %s (%d mode(s))", label, len(translations))
         for method_name, params in translations:
-            method = getattr(connector, method_name, None)
+            method, reason = self._control_support(connector, method_name)
             if method is not None:
                 await self._apply_one(
                     method, method_name, params, lfdi=lfdi, origin=origin, label=label
+                )
+            elif reason == BY_DESIGN:
+                # This connector has no register for the mode and never claimed
+                # one. Nothing an operator can do, so it does not belong in a
+                # warnings surface -- and a control carrying it alongside modes
+                # the connector does implement is normal traffic, not a fault.
+                logger.debug(
+                    "  %s does not implement %s; skipped",
+                    connector.connector_name,
+                    method_name,
                 )
             else:
                 self._report_unimplemented_mode(
@@ -428,6 +527,64 @@ class ConnectorDispatcher:
                     "error": str(exc),
                 },
             )
+
+    @staticmethod
+    def _report_not_commanding(lfdi: str, control: str, origin: CommandOrigin) -> None:
+        """Surface a write refused because its origin does not command the device.
+
+        Reported rather than raised: a 2030.5 server posting events to a device
+        that SunSpec commands is a configuration statement being honored, not a
+        fault, and raising would turn every such event into an error the event
+        engine has to interpret. Silence is the wrong answer too -- an operator
+        seeing a posted control never arrive needs this row to know why.
+        """
+        from py20305.diagnostics import report
+
+        report(
+            "warnings",
+            f"{origin.value} may not command {lfdi[:8]}: another interface holds "
+            f"the command role. '{control}' was not applied.",
+            source="dispatcher",
+            dedup_key=f"not-commanding-{origin.value}-{lfdi}",
+            details={"device": lfdi, "origin": origin.value, "control": control},
+        )
+
+    @staticmethod
+    def _control_support(
+        connector: BaseConnector, method_name: str
+    ) -> tuple[Callable[[dict[str, Any]], Any] | None, str | None]:
+        """``(bound method, reason)``. ``reason`` is None when implemented.
+
+        ``BaseConnector`` declares 40 ``update_*`` modes as concrete methods that
+        return ``None``, so ``getattr`` finds one whether or not the connector
+        implements it. Reading that as support makes a connector look like it
+        accepted a command it never carried out: the dispatch succeeds, the
+        commanded plane records it, and a Modbus master is acknowledged for a
+        write that reached no device.
+
+        The two ways a mode can be unsupported need telling apart, because only
+        one of them is anybody's mistake:
+
+        ``BY_DESIGN``
+            The connector inherits the base no-op. ``ConnectorSunSpec`` does this
+            for 29 of the 40 modes and says so in its docstring -- the base
+            defaults exist precisely to cover modes SunSpec has no register for.
+            Expected, and not something an operator can act on.
+
+        ``OFFER_MISSING``
+            No implementation resolves at all. For a plugin-backed connector,
+            whose modes arrive through ``__getattr__`` from a live offer, that
+            means the offer lacks a mode it should carry -- typically a plugin
+            built against an older SDK. Actionable, and what the unimplemented
+            diagnostic was written for.
+        """
+        own = getattr(type(connector), method_name, None)
+        if own is not None and own is getattr(BaseConnector, method_name, None):
+            return None, BY_DESIGN
+        bound: Callable[[dict[str, Any]], Any] | None = getattr(connector, method_name, None)
+        if bound is None:
+            return None, OFFER_MISSING
+        return bound, None
 
     @staticmethod
     def _report_unimplemented_mode(
@@ -581,7 +738,12 @@ class ConnectorDispatcher:
         ]
 
         for method_name, params in disable_calls:
-            method = getattr(connector, method_name, None)
+            # Same distinction the translation loops draw, and it matters more
+            # here: this fan-out touches every mode, and a clear is recorded like
+            # any other write. Taking an inherited no-op for an implementation
+            # would file twenty commands that reached no register, for a device
+            # that implements a handful of modes.
+            method, _reason = self._control_support(connector, method_name)
             if method is not None:
                 await self._apply_one(
                     method,

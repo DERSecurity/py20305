@@ -32,6 +32,38 @@ below says so explicitly.
   keeps reporting it when a late MirrorUsagePointList creates the metering
   manager after startup. Previously its telemetry endpoints answered
   "not initialized" for the lifetime of the process.
+- A command gate on the write path: an application serving more than one command
+  interface can now enforce which of them may command a device, through
+  `CommandGate` passed as `command_gate` to `ConnectorDispatcher`. Checked at the
+  one funnel every apply path shares, so translated controls, default-control
+  fallbacks, comms-loss clears and directly named controls are all covered. A
+  refusal is reported and dropped rather than raised, and is not recorded as a
+  command. Omitted, every origin may command everything, as before.
+- `ConnectorDispatcher.apply_operation` applies one named control to one device,
+  for a caller that already knows which control it wants rather than a DERControl
+  to translate. It goes through the same funnel, so the command is recorded with
+  its origin and a failure is recorded as rejected and re-raised.
+- An inherited `BaseConnector` no-op no longer counts as an implemented mode. A
+  connector that overrides nothing is no longer credited with accepting every
+  command; a mode that resolves to nothing at all still reports the actionable
+  warning, and an inherited no-op is skipped quietly. This also applies to the
+  clear fan-out, which touches every mode and is recorded.
+- Measured device state travels the forwarder transport as `TelemetryFrame`,
+  alongside protocol messages and events, publishing to `out/telemetry` under the
+  forwarder's topic base with its own queue counter. Values carry the time the
+  device was read rather than the time they were published, and the device's own
+  quality separately from freshness. Forwarders that carry only protocol messages
+  decline it by default.
+- `CommandOrigin.SUNSPEC`, for a SunSpec Modbus master writing a control register.
+- `CommandNotPermittedError`, raised by `apply_operation` when a gate refuses the
+  write. A caller that named one control needs to tell a refusal from a failure;
+  a server-issued control is still reported and dropped rather than raised.
+- **Compatibility:** `queue_telemetry` joins `BaseForwarder`, so a forwarder that
+  satisfies that protocol structurally -- without inheriting `AbstractForwarder`
+  -- must define it to keep satisfying `isinstance`. Inheriting the abstract base
+  needs no change, since it declines by default. This follows `queue_event` in
+  0.3.0 rather than making telemetry a second-class kind routed by capability
+  check.
 - Connection-telemetry hardening: peer-controlled content stays off the
   metadata topic (protocol errors report the status code alone, payload
   errors report where and how big, a redirect's Location is stripped to

@@ -16,7 +16,12 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from py20305.forwarders.base import AbstractForwarder, EventFrame, MessageFrame
+from py20305.forwarders.base import (
+    AbstractForwarder,
+    EventFrame,
+    MessageFrame,
+    TelemetryFrame,
+)
 from py20305.forwarders.config import PROTOCOL_MESSAGE_TOPIC_SUFFIX
 
 if TYPE_CHECKING:
@@ -56,8 +61,11 @@ class MQTTForwarder(AbstractForwarder):
         """
         super().__init__(name="mqtt")
         self._config = config
-        self._queue: asyncio.Queue[MessageFrame | EventFrame] = asyncio.Queue(maxsize=queue_size)
+        self._queue: asyncio.Queue[MessageFrame | TelemetryFrame | EventFrame] = asyncio.Queue(
+            maxsize=queue_size
+        )
         self._message_converter = message_converter
+        self._telemetry_converter: Any | None = None
         self._client: Any = None  # aiomqtt.Client
         self._publish_task: asyncio.Task[None] | None = None
         self._shutdown_event = asyncio.Event()
@@ -74,6 +82,15 @@ class MQTTForwarder(AbstractForwarder):
     def set_message_converter(self, converter: Any) -> None:
         """Set a custom message converter for transforming frames before publishing."""
         self._message_converter = converter
+
+    @property
+    def has_telemetry_converter(self) -> bool:
+        """Return whether a telemetry converter is configured."""
+        return self._telemetry_converter is not None
+
+    def set_telemetry_converter(self, converter: Any) -> None:
+        """Set the converter turning a TelemetryFrame into a publishable dict."""
+        self._telemetry_converter = converter
 
     @property
     def config(self) -> MQTTForwarderConfig:
@@ -242,8 +259,20 @@ class MQTTForwarder(AbstractForwarder):
         """
         self._enqueue(event, counter="events_queued")
 
+    def queue_telemetry(self, frame: TelemetryFrame) -> None:
+        """Queue measured device state for publishing.
+
+        Same queue and same backpressure as protocol capture: under a slow
+        broker the newest telemetry is what a monitoring upstream wants, and
+        the dropped frames are ones already superseded by a later reading.
+
+        Counted as telemetry rather than as a message, for the same reason
+        events are: one number that conflates the two says nothing about either.
+        """
+        self._enqueue(frame, counter="telemetry_queued")
+
     def _enqueue(
-        self, item: MessageFrame | EventFrame, *, counter: str = "messages_queued"
+        self, item: MessageFrame | TelemetryFrame | EventFrame, *, counter: str = "messages_queued"
     ) -> None:
         """Put one item on the publish queue, dropping the oldest when full.
 
@@ -285,6 +314,10 @@ class MQTTForwarder(AbstractForwarder):
     async def _publish_loop(self) -> None:
         """Background task that publishes queued messages."""
         message_topic = f"{self._config.topic_base}/{PROTOCOL_MESSAGE_TOPIC_SUFFIX}"
+        # Its own topic rather than a shared one with a type marker inside: a
+        # subscriber that wants only measurements, or only capture, should be able
+        # to say so at the broker instead of filtering every message on arrival.
+        telemetry_topic = f"{self._config.topic_base}/out/telemetry"
 
         while self._running or not self._queue.empty():
             try:
@@ -306,6 +339,12 @@ class MQTTForwarder(AbstractForwarder):
                     if isinstance(item, EventFrame):
                         topic = f"{self._config.topic_base}/{item.topic_suffix}"
                         payload = item.payload
+                    elif isinstance(item, TelemetryFrame):
+                        topic = telemetry_topic
+                        if self._telemetry_converter:
+                            payload = self._telemetry_converter(item)
+                        else:
+                            payload = self._telemetry_to_dict(item)
                     else:
                         topic = message_topic
                         if self._message_converter:
@@ -399,6 +438,29 @@ class MQTTForwarder(AbstractForwarder):
             "http_method": frame.http_method,
             "uri": frame.uri,
             "status_code": frame.status_code,
+            "metadata": frame.metadata,
+        }
+
+    def _telemetry_to_dict(self, frame: TelemetryFrame) -> dict[str, Any]:
+        """Convert a TelemetryFrame to a dict for publishing.
+
+        Fallback for a forwarder used without an envelope adapter; an adapter
+        supplies a converter producing the ProtocolMessage v2.0 envelope.
+        """
+        return {
+            "device": frame.device,
+            "quality": frame.quality,
+            "last_success": frame.last_success,
+            "timestamp": frame.timestamp.isoformat(),
+            "points": {
+                key: {
+                    "value": point.value,
+                    "source_timestamp": point.source_timestamp,
+                    "quality": point.quality,
+                    "protocol_quality": point.protocol_quality,
+                }
+                for key, point in frame.points.items()
+            },
             "metadata": frame.metadata,
         }
 

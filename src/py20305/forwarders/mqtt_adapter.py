@@ -14,6 +14,7 @@ from py20305.forwarders.base import (
     EventFrame,
     MessageDirection,
     MessageFrame,
+    TelemetryFrame,
 )
 from py20305.forwarders.lfdi_extraction import extract_client_id, extract_lfdi
 from py20305.forwarders.types import (
@@ -110,6 +111,14 @@ class MQTTForwarderAdapter(AbstractForwarder):
         # to avoid clobbering a converter supplied at construction.
         if not self._forwarder.has_message_converter:
             self._forwarder.set_message_converter(lambda frame: frame.content)
+        # Telemetry converts in the publish loop rather than at queue time, so
+        # the converter has to be installed here. `to_dict()` and not the
+        # message itself: the loop serializes what the converter returns, and a
+        # dataclass would land on the wire as its repr.
+        if not self._forwarder.has_telemetry_converter:
+            self._forwarder.set_telemetry_converter(
+                lambda frame: self._convert_telemetry(frame).to_dict()
+            )
 
     @property
     def client_lfdi(self) -> str | None:
@@ -174,6 +183,20 @@ class MQTTForwarderAdapter(AbstractForwarder):
         # the wrapped forwarder's own count appears under underlying_forwarder.
         self._stats["events_queued"] = self._stats.get("events_queued", 0) + 1
         self._forwarder.queue_event(event)
+
+    def queue_telemetry(self, frame: TelemetryFrame) -> None:
+        """Queue measured device state, converted to ProtocolMessage v2.0.
+
+        The conversion itself runs in the forwarder's publish loop via the
+        telemetry converter set in ``__init__``, matching how captured
+        exchanges are handled.
+        """
+        if not self._running:
+            return
+        # Its own counter, for the same reason events have one: folding these
+        # into the message count would misreport both.
+        self._stats["telemetry_queued"] = self._stats.get("telemetry_queued", 0) + 1
+        self._forwarder.queue_telemetry(frame)
 
     def queue_message(self, frame: MessageFrame) -> None:
         """Convert frame to ProtocolMessage and queue for publishing.
@@ -267,6 +290,51 @@ class MQTTForwarderAdapter(AbstractForwarder):
             validation_error=frame.validation_error,
         )
 
+    def _convert_telemetry(self, frame: TelemetryFrame) -> ProtocolMessage:
+        """Convert a TelemetryFrame to the ProtocolMessage v2.0 envelope.
+
+        ``Protocol.GENERIC`` rather than ``IEEE_2030_5``: these are measured
+        values read from a device over whatever the connector speaks, not a
+        captured 2030.5 exchange. Tagging them 2030.5 would put readings that
+        never crossed that protocol into an audit stream that claims they did.
+
+        The nine HTTP fields on ``ProtocolMetadata`` are simply left unset --
+        they are all optional, so the envelope carries no empty pretence of
+        being a request/response pair. Only ``lfdi`` and ``message_type``
+        apply, and both are true here.
+        """
+        payload = PayloadEnvelope.from_dict(
+            {
+                "device": frame.device,
+                "quality": frame.quality,
+                "last_success": frame.last_success,
+                "points": {
+                    key: {
+                        "value": point.value,
+                        "source_timestamp": point.source_timestamp,
+                        "quality": point.quality,
+                        "protocol_quality": point.protocol_quality,
+                    }
+                    for key, point in frame.points.items()
+                },
+            }
+        )
+        source, destination = self._telemetry_endpoints()
+        return ProtocolMessage(
+            protocol=Protocol.GENERIC,
+            # Always upstream: measurements only ever flow from this client to
+            # its collector, so there is no downstream case to represent.
+            direction=WireDirection.UPSTREAM,
+            client_id=frame.device or self._client_lfdi or "Unknown",
+            payload=payload,
+            source=source,
+            destination=destination,
+            forwarder_id=self._forwarder_id or "",
+            protocol_data=ProtocolMetadata(lfdi=frame.device or None, message_type="Telemetry"),
+            timestamp=frame.timestamp.isoformat(),
+            is_valid=True,
+        )
+
     @staticmethod
     def _serialize_content(content: Any) -> PayloadEnvelope:
         """Serialize content to PayloadEnvelope for ProtocolMessage.
@@ -347,6 +415,17 @@ class MQTTForwarderAdapter(AbstractForwarder):
             return client_endpoint, server_endpoint
         else:
             return server_endpoint, client_endpoint
+
+    def _telemetry_endpoints(self) -> tuple[NetworkEndpoint, NetworkEndpoint]:
+        """Endpoints for a telemetry frame.
+
+        This client is the source; there is no 2030.5 server involved, so
+        the destination is the uplink rather than a protocol peer.
+        """
+        return (
+            NetworkEndpoint(ip=self._source_host or "0.0.0.0", port=0),
+            NetworkEndpoint(ip=self._forwarder.config.endpoint or "0.0.0.0", port=0),
+        )
 
     def get_statistics(self) -> dict[str, Any]:
         """Return adapter statistics combined with forwarder stats."""
