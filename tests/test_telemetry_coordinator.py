@@ -339,6 +339,94 @@ class TestDevicesComeAndGo:
             await coordinator.shutdown()
 
 
+class TestRediscoveryIsWhatRefreshesState:
+    """The hook replaces the client's own rediscovery, so it has to do it."""
+
+    @pytest.mark.asyncio
+    async def test_a_structural_change_rediscovers(self, tmp_path):
+        """csip_client calls this hook *instead of* trigger_rediscovery.
+
+        A hook that only restarted the managers would re-read the very hrefs
+        the notification said had changed, and the late-MirrorUsagePointList
+        path would keep seeing no link.
+        """
+        from py20305.cli import _start_telemetry
+
+        client, config = _client(tmp_path)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None
+        try:
+            client.trigger_rediscovery = AsyncMock(return_value=True)
+            coordinator.restart_device_telemetry = AsyncMock()
+
+            await client._on_structural_change()
+
+            client.trigger_rediscovery.assert_awaited_once()
+            # The restart hangs off rediscovery completing, not off this hook,
+            # so a coalesced or failed pass does not reschedule against state
+            # nobody rebuilt.
+            coordinator.restart_device_telemetry.assert_not_awaited()
+        finally:
+            await coordinator.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_any_completed_rediscovery_restarts_the_managers(self, tmp_path):
+        """404 recovery and comms-loss recovery rebuild state on their own."""
+        from py20305.cli import _start_telemetry
+
+        client, config = _client(tmp_path)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None
+        try:
+            coordinator.restart_device_telemetry = AsyncMock()
+
+            assert client._on_rediscovered is not None
+            await client._on_rediscovered()
+
+            coordinator.restart_device_telemetry.assert_awaited_once()
+        finally:
+            await coordinator.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_api_sees_a_metering_manager_created_later(self, tmp_path):
+        """It was handed None at startup and would hold it for the process."""
+        from py20305.api import ClientAPIService
+        from py20305.cli import _start_telemetry
+
+        client, config = _client(tmp_path, mup=None)
+        service = ClientAPIService(client=client)
+        coordinator = _start_telemetry(client, config, service)
+        assert coordinator is not None
+        try:
+            assert service._telemetry is None
+            assert service._der_resources is coordinator.der_resources
+
+            client.state.mup_list_href = "/mup"
+            await client._on_rediscovered()
+
+            assert coordinator.telemetry is not None
+            assert service._telemetry is coordinator.telemetry
+        finally:
+            await coordinator.shutdown()
+
+
+class TestTheMissingListIsSaidOnce:
+    @pytest.mark.asyncio
+    async def test_the_warning_does_not_repeat_every_restart(self, tmp_path, caplog):
+        """A structural-change stream would otherwise log it every cycle."""
+        client, config = _client(tmp_path, mup=None)
+        coordinator = _coordinator(client, config)
+        with caplog.at_level("WARNING", logger="py20305.telemetry.coordinator"):
+            coordinator.setup()
+            await coordinator.restart_device_telemetry()
+            await coordinator.restart_device_telemetry()
+        try:
+            warnings = [r for r in caplog.records if "MirrorUsagePointList" in r.message]
+            assert len(warnings) == 1
+        finally:
+            await coordinator.shutdown()
+
+
 class TestShutdown:
     @pytest.mark.asyncio
     async def test_shutdown_stops_both_schedulers(self, tmp_path):
@@ -351,6 +439,25 @@ class TestShutdown:
 
         assert not coordinator.telemetry._scheduler._tasks
         assert not coordinator.der_resources._scheduler._tasks
+
+    @pytest.mark.asyncio
+    async def test_metering_stops_before_the_der_resources(self, tmp_path):
+        """Documented ordering, and reversing the awaits should fail this."""
+        client, config = _client(tmp_path)
+        coordinator = _coordinator(client, config)
+        coordinator.setup()
+        coordinator.start_device_telemetry()
+        order: list[str] = []
+        coordinator.telemetry.shutdown = AsyncMock(
+            side_effect=lambda: order.append("telemetry")
+        )
+        coordinator.der_resources.shutdown = AsyncMock(
+            side_effect=lambda: order.append("der_resources")
+        )
+
+        await coordinator.shutdown()
+
+        assert order == ["telemetry", "der_resources"]
 
     @pytest.mark.asyncio
     async def test_shutdown_is_safe_before_setup(self, tmp_path):
@@ -386,30 +493,15 @@ class TestRunnerWiring:
         assert _start_telemetry(client, config) is None
 
     @pytest.mark.asyncio
-    async def test_rediscovery_reaches_the_coordinator(self, tmp_path):
-        """The hook is wired at client construction, before the coordinator exists."""
-        from py20305.cli import _start_telemetry, build_client
-        from py20305.config import ClientConfig
+    async def test_both_rediscovery_hooks_are_wired(self, tmp_path):
+        """The hooks are set at startup; what they do is covered above."""
+        from py20305.cli import _start_telemetry
 
-        cert = _write_client_cert(tmp_path)
-        config = ClientConfig.model_validate(
-            {
-                "server": {"url": "https://server.example.com:8443"},
-                "tls": {"client_cert": str(cert), "client_key": str(cert), "ca_cert": str(cert)},
-                "devices": [{"type": "print_demo", "lfdi": LFDI_A}],
-                "telemetry": {"enabled": True, "post_rate_seconds": 60},
-            }
-        )
-        client, _ = build_client(config)
-        client.state.mup_list_href = "/mup"
-        client.state.end_devices = {"/edev/1": _end_device(LFDI_A)}
+        client, config = _client(tmp_path)
         coordinator = _start_telemetry(client, config)
         assert coordinator is not None
         try:
-            coordinator.restart_device_telemetry = AsyncMock()
-
-            await client._on_structural_change()
-
-            coordinator.restart_device_telemetry.assert_awaited_once()
+            assert client._on_structural_change is not None
+            assert client._on_rediscovered is not None
         finally:
             await coordinator.shutdown()

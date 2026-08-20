@@ -7,6 +7,31 @@ below says so explicitly.
 
 ## [Unreleased]
 
+- **Behavior change:** `telemetry.enabled` now defaults to `true`. A
+  deployment that never set the field starts reading its devices and
+  reporting them after upgrading, which means writing to the utility server
+  and polling its devices on a schedule. Set it to `false` to keep observing
+  and dispatching without reporting.
+- The runner now PUTs DERCapability, DERSettings and DERStatus, and posts
+  LogEvents and DERAvailability. The managers behind them existed and were
+  tested; nothing constructed them, so a deployment reported readings and
+  nothing else. `telemetry.post_rate_seconds` gains two companions,
+  `der_capability_poll_rate_seconds` and `der_settings_poll_rate_seconds`.
+- The server's `EndDevice.postRate` now takes precedence over the configured
+  posting rate, per IEEE 2030.5.
+- Telemetry survives rediscovery: every href is re-read after a rediscovery
+  completes, whatever triggered it, and a MirrorUsagePointList that appears
+  only in a later DeviceCapability starts metering without a restart.
+- `py20305.telemetry.TelemetryCoordinator` composes both telemetry managers --
+  which devices, at what rate, to which discovered hrefs -- so an embedding
+  application starts telemetry the way the runner does rather than
+  reimplementing it. `CsipClient.set_on_structural_change()`,
+  `CsipClient.set_on_rediscovered()`, `ClientAPIService.attach_telemetry()`
+  and `DerResourceManager.stop_device()` are the seams it needs.
+- The management API now reports telemetry for a runner that started it, and
+  keeps reporting it when a late MirrorUsagePointList creates the metering
+  manager after startup. Previously its telemetry endpoints answered
+  "not initialized" for the lifetime of the process.
 - Connection-telemetry hardening: peer-controlled content stays off the
   metadata topic (protocol errors report the status code alone, payload
   errors report where and how big, a redirect's Location is stripped to
@@ -45,30 +70,6 @@ below says so explicitly.
 
 ## [0.2.0] — 2026-08-19
 
-- The runner now PUTs DERCapability, DERSettings and DERStatus, and posts
-  LogEvents and DERAvailability. The managers behind them existed and were
-  tested; nothing constructed them, so a deployment reported readings and
-  nothing else. `telemetry.post_rate_seconds` gains two companions,
-  `der_capability_poll_rate_seconds` and `der_settings_poll_rate_seconds`.
-- **Behavior change:** `telemetry.enabled` now defaults to `true`. A
-  deployment that never set the field starts reading its devices and
-  reporting them after upgrading. Set it to `false` to keep observing and
-  dispatching without reporting.
-- The server's `EndDevice.postRate` now takes precedence over the configured
-  posting rate, per IEEE 2030.5.
-- Telemetry survives rediscovery: hrefs are re-read when the server's topology
-  changes, and a MirrorUsagePointList that appears only in a later
-  DeviceCapability starts metering without a restart.
-- `py20305.telemetry.TelemetryCoordinator` composes both telemetry managers --
-  which devices, at what rate, to which discovered hrefs -- so an embedding
-  application starts telemetry the way the runner does rather than
-  reimplementing it. `CsipClient.set_on_structural_change()`,
-  `ClientAPIService.attach_telemetry()` and `DerResourceManager.stop_device()`
-  are the seams it needs.
-- The management API now reports telemetry for a runner that started it.
-  Previously its telemetry endpoints answered "not initialized" for the
-  lifetime of the process, because the API starts before discovery and was
-  built without the managers that only exist afterwards.
 - Subscribe/notify from the runner: a `subscription:` section constructs the
   subscription manager and notification listener and wires them into the
   client. Off by default; enabling it requires `notification_external_host`,

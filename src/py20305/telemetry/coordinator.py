@@ -96,6 +96,11 @@ class TelemetryCoordinator:
         #: Non-empty whenever the metering manager exists, because that manager
         #: is only built once a path has been discovered.
         self._last_mup_list_href: str = ""
+        #: Whether the missing-MirrorUsagePointList warning has been said. Every
+        #: rediscovery re-attempts the metering setup, so without this a server
+        #: that never mirrors readings would log the same line on every
+        #: structural change.
+        self._warned_no_mup = False
 
     @property
     def telemetry(self) -> TelemetryManager | None:
@@ -127,15 +132,18 @@ class TelemetryCoordinator:
             # A warning rather than an error: this is a server that does not
             # mirror readings, which is a valid deployment. Said once, because
             # a cycle that fails forever tells the operator less.
-            logger.warning(
-                "the server exposed no MirrorUsagePointList; no readings will be posted. "
-                "DER resource PUTs are unaffected"
-            )
+            if not self._warned_no_mup:
+                logger.warning(
+                    "the server exposed no MirrorUsagePointList; no readings will be posted. "
+                    "DER resource PUTs are unaffected"
+                )
+                self._warned_no_mup = True
             return
 
         from py20305.telemetry.manager import TelemetryManager
 
         self._last_mup_list_href = mup_list_href
+        self._warned_no_mup = False
         self._telemetry = TelemetryManager(
             client=self._client.http,
             # Read live: an upstream restart makes the client rediscover, and

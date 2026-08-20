@@ -56,6 +56,16 @@ is expected to consume this library.
   bookkeeping layer. `DerResourceManager.stop_device` was added for the second
   half, symmetric with `TelemetryManager.stop_metering`.
 
+- **D7. The restart hangs off rediscovery, not off the structural hook.**
+  `CsipClient` calls `on_structural_change` *instead of* its own
+  `trigger_rediscovery()`, so a hook that only restarted the managers would
+  re-read the hrefs the notification said had changed. The runner's hook now
+  performs the rediscovery, and a new `CsipClient.set_on_rediscovered` hook
+  fires the restart after any completed pass. That also covers the rebuild
+  paths no structural notification precedes -- 404 recovery, comms-loss
+  recovery, a lost subscription, an operator's request through the management
+  API -- which would otherwise leave both managers holding stale hrefs.
+
 Deliberately not ported: gating mirroring on the server's EndDeviceList. That
 is a host-application configuration option with no counterpart here.
 
@@ -80,3 +90,8 @@ is a host-application configuration option with no counterpart here.
    stopped is dropped from both managers and is not revived by rediscovery.
 10. A device merely absent from the current discovery stays registered, with no
     hrefs, so its cycles idle until the server publishes it again.
+11. A structural notification rediscovers, and any completed rediscovery
+    restarts both managers exactly once.
+12. The management API reports a metering manager created after startup, and
+    the missing-MirrorUsagePointList warning is said once rather than on every
+    rediscovery.

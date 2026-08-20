@@ -368,10 +368,10 @@ class TestApiFailureDuringOutage:
 
         api_task_holder: dict[str, asyncio.Task] = {}
 
-        async def fake_serve(*_a: object, **_k: object) -> asyncio.Task[None]:
+        async def fake_serve(*_a: object, **_k: object) -> tuple[asyncio.Task[None], None]:
             task = asyncio.create_task(dies_immediately())
             api_task_holder["t"] = task
-            return task
+            return task, None
 
         with (
             patch.object(cli_module, "build_client", return_value=(client, "a" * 40)),
@@ -505,7 +505,7 @@ class TestExitCodes:
 
         with (
             patch.object(cli_module, "build_client", return_value=(client, "a" * 40)),
-            patch.object(cli_module, "_serve_api", new=AsyncMock(return_value=None)),
+            patch.object(cli_module, "_serve_api", new=AsyncMock(return_value=(None, None))),
         ):
             assert main(["--config", str(path)]) == EXIT_CONFIG_ERROR
 
