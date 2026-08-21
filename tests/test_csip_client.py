@@ -1562,6 +1562,81 @@ class TestServerTimebasePlumbing:
         assert client.timebase.offset() == pytest.approx(120, abs=2)
 
     @pytest.mark.asyncio
+    async def test_do_poll_time_refreshes_per_fsa_scopes(self):
+        """The FSA scope is what event classification reads, so it must be renewed.
+
+        Observed once at discovery and never again, it silently becomes the
+        local clock as the host drifts, while the global scope -- the one
+        ``/status`` reports -- stays correct. That combination is the whole
+        failure: the number an operator checks is the healthy one.
+        """
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time = {"/fsa/1": ("/fsa/1/tm", MagicMock())}
+
+        def _time_for(href, _model):
+            t = MagicMock()
+            # Distinct offsets so the assertion cannot pass by reading the
+            # wrong resource and getting a plausible number.
+            t.current_time.value = int(time.time()) + (120 if href == "/tm" else 300)
+            t.quality = 3
+            return t
+
+        client._http.get = AsyncMock(side_effect=_time_for)  # type: ignore[method-assign]
+
+        await client._do_poll_time()
+
+        assert client.timebase.offset() == pytest.approx(120, abs=2)
+        assert client.timebase.offset("/fsa/1") == pytest.approx(300, abs=2)
+
+    @pytest.mark.asyncio
+    async def test_do_poll_time_fetches_a_shared_href_once(self):
+        """DeviceCapability and every FSA commonly point at the same /tm.
+
+        Polling per scope would multiply this poll by the FSA count for no new
+        information, on the connection least able to spare it.
+        """
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time = {
+            "/fsa/1": ("/tm", MagicMock()),
+            "/fsa/2": ("/tm", MagicMock()),
+        }
+        t = MagicMock()
+        t.current_time.value = int(time.time()) + 45
+        t.quality = 3
+        get = AsyncMock(return_value=t)
+        client._http.get = get  # type: ignore[method-assign]
+
+        await client._do_poll_time()
+
+        assert get.await_count == 1
+        assert client.timebase.offset() == pytest.approx(45, abs=2)
+        assert client.timebase.offset("/fsa/1") == pytest.approx(45, abs=2)
+        assert client.timebase.offset("/fsa/2") == pytest.approx(45, abs=2)
+
+    @pytest.mark.asyncio
+    async def test_one_unreachable_time_resource_does_not_cost_the_others(self):
+        """An FSA endpoint that is down must not drop the global observation."""
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time = {"/fsa/1": ("/fsa/1/tm", MagicMock())}
+
+        def _time_for(href, _model):
+            if href != "/tm":
+                raise ConnectionError("FSA Time endpoint is down")
+            t = MagicMock()
+            t.current_time.value = int(time.time()) + 90
+            t.quality = 3
+            return t
+
+        client._http.get = AsyncMock(side_effect=_time_for)  # type: ignore[method-assign]
+
+        await client._do_poll_time()
+
+        assert client.timebase.offset() == pytest.approx(90, abs=2)
+
+    @pytest.mark.asyncio
     async def test_connectivity_probe_observes(self):
         client = CsipClient("https://example.com", time_drift_warn_seconds=0)
         client._state.time_href = "/tm"

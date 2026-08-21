@@ -5,6 +5,28 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
+## [Unreleased]
+
+- **Fixed: events drifted with the local clock while the reported offset stayed
+  correct.** Event classification and timer firing read the FSA-scoped offset
+  (IEEE 2030.5 §9.2.3), but only the global offset was refreshed. The per-FSA
+  observation was taken once at discovery and never renewed, so on a host
+  without NTP the client gradually reverted to scheduling on its own drifting
+  clock -- while `/status` and `GET /time`, which report the global scope, stayed
+  correct throughout. A control scheduled a minute out could be answered
+  `EXPIRED` and never fire. `_do_poll_time` now refreshes every scope the
+  timebase serves, fetching each distinct href once so a server that points
+  DeviceCapability and all its FSAs at one `/tm` is polled once rather than once
+  per FSA, and one unreachable Time resource no longer costs the others their
+  refresh.
+- A per-FSA observation older than `fsa_stale_seconds` (default one hour) now
+  yields to a newer global one. §9.2.3 specificity is worth having only while
+  the FSA's Time resource is being kept current; past that it is the more
+  precise way to be wrong, and it fails silently because a frozen offset is
+  indistinguishable from a fresh one where it is used. Staleness is measured on
+  the monotonic clock, so stepping the wall clock -- exactly what a device
+  syncing its RTC from this client does -- does not age an observation.
+
 ## [0.4.0] — 2026-08-21
 
 - **Behavior change:** `telemetry.enabled` now defaults to `true`. A

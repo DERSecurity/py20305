@@ -282,3 +282,78 @@ class TestServerNow:
         tb.observe(1_050, fsa_href="/fsa/1")
         assert tb.server_now("/fsa/1") == 1_050.0
         assert tb.server_now() is None
+
+
+def _freeze_clocks(monkeypatch: pytest.MonkeyPatch, wall: float, mono: float) -> None:
+    """Freeze both clocks independently, so a wall-clock step can be told apart
+    from elapsed time -- which is the distinction this module turns on."""
+    monkeypatch.setattr("time.time", lambda: wall)
+    monkeypatch.setattr("time.monotonic", lambda: mono)
+
+
+class TestStaleFsaFallback:
+    """A per-FSA observation nobody is renewing stops being the better answer.
+
+    §9.2.3 makes the FSA's own Time resource authoritative for that FSA's
+    events, and it stays preferred for as long as it is current. Once it is
+    not, it is the more specific way to be wrong, and it is wrong silently --
+    a frozen offset reads exactly like a fresh one at the point of use.
+    """
+
+    def test_fresh_fsa_observation_still_wins(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=3600)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_010)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        _freeze_clocks(monkeypatch, 1_100.0, 200.0)
+        assert tb.offset("/fsa/1") == 50.0
+
+    def test_stale_fsa_observation_yields_to_a_newer_global(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1")  # offset 50, then never renewed
+        _freeze_clocks(monkeypatch, 5_000.0, 4_100.0)  # 4000s of real elapsed time
+        tb.observe(5_200)  # global offset 200, fresh
+        assert tb.offset("/fsa/1") == 200.0
+
+    def test_stale_fsa_is_kept_when_global_is_older_still(self, monkeypatch: pytest.MonkeyPatch):
+        """Falling back to an even staler global would be a downgrade, not a fix."""
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_200)  # global first
+        _freeze_clocks(monkeypatch, 2_000.0, 1_100.0)
+        tb.observe(2_050, fsa_href="/fsa/1")  # FSA newer; both later go stale
+        _freeze_clocks(monkeypatch, 9_000.0, 8_100.0)
+        assert tb.offset("/fsa/1") == 50.0
+
+    def test_stale_fsa_with_no_global_is_still_used(self, monkeypatch: pytest.MonkeyPatch):
+        """A stale offset beats no offset; the alternative is the raw local clock."""
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        _freeze_clocks(monkeypatch, 9_000.0, 8_100.0)
+        assert tb.offset("/fsa/1") == 50.0
+
+    def test_server_now_uses_the_same_resolution(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        _freeze_clocks(monkeypatch, 5_000.0, 4_100.0)
+        tb.observe(5_200)
+        assert tb.server_now("/fsa/1") == 5_200.0
+
+    def test_a_wall_clock_step_does_not_age_an_observation(self, monkeypatch: pytest.MonkeyPatch):
+        """Staleness is elapsed time, not wall-clock distance.
+
+        A device that syncs its RTC from this client steps the wall clock by
+        exactly the offset the client just reported. If that counted as age,
+        every observation would go stale the instant the fix it enabled was
+        applied -- and the timebase would abandon the scope that was working.
+        """
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        tb.observe(1_010)
+        # Wall clock jumps an hour; no real time has passed.
+        _freeze_clocks(monkeypatch, 4_600.0, 100.5)
+        assert tb.offset("/fsa/1") == 50.0
