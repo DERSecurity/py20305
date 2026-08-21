@@ -7,6 +7,18 @@ below says so explicitly.
 
 ## [Unreleased]
 
+- Duplicate `EventStarted` responses. Status 2 is posted per device as each
+  device's apply settles, concurrently, and the dedup check was separated from
+  its mark by the POST itself -- so two targets resolving to one LFDI both got
+  through and the server saw one `EventReceived`, two `EventStarted` and one
+  `EventCompleted` for a single event. The tracker now reserves the
+  `(mrid, code, lfdi)` key before posting and releases it if the POST fails, so
+  a genuine failure still retries.
+- A device reachable through discovery twice -- two function set assignments
+  naming one program, or a program repeated across pages -- was added to the
+  program's device mapping twice, so the control was applied to it twice and
+  answered for twice. `DeviceMapping.add` now admits a pair once, and the
+  dispatch fan-out no longer trusts a repeated target.
 - **Behavior change:** `telemetry.enabled` now defaults to `true`. A
   deployment that never set the field starts reading its devices and
   reporting them after upgrading, which means writing to the utility server

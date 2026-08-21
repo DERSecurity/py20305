@@ -210,9 +210,34 @@ class ResponseTracker:
 
     def __init__(self) -> None:
         self._sent: dict[tuple[bytes, ResponseCode, bytes], int] = {}
+        #: Keys claimed by a POST that has not returned. Held apart from
+        #: ``_sent`` so an age prune cannot evict a response still in flight.
+        self._in_flight: set[tuple[bytes, ResponseCode, bytes]] = set()
 
     def already_sent(self, mrid: bytes, code: ResponseCode, lfdi: bytes) -> bool:
-        return (mrid, code, lfdi) in self._sent
+        key = (mrid, code, lfdi)
+        return key in self._sent or key in self._in_flight
+
+    def reserve(self, mrid: bytes, code: ResponseCode, lfdi: bytes) -> bool:
+        """Claim this key for a POST, or report that someone else holds it.
+
+        The check and the claim happen with no await between them, so on one
+        event loop this is atomic. Without it, a caller that checks, posts and
+        marks lets a second caller through the window the POST opens -- which
+        is exactly what the per-device response fan-out does when two targets
+        resolve to one LFDI.
+
+        Returns True when the caller may post, False when it must not.
+        """
+        key = (mrid, code, lfdi)
+        if key in self._sent or key in self._in_flight:
+            return False
+        self._in_flight.add(key)
+        return True
+
+    def release(self, mrid: bytes, code: ResponseCode, lfdi: bytes) -> None:
+        """Give up a claim whose POST never landed, so a retry can take it."""
+        self._in_flight.discard((mrid, code, lfdi))
 
     def has_responded(self, mrid: bytes) -> bool:
         """True if any response (any code, any device) was already sent for *mrid*.
@@ -225,7 +250,9 @@ class ResponseTracker:
         return any(sent_mrid == mrid for sent_mrid, _code, _lfdi in self._sent)
 
     def mark_sent(self, mrid: bytes, code: ResponseCode, lfdi: bytes, now: int) -> None:
-        self._sent[(mrid, code, lfdi)] = now
+        key = (mrid, code, lfdi)
+        self._in_flight.discard(key)
+        self._sent[key] = now
 
     def prune(self, now: int, max_age: int = 7200) -> None:
         """Remove entries older than max_age seconds."""
@@ -289,7 +316,10 @@ async def post_der_response(
         )
         return
 
-    if tracker.already_sent(mrid, code, lfdi):
+    # Reserved rather than checked: the per-device fan-out posts concurrently,
+    # and a check that the POST separates from its mark lets two responses out
+    # for one (mrid, code, lfdi).
+    if not tracker.reserve(mrid, code, lfdi):
         logger.debug("Skipping duplicate response mrid=%s code=%s", mrid.hex(), code.name)
         return
 
@@ -315,6 +345,9 @@ async def post_der_response(
             path,
         )
     except Exception:
+        # The response did not land, so the claim must not outlive it or the
+        # next cycle would treat this as already answered.
+        tracker.release(mrid, code, lfdi)
         logger.warning(
             "Failed to post response mrid=%s code=%s", mrid.hex()[:8], code.name, exc_info=True
         )
@@ -361,7 +394,7 @@ async def post_price_response(
         )
         return
 
-    if tracker.already_sent(mrid, code, lfdi):
+    if not tracker.reserve(mrid, code, lfdi):
         logger.debug("Skipping duplicate price response mrid=%s code=%s", mrid.hex(), code.name)
         return
 
@@ -384,6 +417,7 @@ async def post_price_response(
             path,
         )
     except Exception:
+        tracker.release(mrid, code, lfdi)
         logger.warning(
             "Failed to post price response mrid=%s code=%s",
             mrid.hex()[:8],

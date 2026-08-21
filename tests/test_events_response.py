@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
 
+from py20305.client.errors import Sep2ConnectionError
 from py20305.connectors.base import ConnectorValueError
 from py20305.connectors.control_errors import (
     DeviceNotConfiguredError,
@@ -543,3 +545,58 @@ class TestPluginOptOut:
         )
 
         assert http.post.await_count == 0
+
+
+class TestConcurrentPostsCollapse:
+    """The dedup key exists to hold under the fan-out that actually uses it.
+
+    Status 2 is posted per device as each device's apply settles, concurrently.
+    Two targets resolving to one LFDI therefore reach the same key at once, and
+    a check that is separated from its mark by the POST lets both through --
+    the server sees two EventStarted responses for one event.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_concurrent_posts_send_one_response(self):
+        posted: list[int] = []
+
+        async def post(path, body=None, *a, **kw):
+            await asyncio.sleep(0)  # a real POST suspends; that is the window
+            posted.append(body.status)
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=post)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        await asyncio.gather(
+            *[
+                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+                for _ in range(2)
+            ]
+        )
+
+        assert posted == [ResponseCode.ACTIVE.value]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_post_can_be_retried(self):
+        """A reservation must not outlive a POST that never landed."""
+        attempts: list[int] = []
+
+        async def post(path, body=None, *a, **kw):
+            attempts.append(body.status)
+            if len(attempts) == 1:
+                raise Sep2ConnectionError("broker of bad news")
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=post)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        await post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+        await post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1001)
+
+        assert len(attempts) == 2
+        assert tracker.already_sent(derc.m_rid.value, ResponseCode.ACTIVE, _LFDI_A)

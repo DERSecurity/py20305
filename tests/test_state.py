@@ -150,3 +150,34 @@ def test_clear_resets_fsa_time_and_previous():
 
     assert state.fsa_time == {}
     assert state.previous_fsa_hrefs == {}
+
+
+class TestDeviceMappingIsASet:
+    """A device listed twice is dispatched to twice, and answered for twice."""
+
+    def test_the_same_pair_added_twice_appears_once(self):
+        mapping = DeviceMapping()
+        mapping.add("/derp/1", "/edev/1")
+        mapping.add("/derp/1", "/edev/1")
+
+        assert mapping.program_to_devices["/derp/1"] == ["/edev/1"]
+        assert mapping.device_to_programs["/edev/1"] == ["/derp/1"]
+
+    def test_distinct_pairs_still_accumulate(self):
+        mapping = DeviceMapping()
+        mapping.add("/derp/1", "/edev/1")
+        mapping.add("/derp/1", "/edev/2")
+        mapping.add("/derp/2", "/edev/1")
+
+        assert mapping.program_to_devices["/derp/1"] == ["/edev/1", "/edev/2"]
+        assert mapping.device_to_programs["/edev/1"] == ["/derp/1", "/derp/2"]
+
+    def test_removing_a_program_after_a_repeated_add_leaves_nothing_behind(self):
+        mapping = DeviceMapping()
+        mapping.add("/derp/1", "/edev/1")
+        mapping.add("/derp/1", "/edev/1")
+
+        mapping.remove_program("/derp/1")
+
+        assert "/derp/1" not in mapping.program_to_devices
+        assert mapping.device_to_programs["/edev/1"] == []

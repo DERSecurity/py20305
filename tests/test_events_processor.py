@@ -3460,3 +3460,42 @@ class TestDispatchGatedResponses:
             for r in caplog.records
         )
         await proc.shutdown()
+
+
+class TestARepeatedDispatchTarget:
+    """One device reachable twice through discovery must still be one target.
+
+    Discovery appended a (program, device) pair each time it walked one, so a
+    device reachable through two function set assignments -- or a program
+    listed twice across pages -- landed in the mapping twice. The event then
+    dispatched to that device twice and answered for it twice: the server saw
+    one EventReceived, two EventStarted and one EventCompleted for one event.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_control_is_applied_once_and_answered_once(
+        self, shutdown: asyncio.Event
+    ):
+        now = int(time.time())
+        derc = _make_derc(0x01, start=now - 5, duration=3600)
+        state = _setup_state(der_controls=[derc])
+        # What an unguarded append leaves behind.
+        state.device_mapping.program_to_devices["/derp/1"].append("/edev/1")
+        statuses: list[int] = []
+
+        async def post(path, body=None, *a, **kw):
+            # A real POST suspends, which is the window two coroutines share.
+            await asyncio.sleep(0)
+            statuses.append(getattr(body, "status", None))
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=post)
+        http.server_2018_compat = False
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, shutdown)
+
+        await proc.process_controls("/derp/1")
+
+        assert statuses.count(ResponseCode.ACTIVE.value) == 1
+        assert dispatcher.apply_control.await_count == 1
+        await proc.shutdown()

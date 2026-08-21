@@ -786,7 +786,13 @@ class EventProcessor:
         derp_state = self._state.der_programs.get(record.program_href)
         curves = derp_state.der_curves if derp_state else []
         mrid_short = record.mrid.hex()[:8]
-        targets = [d for d in devices if d not in record.superseded_devices]
+        # dict.fromkeys, not a set: one write per device, in discovery order.
+        # DeviceMapping no longer admits a repeated pair, but this list is the
+        # dispatch target list and a caller may populate state itself -- and a
+        # device dispatched twice is written to twice, which reaches hardware.
+        targets = list(
+            dict.fromkeys(d for d in devices if d not in record.superseded_devices)
+        )
         logger.debug("Event %s: applying control to %d device(s)", mrid_short, len(targets))
         if not targets:
             return {}
