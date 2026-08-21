@@ -12,8 +12,8 @@ below says so explicitly.
   its mark by the POST itself -- so two targets resolving to one LFDI both got
   through and the server saw one `EventReceived`, two `EventStarted` and one
   `EventCompleted` for a single event. The tracker now reserves the
-  `(mrid, code, lfdi)` key before posting and releases it if the POST fails, so
-  a genuine failure still retries.
+  `(mrid, code, lfdi)` key before posting and releases it in a `finally`, so a
+  failed or cancelled POST still leaves the response retryable.
 - A device reachable through discovery twice -- two function set assignments
   naming one program, or a program repeated across pages -- was added to the
   program's device mapping twice, so the control was applied to it twice and

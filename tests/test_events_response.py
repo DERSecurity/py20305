@@ -600,3 +600,70 @@ class TestConcurrentPostsCollapse:
 
         assert len(attempts) == 2
         assert tracker.already_sent(derc.m_rid.value, ResponseCode.ACTIVE, _LFDI_A)
+
+
+class TestCancellationDoesNotLeakAClaim:
+    """A claim outliving its POST would silence the response for good.
+
+    ``_in_flight`` is never pruned -- deliberately, since a slow POST must not
+    have its key handed to a second caller -- so a claim released only on
+    ``Exception`` survives cancellation and every later retry is skipped.
+    Shutdown and task cancellation both raise ``CancelledError``, which is not
+    an ``Exception``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_post_leaves_the_key_claimable(self):
+        started = asyncio.Event()
+
+        async def post(path, body=None, *a, **kw):
+            started.set()
+            await asyncio.Event().wait()  # never returns; the caller cancels us
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=post)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        task = asyncio.ensure_future(
+            post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert not tracker.already_sent(derc.m_rid.value, ResponseCode.ACTIVE, _LFDI_A)
+
+    @pytest.mark.asyncio
+    async def test_the_response_still_goes_out_after_a_cancellation(self):
+        """The point of not leaking: the next cycle must be able to post."""
+        started = asyncio.Event()
+        posted: list[int] = []
+
+        async def hang(path, body=None, *a, **kw):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def succeed(path, body=None, *a, **kw):
+            posted.append(body.status)
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=hang)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        task = asyncio.ensure_future(
+            post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        http.post = AsyncMock(side_effect=succeed)
+        await post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1001)
+
+        assert posted == [ResponseCode.ACTIVE.value]

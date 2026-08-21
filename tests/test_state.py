@@ -153,7 +153,11 @@ def test_clear_resets_fsa_time_and_previous():
 
 
 class TestDeviceMappingIsASet:
-    """A device listed twice is dispatched to twice, and answered for twice."""
+    """A pair is admitted once, however many times discovery walks it.
+
+    It used to be appended each time, and this list is the dispatch target
+    list: the repeated device was written to twice and answered for twice.
+    """
 
     def test_the_same_pair_added_twice_appears_once(self):
         mapping = DeviceMapping()

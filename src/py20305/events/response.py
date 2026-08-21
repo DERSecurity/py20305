@@ -334,9 +334,11 @@ async def post_der_response(
         modes_responded=modes,
     )
 
+    sent = False
     try:
         await http.post(path, response)
         tracker.mark_sent(mrid, code, lfdi, now_ts)
+        sent = True
         logger.info(
             "Response posted: mrid=%s lfdi=%s %s -> %s",
             mrid.hex()[:8],
@@ -345,12 +347,17 @@ async def post_der_response(
             path,
         )
     except Exception:
-        # The response did not land, so the claim must not outlive it or the
-        # next cycle would treat this as already answered.
-        tracker.release(mrid, code, lfdi)
         logger.warning(
             "Failed to post response mrid=%s code=%s", mrid.hex()[:8], code.name, exc_info=True
         )
+    finally:
+        # In `finally`, not in the `except`: cancellation raises
+        # CancelledError, which is not an Exception, and `_in_flight` is never
+        # pruned -- so a claim released only on Exception would survive a
+        # shutdown and silence this response for the life of the process.
+        # Cancellation still propagates; only the claim is given back.
+        if not sent:
+            tracker.release(mrid, code, lfdi)
 
 
 async def post_price_response(
@@ -406,9 +413,11 @@ async def post_price_response(
         created_date_time=TimeType(value=now_ts),
     )
 
+    sent = False
     try:
         await http.post(path, response)
         tracker.mark_sent(mrid, code, lfdi, now_ts)
+        sent = True
         logger.info(
             "Price response posted: mrid=%s lfdi=%s %s -> %s",
             mrid.hex()[:8],
@@ -417,10 +426,14 @@ async def post_price_response(
             path,
         )
     except Exception:
-        tracker.release(mrid, code, lfdi)
         logger.warning(
             "Failed to post price response mrid=%s code=%s",
             mrid.hex()[:8],
             code.name,
             exc_info=True,
         )
+    finally:
+        # Same reason as the DER path: cancellation is not an Exception, and a
+        # leaked claim is permanent.
+        if not sent:
+            tracker.release(mrid, code, lfdi)
