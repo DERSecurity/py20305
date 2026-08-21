@@ -61,3 +61,82 @@ class MyService(ClientAPIService):
 ```
 
 Build your own router for the additions and include both.
+
+## Reading the head-end's clock
+
+`GET /api/v1/time` returns the current time as the head-end reports it, already
+corrected for however far the local clock has drifted.
+
+This exists for field devices that have no NTP. On many deployments the
+head-end is the only reachable host, so the IEEE 2030.5 Time function set is
+the only clock available, and the device's own RTC free-runs. The client
+already tracks the offset between the two (see the `timebase` block in
+`/status`), so this endpoint applies it for you:
+
+```console
+$ curl http://127.0.0.1:8080/api/v1/time
+{
+  "current_time": 1787263352,
+  "local_time": 1787245352,
+  "tz_offset": -18000,
+  "dst_offset": 0,
+  "dst_active": false,
+  "quality": 3,
+  "source": "server",
+  "offset_seconds": 12.482,
+  "age_seconds": 43.1,
+  "href": "/tm",
+  "timebase_enabled": true
+}
+```
+
+`current_time` is epoch seconds (UTC). It is the observed offset applied to the
+local clock rather than a cached copy of the last `currentTime` seen, so it
+advances smoothly between polls. `local_time` is derived the same way, using
+the server's own `tzOffset` and `dstOffset` rather than a local time zone
+database, since the head-end is the authority on which it means.
+
+`quality` is the server's own claim about its time source, carried through
+unchanged: 3 is an external authoritative source such as NTP, and larger values
+are progressively weaker, up to 7 for intentionally uncoordinated. A server
+reporting 7 is telling you its clock is not traceable to anything.
+
+`age_seconds` is how long ago the offset was measured. Refreshes follow the
+`pollRate` the server advertises on the Time resource, plus the connectivity
+heartbeat, and the reading is served from that cached offset, so polling this
+endpoint costs nothing upstream.
+
+### When there is no answer
+
+If no Time resource has been observed, the endpoint returns **503** with
+`"source": "unavailable"` and every derived field `null`. It does not fall back
+to the local clock. That fallback is the one failure a caller cannot detect for
+itself: the unsynchronized clock is exactly the value that looks right and is
+not, and a device about to set its RTC from the response has no way to tell.
+
+`timebase_enabled` reports whether this client *applies* the offset to its own
+scheduling. It is independent of the reading: turning it off puts the client on
+the local clock for troubleshooting, but the head-end's time is still observed
+and still reported here.
+
+### For constrained clients
+
+`?format=text` (or `Accept: text/plain`) returns the epoch seconds as a bare
+integer and nothing else, for consumers that have no comfortable way to walk a
+JSON document. PLC structured text and similar environments are the usual case.
+
+```console
+$ curl http://127.0.0.1:8080/api/v1/time?format=text
+1787263352
+```
+
+The unavailable path emits no number here either. It returns 503 with the body
+`unavailable`, so a client doing the equivalent of `int(response)` fails loudly
+instead of setting its clock from a plausible-looking wrong value.
+
+### Setting a clock from this
+
+Read `age_seconds` and apply a deadband. The offset is measured against the
+device's own clock, so once you correct that clock the offset converges toward
+zero on the next observation. Stepping again before that observation arrives
+applies the same correction twice.

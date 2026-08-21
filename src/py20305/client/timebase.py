@@ -125,6 +125,31 @@ class ServerTimebase:
         """Server-adjusted wall time for time-of-day-sensitive operations."""
         return time.time() + self.offset(fsa_href)
 
+    def server_now(self, fsa_href: str | None = None) -> float | None:
+        """Head-end wall time, or ``None`` when no Time resource was observed.
+
+        Two deliberate differences from :meth:`now`, both about callers who
+        publish this value rather than merely schedule against it (setting a
+        device clock, stamping a record another system reads).
+
+        It never falls back to the local clock. :meth:`now` returning the
+        unadjusted local time when nothing has been observed is right for
+        scheduling, where carrying on beats stalling; for a caller about to
+        write the value somewhere it is the worst outcome, because a wrong
+        answer and a correct one are indistinguishable at the call site.
+
+        It ignores ``enabled``. That flag governs whether *this* client
+        follows server time, not what time the head-end reports -- an
+        operator who dropped the client onto the local clock to troubleshoot
+        can still ask what the server says, and observations keep flowing
+        either way.
+        """
+        obs = self._per_fsa.get(fsa_href) if fsa_href is not None else None
+        obs = obs or self._global
+        if obs is None:
+            return None
+        return time.time() + obs.offset
+
     def snapshot(self) -> dict[str, Any]:
         """Offset/quality/age per scope, for status surfacing."""
 

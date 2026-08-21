@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from py20305.api.service import ClientAPIService
+from py20305.client.timebase import ServerTimebase
 
 
 def _make_mock_client() -> MagicMock:
@@ -405,3 +407,192 @@ class TestTriggerLogEventBranches:
         await task
         # After completion, the done callback removes it
         assert len(service._background_tasks) == 0
+
+
+# ---------------------------------------------------------------------------
+# Time
+# ---------------------------------------------------------------------------
+
+
+def _time_resource(
+    *,
+    tz_offset: int | None = None,
+    dst_offset: int | None = None,
+    dst_start: int | None = None,
+    dst_end: int | None = None,
+) -> SimpleNamespace:
+    """A stand-in for a fetched Time resource, wrapping scalars the way the
+    generated SEP models do (payload on ``.value``)."""
+
+    def wrap(v: int | None) -> SimpleNamespace | None:
+        return None if v is None else SimpleNamespace(value=v)
+
+    return SimpleNamespace(
+        tz_offset=wrap(tz_offset),
+        dst_offset=wrap(dst_offset),
+        dst_start_time=wrap(dst_start),
+        dst_end_time=wrap(dst_end),
+    )
+
+
+def _with_timebase(
+    service: ClientAPIService,
+    client: MagicMock,
+    *,
+    observed: int | None = None,
+    enabled: bool = True,
+    quality: int = 3,
+    now: float = 1_000.0,
+    time_resource: Any = None,
+) -> None:
+    """Attach a real ServerTimebase to the mocked client, optionally observed."""
+    tb = ServerTimebase(enabled=enabled, drift_warn_seconds=0)
+    if observed is not None:
+        with patch("time.time", return_value=now):
+            tb.observe(observed, quality=quality, href="/tm")
+    client.http.timebase = tb
+    client.state.time = time_resource
+
+
+class TestGetTime:
+    def test_unavailable_when_no_timebase(self, service: ClientAPIService, mock_client: MagicMock):
+        """A Mock attribute must not be mistaken for a timebase; the isinstance
+        guard is what stops a Mock arithmetic result reaching a consumer."""
+        result = service.get_time()
+        assert result["source"] == "unavailable"
+        assert result["current_time"] is None
+
+    def test_unavailable_when_never_observed(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        _with_timebase(service, mock_client)
+        result = service.get_time()
+        assert result["source"] == "unavailable"
+        assert result["current_time"] is None
+        assert result["age_seconds"] is None
+        # The config fact is still reported, so a consumer can tell "not yet
+        # observed" from "this client was told not to follow server time".
+        assert result["timebase_enabled"] is True
+
+    def test_reports_server_corrected_time(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        _with_timebase(service, mock_client, observed=1_030, now=1_000.0)
+        with patch("time.time", return_value=1_060.0):
+            result = service.get_time()
+        assert result["source"] == "server"
+        # Local clock has advanced 60s since an observation that ran 30s fast.
+        assert result["current_time"] == 1_090
+        assert result["offset_seconds"] == 30.0
+        assert result["quality"] == 3
+        assert result["href"] == "/tm"
+
+    def test_available_even_when_client_follows_local_clock(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        """use_server_time=false is a scheduling choice for this client; it does
+        not make the head-end's time unknown."""
+        _with_timebase(service, mock_client, observed=1_030, enabled=False, now=1_000.0)
+        with patch("time.time", return_value=1_000.0):
+            result = service.get_time()
+        assert result["source"] == "server"
+        assert result["current_time"] == 1_030
+        assert result["timebase_enabled"] is False
+
+    def test_local_time_none_without_a_time_zone(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        _with_timebase(service, mock_client, observed=1_030, now=1_000.0)
+        with patch("time.time", return_value=1_000.0):
+            result = service.get_time()
+        assert result["current_time"] == 1_030
+        assert result["local_time"] is None
+        assert result["tz_offset"] is None
+
+    def test_local_time_applies_tz_offset(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        _with_timebase(
+            service,
+            mock_client,
+            observed=1_030,
+            now=1_000.0,
+            time_resource=_time_resource(tz_offset=-18_000),
+        )
+        with patch("time.time", return_value=1_000.0):
+            result = service.get_time()
+        assert result["tz_offset"] == -18_000
+        assert result["dst_active"] is False
+        assert result["local_time"] == 1_030 - 18_000
+
+    def test_dst_applied_inside_the_window(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        _with_timebase(
+            service,
+            mock_client,
+            observed=1_030,
+            now=1_000.0,
+            time_resource=_time_resource(
+                tz_offset=-18_000, dst_offset=3_600, dst_start=1_000, dst_end=2_000
+            ),
+        )
+        with patch("time.time", return_value=1_000.0):
+            result = service.get_time()
+        assert result["dst_active"] is True
+        assert result["local_time"] == 1_030 - 18_000 + 3_600
+
+    def test_dst_not_applied_outside_the_window(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        _with_timebase(
+            service,
+            mock_client,
+            observed=5_000,
+            now=1_000.0,
+            time_resource=_time_resource(
+                tz_offset=-18_000, dst_offset=3_600, dst_start=1_000, dst_end=2_000
+            ),
+        )
+        with patch("time.time", return_value=1_000.0):
+            result = service.get_time()
+        assert result["dst_active"] is False
+        assert result["local_time"] == 5_000 - 18_000
+
+    def test_dst_window_crossing_the_year_boundary(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        """A window whose end precedes its start is a southern-hemisphere
+        season, active outside the interval rather than inside it."""
+        _with_timebase(
+            service,
+            mock_client,
+            observed=500,
+            now=1_000.0,
+            time_resource=_time_resource(
+                tz_offset=39_600, dst_offset=3_600, dst_start=9_000, dst_end=1_000
+            ),
+        )
+        with patch("time.time", return_value=1_000.0):
+            result = service.get_time()
+        assert result["dst_active"] is True
+        assert result["local_time"] == 500 + 39_600 + 3_600
+
+    def test_zero_dst_offset_ignores_the_window(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        """IEEE 2030.5: when dstOffset is 0, dstStartTime and dstEndTime carry
+        no meaning and are ignored."""
+        _with_timebase(
+            service,
+            mock_client,
+            observed=1_500,
+            now=1_000.0,
+            time_resource=_time_resource(
+                tz_offset=0, dst_offset=0, dst_start=1_000, dst_end=2_000
+            ),
+        )
+        with patch("time.time", return_value=1_000.0):
+            result = service.get_time()
+        assert result["dst_active"] is False
+        assert result["local_time"] == 1_500

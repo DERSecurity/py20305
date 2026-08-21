@@ -42,6 +42,41 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+def _as_int(value: Any) -> int | None:
+    """Unwrap a SEP scalar to ``int``, or ``None`` if it is not one.
+
+    Tolerant on purpose: this reads fields off a resource that may be absent,
+    partially populated, or a test double, and a missing time zone is a field
+    to omit from the response rather than a request to fail.
+    """
+    unwrapped = unwrap_value(value)
+    if isinstance(unwrapped, bool) or not isinstance(unwrapped, (int, float)):
+        return None
+    return int(unwrapped)
+
+
+def unavailable_time_body(*, enabled: bool | None = None) -> dict[str, Any]:
+    """The ``GET /time`` body for "no server-true reading exists".
+
+    Shared with the route layer so the shape a consumer parses does not
+    depend on *which* reason it got -- no observation yet, or no client
+    connected at all.
+    """
+    return {
+        "current_time": None,
+        "local_time": None,
+        "tz_offset": None,
+        "dst_offset": None,
+        "dst_active": False,
+        "quality": None,
+        "source": "unavailable",
+        "offset_seconds": None,
+        "age_seconds": None,
+        "href": None,
+        "timebase_enabled": enabled,
+    }
+
+
 class ClientAPIService:
     """Service layer for client-level API operations.
 
@@ -141,6 +176,97 @@ class ClientAPIService:
         if http_client.last_error is not None:
             result["last_error"] = http_client.last_error
         return result
+
+    # -- Time -----------------------------------------------------------------
+
+    def get_time(self) -> dict[str, Any]:
+        """Return the head-end's current time, already corrected for local drift.
+
+        The Time function set is the only clock a client on an isolated network
+        can reach: field devices are routinely deployed where the head-end is
+        the sole reachable host, so NTP is unavailable and the on-board clock
+        free-runs. Such a device can read the offset out of ``/status`` and add
+        it to its own clock, but that puts the arithmetic -- and the mistake of
+        skipping the freshness and availability checks -- in every consumer.
+        This endpoint does it once, here.
+
+        ``current_time`` is the observed offset applied to the local clock, not
+        a cached copy of the last ``currentTime`` seen, so it advances between
+        polls instead of jumping. ``local_time`` is computed the same way
+        rather than echoing the server's ``localTime`` element, which is a
+        snapshot of the moment that resource was fetched and is stale by
+        ``age_seconds``.
+
+        ``source`` is ``"unavailable"`` when no Time resource has been observed
+        yet, and every derived field is then ``None`` -- deliberately, rather
+        than serving the raw local clock, which is the value most likely to be
+        wrong and the one a caller is least able to detect.
+        """
+        timebase = getattr(self._client.http, "timebase", None)
+        # isinstance rather than truthiness: tests stub http with Mocks, and a
+        # Mock attribute would otherwise sail through and produce a Mock time.
+        if not isinstance(timebase, ServerTimebase):
+            return unavailable_time_body(enabled=None)
+
+        snapshot = timebase.snapshot()
+        observation = snapshot.get("global")
+        server_now = timebase.server_now()
+        if server_now is None or observation is None:
+            return unavailable_time_body(enabled=bool(snapshot.get("enabled")))
+
+        current_time = int(server_now)
+        tz_offset, dst_offset, dst_active = self._local_offsets(current_time)
+        local_time: int | None = None
+        if tz_offset is not None:
+            applied_dst = (dst_offset or 0) if dst_active else 0
+            local_time = current_time + tz_offset + applied_dst
+
+        return {
+            "current_time": current_time,
+            "local_time": local_time,
+            "tz_offset": tz_offset,
+            "dst_offset": dst_offset,
+            "dst_active": dst_active,
+            "quality": observation.get("quality"),
+            "source": "server",
+            "offset_seconds": observation.get("offset_seconds"),
+            "age_seconds": observation.get("age_seconds"),
+            "href": observation.get("href") or None,
+            # Whether this client *applies* the offset to its own scheduling.
+            # Independent of the reading above: the offset is observed and
+            # reported either way, so a consumer syncing a clock is not
+            # silently switched to local time by an operator's troubleshooting
+            # setting.
+            "timebase_enabled": bool(snapshot.get("enabled")),
+        }
+
+    def _local_offsets(self, current_time: int) -> tuple[int | None, int | None, bool]:
+        """Return ``(tz_offset, dst_offset, dst_active)`` from the last Time resource.
+
+        Whether daylight saving is in effect is decided against the server's own
+        ``dstStartTime``/``dstEndTime`` instants rather than a local tz database,
+        which the head-end may disagree with. Per IEEE 2030.5 a zero
+        ``dstOffset`` means those two instants carry no meaning and are ignored.
+        """
+        time_resource = getattr(self._client.state, "time", None)
+        tz_offset = _as_int(getattr(time_resource, "tz_offset", None))
+        dst_offset = _as_int(getattr(time_resource, "dst_offset", None))
+        if not dst_offset:
+            return tz_offset, dst_offset, False
+
+        start = _as_int(getattr(time_resource, "dst_start_time", None))
+        end = _as_int(getattr(time_resource, "dst_end_time", None))
+        if start is None or end is None:
+            return tz_offset, dst_offset, False
+
+        # A window whose end precedes its start is a southern-hemisphere season
+        # crossing the year boundary, not bad data -- it is active outside the
+        # interval rather than inside it.
+        if start <= end:
+            dst_active = start <= current_time < end
+        else:
+            dst_active = current_time >= start or current_time < end
+        return tz_offset, dst_offset, dst_active
 
     # -- Devices --------------------------------------------------------------
 
@@ -520,5 +646,3 @@ class ClientAPIService:
 
         await self._run_on_loop(_do_update())
         return {"status": "ok"}
-
-

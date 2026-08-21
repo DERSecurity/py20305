@@ -17,9 +17,10 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from py20305.api.service import ClientAPIService
+from py20305.api.service import ClientAPIService, unavailable_time_body
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,57 @@ def create_client_router(
         if conn is not None:
             status["connection"] = conn.to_dict()
         return status
+
+    # -----------------------------------------------------------------
+    # Time
+    # -----------------------------------------------------------------
+
+    @router.get(
+        "/time",
+        response_model=None,
+        summary="Head-end time, corrected for local clock drift",
+        responses={
+            200: {"description": "A Time resource has been observed; the reading is server-true."},
+            503: {"description": "No Time resource observed yet; no server-true reading exists."},
+        },
+    )
+    async def get_time(
+        request: Request,
+        fmt: str | None = Query(
+            default=None,
+            alias="format",
+            description=(
+                "Set to 'text' for a bare epoch-seconds integer instead of JSON. "
+                "Equivalent to sending 'Accept: text/plain'."
+            ),
+        ),
+    ) -> Response:
+        """Return the current time as reported by the head-end.
+
+        Answers "what time is it really" for a client whose own clock cannot be
+        trusted -- the ordinary case for a field device on a network where the
+        head-end is the only reachable host and NTP is not available.
+
+        The ``format=text`` variant returns the epoch seconds and nothing else,
+        with no JSON to walk, because the consumers that need this most are
+        often the ones least equipped to parse a document.
+
+        Availability is carried by the status code as well as the body, so a
+        consumer that checks only the code cannot mistake an unsynchronized
+        reading for a synchronized one: 503 means no Time resource has been
+        observed, and no bare integer is emitted on that path.
+        """
+        wants_text = fmt == "text" or "text/plain" in request.headers.get("accept", "")
+
+        service = service_getter()
+        payload = unavailable_time_body() if service is None else service.get_time()
+        available = payload.get("source") == "server"
+        status_code = 200 if available else 503
+
+        if wants_text:
+            body = str(payload["current_time"]) if available else "unavailable"
+            return PlainTextResponse(body, status_code=status_code)
+        return JSONResponse(payload, status_code=status_code)
 
     # -----------------------------------------------------------------
     # Devices

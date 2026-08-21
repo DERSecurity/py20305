@@ -191,3 +191,56 @@ def test_observe_uses_single_receipt_instant(monkeypatch: pytest.MonkeyPatch):
     assert obs is not None
     assert obs.offset == 30.0  # computed against the 1000.0 tick...
     assert obs.receipt_epoch == 1_000.0  # ...and stamped with that same tick
+
+
+class TestServerNow:
+    """server_now() answers "what does the head-end say", not "what should I schedule against"."""
+
+    def test_none_when_never_observed(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase()
+        _freeze_time(monkeypatch, 1_000.0)
+        # now() falls back to the local clock here; server_now() must not, or a
+        # caller writing this to a device clock cannot tell the two apart.
+        assert tb.now() == 1_000.0
+        assert tb.server_now() is None
+
+    def test_applies_observed_offset(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase()
+        _freeze_time(monkeypatch, 1_000.0)
+        tb.observe(1_030)
+        assert tb.server_now() == 1_030.0
+
+    def test_tracks_local_clock_between_observations(self, monkeypatch: pytest.MonkeyPatch):
+        """The reading advances with the local clock rather than pinning to the
+        last currentTime seen -- otherwise it would be a staircase, not a clock."""
+        tb = ServerTimebase()
+        _freeze_time(monkeypatch, 1_000.0)
+        tb.observe(1_030)
+        _freeze_time(monkeypatch, 1_060.0)
+        assert tb.server_now() == 1_090.0
+
+    def test_reports_server_time_even_when_disabled(self, monkeypatch: pytest.MonkeyPatch):
+        """`enabled` governs whether this client follows server time, not what
+        the server's time is; the reading stays available for troubleshooting."""
+        tb = ServerTimebase(enabled=False)
+        _freeze_time(monkeypatch, 1_000.0)
+        tb.observe(1_030)
+        assert tb.offset() == 0.0
+        assert tb.now() == 1_000.0
+        assert tb.server_now() == 1_030.0
+
+    def test_fsa_scope_overrides_global(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase()
+        _freeze_time(monkeypatch, 1_000.0)
+        tb.observe(1_010)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        assert tb.server_now("/fsa/1") == 1_050.0
+        assert tb.server_now("/fsa/other") == 1_010.0
+        assert tb.server_now() == 1_010.0
+
+    def test_fsa_only_no_global(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase()
+        _freeze_time(monkeypatch, 1_000.0)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        assert tb.server_now("/fsa/1") == 1_050.0
+        assert tb.server_now() is None

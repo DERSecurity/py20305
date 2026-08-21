@@ -8,7 +8,7 @@ Verifies:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from py20305.api.client_routes import create_client_router
 from py20305.api.service import ClientAPIService
+from py20305.client.timebase import ServerTimebase
 
 
 def _make_test_app(service: ClientAPIService | None) -> FastAPI:
@@ -393,3 +394,83 @@ class TestHttpProbe:
         # 200 regardless of outcome: the endpoint reports what happened.
         r = connected_client.post("/api/v1/proxy/http-probe", json={"path": "/dcap"})
         assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Time
+# ---------------------------------------------------------------------------
+
+
+def _observed_time_client(*, observed: int = 1_030, at: float = 1_000.0) -> TestClient:
+    """Client router whose service has seen one Time resource."""
+    service = _make_service()
+    tb = ServerTimebase(drift_warn_seconds=0)
+    with patch("time.time", return_value=at):
+        tb.observe(observed, quality=3, href="/tm")
+    service._client.http.timebase = tb
+    service._client.state.time = None
+    return TestClient(_make_test_app(service))
+
+
+class TestTimeRoute:
+    def test_json_when_observed(self) -> None:
+        client = _observed_time_client()
+        with patch("time.time", return_value=1_000.0):
+            r = client.get("/api/v1/time")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["source"] == "server"
+        assert data["current_time"] == 1_030
+
+    def test_text_format_is_a_bare_integer(self) -> None:
+        """The whole point of the text variant: nothing to parse."""
+        client = _observed_time_client()
+        with patch("time.time", return_value=1_000.0):
+            r = client.get("/api/v1/time?format=text")
+        assert r.status_code == 200
+        assert r.text == "1030"
+        assert int(r.text) == 1_030
+
+    def test_accept_header_selects_text(self) -> None:
+        client = _observed_time_client()
+        with patch("time.time", return_value=1_000.0):
+            r = client.get("/api/v1/time", headers={"accept": "text/plain"})
+        assert r.status_code == 200
+        assert r.text == "1030"
+
+    def test_unavailable_is_503_not_a_local_clock_reading(self) -> None:
+        """The failure a consumer cannot detect for itself is being handed the
+        unsynchronized local clock as though it were server time."""
+        service = _make_service()
+        service._client.http.timebase = ServerTimebase(drift_warn_seconds=0)
+        service._client.state.time = None
+        client = TestClient(_make_test_app(service))
+
+        r = client.get("/api/v1/time")
+        assert r.status_code == 503
+        assert r.json()["source"] == "unavailable"
+        assert r.json()["current_time"] is None
+
+    def test_text_variant_emits_no_number_when_unavailable(self) -> None:
+        """A consumer doing int(response.text) must not get a plausible number
+        off the unsynchronized clock."""
+        service = _make_service()
+        service._client.http.timebase = ServerTimebase(drift_warn_seconds=0)
+        service._client.state.time = None
+        client = TestClient(_make_test_app(service))
+
+        r = client.get("/api/v1/time?format=text")
+        assert r.status_code == 503
+        assert r.text == "unavailable"
+        with pytest.raises(ValueError):
+            int(r.text)
+
+    def test_disconnected_is_503(self, disconnected_client: TestClient) -> None:
+        r = disconnected_client.get("/api/v1/time")
+        assert r.status_code == 503
+        assert r.json()["source"] == "unavailable"
+
+    def test_registered_in_openapi(self, connected_client: TestClient) -> None:
+        schema = connected_client.get("/openapi.json").json()
+        assert "/api/v1/time" in schema["paths"]
+        assert "503" in schema["paths"]["/api/v1/time"]["get"]["responses"]
