@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import logging
 import time
@@ -210,9 +211,54 @@ class ResponseTracker:
 
     def __init__(self) -> None:
         self._sent: dict[tuple[bytes, ResponseCode, bytes], int] = {}
+        #: Keys claimed by a POST that has not returned, each mapped to a future
+        #: resolved with whether that POST landed. Held apart from ``_sent`` so
+        #: an age prune cannot evict a response still in flight.
+        self._in_flight: dict[tuple[bytes, ResponseCode, bytes], asyncio.Future[bool]] = {}
 
     def already_sent(self, mrid: bytes, code: ResponseCode, lfdi: bytes) -> bool:
-        return (mrid, code, lfdi) in self._sent
+        """True if this response was sent, or is being sent right now.
+
+        In-flight posts count, so a concurrent caller does not send a second
+        copy. :meth:`has_responded` answers the narrower question -- whether
+        anything has actually reached the server for this event -- and the two
+        therefore disagree for the duration of a POST.
+        """
+        key = (mrid, code, lfdi)
+        return key in self._sent or key in self._in_flight
+
+    async def reserve(self, mrid: bytes, code: ResponseCode, lfdi: bytes) -> bool:
+        """Claim this key, waiting out anyone already posting it.
+
+        Returns True when the caller must post, False when the response is
+        already the server's. A caller that arrives while another is posting
+        waits for that POST's outcome rather than being turned away: the DER
+        status-2 path runs once per state transition and has no retry driver,
+        so giving up on the strength of someone else's attempt would let a
+        failed POST mean the response is never sent at all.
+
+        The check and the claim have no await between them, so the claim itself
+        is atomic on one event loop.
+        """
+        key = (mrid, code, lfdi)
+        while True:
+            if key in self._sent:
+                return False
+            in_flight = self._in_flight.get(key)
+            if in_flight is None:
+                self._in_flight[key] = asyncio.get_running_loop().create_future()
+                return True
+            # Someone else holds it. Their outcome decides ours: if their POST
+            # landed there is nothing to do, and if it did not, this caller
+            # goes back around and claims the key itself.
+            if await asyncio.shield(in_flight):
+                return False
+
+    def release(self, mrid: bytes, code: ResponseCode, lfdi: bytes) -> None:
+        """Give up a claim whose POST never landed, so a waiter can take it."""
+        in_flight = self._in_flight.pop((mrid, code, lfdi), None)
+        if in_flight is not None and not in_flight.done():
+            in_flight.set_result(False)
 
     def has_responded(self, mrid: bytes) -> bool:
         """True if any response (any code, any device) was already sent for *mrid*.
@@ -225,7 +271,11 @@ class ResponseTracker:
         return any(sent_mrid == mrid for sent_mrid, _code, _lfdi in self._sent)
 
     def mark_sent(self, mrid: bytes, code: ResponseCode, lfdi: bytes, now: int) -> None:
-        self._sent[(mrid, code, lfdi)] = now
+        key = (mrid, code, lfdi)
+        self._sent[key] = now
+        in_flight = self._in_flight.pop(key, None)
+        if in_flight is not None and not in_flight.done():
+            in_flight.set_result(True)
 
     def prune(self, now: int, max_age: int = 7200) -> None:
         """Remove entries older than max_age seconds."""
@@ -289,24 +339,30 @@ async def post_der_response(
         )
         return
 
-    if tracker.already_sent(mrid, code, lfdi):
+    # Reserved rather than checked: the per-device fan-out posts concurrently,
+    # and a check that the POST separates from its mark lets two responses out
+    # for one (mrid, code, lfdi).
+    if not await tracker.reserve(mrid, code, lfdi):
         logger.debug("Skipping duplicate response mrid=%s code=%s", mrid.hex(), code.name)
         return
 
-    now_ts = now_ts if now_ts is not None else int(time.time())
-    # modesResponded was added in IEEE 2030.5-2023; omit for 2018 servers.
-    modes = None if http.server_2018_compat else build_modes_responded(derc.dercontrol_base)
-    response = DercontrolResponse(
-        end_device_lfdi=lfdi,
-        status=code.value,
-        subject=MRidtype(value=mrid),
-        created_date_time=TimeType(value=now_ts),
-        modes_responded=modes,
-    )
-
+    # Everything from here sits inside the release: a raise while building the
+    # response would otherwise leak the claim, and nothing prunes it.
+    sent = False
     try:
+        now_ts = now_ts if now_ts is not None else int(time.time())
+        # modesResponded was added in IEEE 2030.5-2023; omit for 2018 servers.
+        modes = None if http.server_2018_compat else build_modes_responded(derc.dercontrol_base)
+        response = DercontrolResponse(
+            end_device_lfdi=lfdi,
+            status=code.value,
+            subject=MRidtype(value=mrid),
+            created_date_time=TimeType(value=now_ts),
+            modes_responded=modes,
+        )
         await http.post(path, response)
         tracker.mark_sent(mrid, code, lfdi, now_ts)
+        sent = True
         logger.info(
             "Response posted: mrid=%s lfdi=%s %s -> %s",
             mrid.hex()[:8],
@@ -318,6 +374,14 @@ async def post_der_response(
         logger.warning(
             "Failed to post response mrid=%s code=%s", mrid.hex()[:8], code.name, exc_info=True
         )
+    finally:
+        # In `finally`, not in the `except`: cancellation raises
+        # CancelledError, which is not an Exception, and `_in_flight` is never
+        # pruned -- so a claim released only on Exception would survive a
+        # shutdown and silence this response for the life of the process.
+        # Cancellation still propagates; only the claim is given back.
+        if not sent:
+            tracker.release(mrid, code, lfdi)
 
 
 async def post_price_response(
@@ -361,21 +425,22 @@ async def post_price_response(
         )
         return
 
-    if tracker.already_sent(mrid, code, lfdi):
+    if not await tracker.reserve(mrid, code, lfdi):
         logger.debug("Skipping duplicate price response mrid=%s code=%s", mrid.hex(), code.name)
         return
 
-    now_ts = now_ts if now_ts is not None else int(time.time())
-    response = PriceResponse(
-        end_device_lfdi=lfdi,
-        status=code.value,
-        subject=MRidtype(value=mrid),
-        created_date_time=TimeType(value=now_ts),
-    )
-
+    sent = False
     try:
+        now_ts = now_ts if now_ts is not None else int(time.time())
+        response = PriceResponse(
+            end_device_lfdi=lfdi,
+            status=code.value,
+            subject=MRidtype(value=mrid),
+            created_date_time=TimeType(value=now_ts),
+        )
         await http.post(path, response)
         tracker.mark_sent(mrid, code, lfdi, now_ts)
+        sent = True
         logger.info(
             "Price response posted: mrid=%s lfdi=%s %s -> %s",
             mrid.hex()[:8],
@@ -390,3 +455,8 @@ async def post_price_response(
             code.name,
             exc_info=True,
         )
+    finally:
+        # Same reason as the DER path: cancellation is not an Exception, and a
+        # leaked claim is permanent.
+        if not sent:
+            tracker.release(mrid, code, lfdi)

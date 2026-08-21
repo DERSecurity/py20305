@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
 
+from py20305.client.errors import Sep2ConnectionError
 from py20305.connectors.base import ConnectorValueError
 from py20305.connectors.control_errors import (
     DeviceNotConfiguredError,
@@ -543,3 +545,218 @@ class TestPluginOptOut:
         )
 
         assert http.post.await_count == 0
+
+
+class TestConcurrentPostsCollapse:
+    """The dedup key exists to hold under the fan-out that actually uses it.
+
+    Status 2 is posted per device as each device's apply settles, concurrently.
+    Two targets resolving to one LFDI therefore reach the same key at once, and
+    a check that is separated from its mark by the POST lets both through --
+    the server sees two EventStarted responses for one event.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_concurrent_posts_send_one_response(self):
+        posted: list[int] = []
+
+        async def post(path, body=None, *a, **kw):
+            await asyncio.sleep(0)  # a real POST suspends; that is the window
+            posted.append(body.status)
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=post)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        await asyncio.gather(
+            *[
+                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+                for _ in range(2)
+            ]
+        )
+
+        assert posted == [ResponseCode.ACTIVE.value]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_post_can_be_retried(self):
+        """A reservation must not outlive a POST that never landed."""
+        attempts: list[int] = []
+
+        async def post(path, body=None, *a, **kw):
+            attempts.append(body.status)
+            if len(attempts) == 1:
+                raise Sep2ConnectionError("broker of bad news")
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=post)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        await post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+        await post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1001)
+
+        assert len(attempts) == 2
+        assert tracker.already_sent(derc.m_rid.value, ResponseCode.ACTIVE, _LFDI_A)
+
+
+class TestCancellationDoesNotLeakAClaim:
+    """A claim outliving its POST would silence the response for good.
+
+    ``_in_flight`` is never pruned -- deliberately, since a slow POST must not
+    have its key handed to a second caller -- so a claim released only on
+    ``Exception`` survives cancellation and every later retry is skipped.
+    Shutdown and task cancellation both raise ``CancelledError``, which is not
+    an ``Exception``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_post_leaves_the_key_claimable(self):
+        started = asyncio.Event()
+
+        async def post(path, body=None, *a, **kw):
+            started.set()
+            await asyncio.Event().wait()  # never returns; the caller cancels us
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=post)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        task = asyncio.ensure_future(
+            post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert not tracker.already_sent(derc.m_rid.value, ResponseCode.ACTIVE, _LFDI_A)
+
+    @pytest.mark.asyncio
+    async def test_the_response_still_goes_out_after_a_cancellation(self):
+        """The point of not leaking: the next cycle must be able to post."""
+        started = asyncio.Event()
+        posted: list[int] = []
+
+        async def hang(path, body=None, *a, **kw):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def succeed(path, body=None, *a, **kw):
+            posted.append(body.status)
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=hang)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        task = asyncio.ensure_future(
+            post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        http.post = AsyncMock(side_effect=succeed)
+        await post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1001)
+
+        assert posted == [ResponseCode.ACTIVE.value]
+
+
+class TestTheLoserCoversAFailedWinner:
+    """Suppressing the second post must not mean nobody posts.
+
+    Two targets resolving to one LFDI is a legitimate topology, and the DER
+    status-2 path has no retry driver: ``_apply_and_respond`` runs once per
+    SCHEDULED -> ACTIVE transition. If the first POST fails and the second
+    caller has already been turned away, the server never learns the event
+    started -- a worse conformance outcome than the duplicate this replaced.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_response_lands_once_when_the_first_post_fails(self):
+        attempts: list[int] = []
+        landed: list[int] = []
+
+        async def post(path, body=None, *a, **kw):
+            attempts.append(body.status)
+            if len(attempts) == 1:
+                await asyncio.sleep(0)  # let the other caller reach the claim
+                raise Sep2ConnectionError("server went away")
+            landed.append(body.status)
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=post)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        await asyncio.gather(
+            *[
+                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+                for _ in range(2)
+            ]
+        )
+
+        assert landed == [ResponseCode.ACTIVE.value], "the event's start must reach the server"
+        assert len(attempts) == 2, "the second caller has to take over, not give up"
+        assert tracker.already_sent(derc.m_rid.value, ResponseCode.ACTIVE, _LFDI_A)
+
+    @pytest.mark.asyncio
+    async def test_a_successful_winner_still_silences_the_loser(self):
+        """The whole point of the reservation: one response, not two."""
+        posted: list[int] = []
+
+        async def post(path, body=None, *a, **kw):
+            await asyncio.sleep(0)
+            posted.append(body.status)
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=post)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        await asyncio.gather(
+            *[
+                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+                for _ in range(3)
+            ]
+        )
+
+        assert posted == [ResponseCode.ACTIVE.value]
+
+
+class TestAClaimSurvivesNothing:
+    """Everything between the claim and the POST has to be inside the release."""
+
+    @pytest.mark.asyncio
+    async def test_a_raise_while_building_the_response_frees_the_claim(self, monkeypatch):
+        posted: list[int] = []
+
+        async def post(path, body=None, *a, **kw):
+            posted.append(body.status)
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=post)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        def explode(*a, **kw):
+            raise RuntimeError("modes bitmask")
+
+        monkeypatch.setattr("py20305.events.response.build_modes_responded", explode)
+        await post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+        assert posted == []
+
+        monkeypatch.undo()
+        await post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1001)
+
+        assert posted == [ResponseCode.ACTIVE.value]

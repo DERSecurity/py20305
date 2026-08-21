@@ -127,9 +127,23 @@ class DeviceMapping:
     device_to_programs: dict[str, list[str]] = field(default_factory=dict)
 
     def add(self, program_href: str, device_href: str) -> None:
-        """Add a program <-> device relationship."""
-        self.program_to_devices.setdefault(program_href, []).append(device_href)
-        self.device_to_programs.setdefault(device_href, []).append(program_href)
+        """Add a program <-> device relationship. Adding it twice adds it once.
+
+        Discovery reaches the same pair more than once -- a device carrying two
+        function set assignments that name one program, or a program repeated
+        across pages -- and a repeated entry is not harmless: the dispatch
+        fan-out treats the list as its target list, so the control is applied
+        to that device twice and answered for twice.
+
+        Lists rather than sets because order is discovery order, which the
+        response fan-out reports in.
+        """
+        devices = self.program_to_devices.setdefault(program_href, [])
+        if device_href not in devices:
+            devices.append(device_href)
+        programs = self.device_to_programs.setdefault(device_href, [])
+        if program_href not in programs:
+            programs.append(program_href)
 
     def remove_program(self, program_href: str) -> None:
         """Remove a program and its device associations."""
