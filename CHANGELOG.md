@@ -7,6 +7,22 @@ below says so explicitly.
 
 ## [Unreleased]
 
+- `GET /api/v1/time` returns the head-end's current time with the observed
+  clock offset already applied, for field devices that have no NTP and can
+  reach nothing but the utility server. `?format=text` returns bare epoch
+  seconds for consumers that cannot comfortably parse JSON. When no Time
+  resource has been observed it answers 503 rather than falling back to the
+  local clock, so a caller about to set its RTC cannot mistake an
+  unsynchronized reading for a synchronized one. `ServerTimebase.server_now()`
+  is the accessor behind it, distinct from `now()` in that it returns `None`
+  instead of the local clock and reports the server's time even when the
+  client is configured not to follow it. The response carries
+  `Cache-Control: no-store`, since a cached clock reading is wrong in a way
+  the consumer cannot detect.
+- The `timebase` block in `/status` now measures `age_seconds` on the
+  monotonic clock rather than the wall clock, so a device stepping its own RTC
+  no longer changes how old an existing observation appears. A backward step
+  previously made a stale reading look fresh, or negative.
 - **Behavior change:** `telemetry.enabled` now defaults to `true`. A
   deployment that never set the field starts reading its devices and
   reporting them after upgrading, which means writing to the utility server

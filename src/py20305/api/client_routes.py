@@ -17,9 +17,10 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from py20305.api.service import ClientAPIService
+from py20305.api.service import ClientAPIService, unavailable_time_body
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,113 @@ def create_client_router(
         if conn is not None:
             status["connection"] = conn.to_dict()
         return status
+
+    # -----------------------------------------------------------------
+    # Time
+    # -----------------------------------------------------------------
+
+    #: Both variants of the body, declared so ``/openapi.json`` describes the
+    #: text form as well as the JSON one. ``response_model`` cannot express a
+    #: route that answers in two media types, so the schemas are given here.
+    _TIME_JSON_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "current_time": {"type": "integer", "nullable": True},
+            "local_time": {"type": "integer", "nullable": True},
+            "tz_offset": {"type": "integer", "nullable": True},
+            "dst_offset": {"type": "integer", "nullable": True},
+            "dst_active": {"type": "boolean", "nullable": True},
+            "quality": {"type": "integer", "nullable": True},
+            "source": {"type": "string", "enum": ["server", "unavailable"]},
+            "offset_seconds": {"type": "number", "nullable": True},
+            "age_seconds": {"type": "number", "nullable": True},
+            "href": {"type": "string", "nullable": True},
+            "timebase_enabled": {"type": "boolean", "nullable": True},
+        },
+        "required": ["current_time", "source"],
+    }
+
+    @router.get(
+        "/time",
+        response_model=None,
+        summary="Head-end time, corrected for local clock drift",
+        responses={
+            200: {
+                "description": (
+                    "A Time resource has been observed; the reading is server-true. "
+                    "Only `current_time` and `source` are guaranteed: the time zone "
+                    "fields are null whenever no Time resource is currently held, "
+                    "which happens for the duration of a rediscovery."
+                ),
+                "content": {
+                    "application/json": {"schema": _TIME_JSON_SCHEMA},
+                    "text/plain": {
+                        "schema": {"type": "string"},
+                        "example": "1787263352",
+                    },
+                },
+            },
+            503: {
+                "description": (
+                    "No Time resource observed yet; no server-true reading exists. "
+                    "Every derived field is null, and the text variant emits no "
+                    "number."
+                ),
+                "content": {
+                    "application/json": {"schema": _TIME_JSON_SCHEMA},
+                    "text/plain": {
+                        "schema": {"type": "string"},
+                        "example": "unavailable",
+                    },
+                },
+            },
+        },
+    )
+    async def get_time(
+        request: Request,
+        fmt: str | None = Query(
+            default=None,
+            alias="format",
+            description=(
+                "Set to 'text' for a bare epoch-seconds integer instead of JSON. "
+                "Equivalent to sending 'Accept: text/plain'."
+            ),
+        ),
+    ) -> Response:
+        """Return the current time as reported by the head-end.
+
+        Answers "what time is it really" for a client whose own clock cannot be
+        trusted -- the ordinary case for a field device on a network where the
+        head-end is the only reachable host and NTP is not available.
+
+        The ``format=text`` variant returns the epoch seconds and nothing else,
+        with no JSON to walk, because the consumers that need this most are
+        often the ones least equipped to parse a document.
+
+        Availability is carried by the status code as well as the body, so a
+        consumer that checks only the code cannot mistake an unsynchronized
+        reading for a synchronized one: 503 means no Time resource has been
+        observed, and no bare integer is emitted on that path.
+        """
+        # Media types are case-insensitive (RFC 9110 8.3.1), so `Text/Plain`
+        # selects the text variant exactly as `text/plain` does.
+        accept = request.headers.get("accept", "").lower()
+        wants_text = fmt == "text" or "text/plain" in accept
+
+        service = service_getter()
+        payload = unavailable_time_body() if service is None else service.get_time()
+        available = payload.get("source") == "server"
+        status_code = 200 if available else 503
+
+        # A cached clock reading is wrong in a way the consumer cannot detect,
+        # and the text variant is aimed at the stacks most likely to sit behind
+        # an intermediary nobody configured.
+        headers = {"Cache-Control": "no-store"}
+
+        if wants_text:
+            body = str(payload["current_time"]) if available else "unavailable"
+            return PlainTextResponse(body, status_code=status_code, headers=headers)
+        return JSONResponse(payload, status_code=status_code, headers=headers)
 
     # -----------------------------------------------------------------
     # Devices
