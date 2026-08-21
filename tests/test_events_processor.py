@@ -3473,9 +3473,7 @@ class TestARepeatedDispatchTarget:
     """
 
     @pytest.mark.asyncio
-    async def test_the_control_is_applied_once_and_answered_once(
-        self, shutdown: asyncio.Event
-    ):
+    async def test_the_control_is_applied_once_and_answered_once(self, shutdown: asyncio.Event):
         now = int(time.time())
         derc = _make_derc(0x01, start=now - 5, duration=3600)
         state = _setup_state(der_controls=[derc])

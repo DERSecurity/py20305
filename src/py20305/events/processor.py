@@ -782,17 +782,11 @@ class EventProcessor:
         each device as soon as *that* device's dispatch settles, so a caller can
         post its response without waiting on the rest of the fleet.
         """
-        devices = self._state.device_mapping.program_to_devices.get(record.program_href, [])
+        devices = self._unique_devices(record.program_href)
         derp_state = self._state.der_programs.get(record.program_href)
         curves = derp_state.der_curves if derp_state else []
         mrid_short = record.mrid.hex()[:8]
-        # dict.fromkeys, not a set: one write per device, in discovery order.
-        # DeviceMapping no longer admits a repeated pair, but this list is the
-        # dispatch target list and a caller may populate state itself -- and a
-        # device dispatched twice is written to twice, which reaches hardware.
-        targets = list(
-            dict.fromkeys(d for d in devices if d not in record.superseded_devices)
-        )
+        targets = [d for d in devices if d not in record.superseded_devices]
         logger.debug("Event %s: applying control to %d device(s)", mrid_short, len(targets))
         if not targets:
             return {}
@@ -1157,7 +1151,7 @@ class EventProcessor:
         when deciding whether another active event still covers a device, so
         opting out every active event reverts the device to its planning limit.
         """
-        all_devices = self._state.device_mapping.program_to_devices.get(record.program_href, [])
+        all_devices = self._unique_devices(record.program_href)
         # Exclude devices that were superseded on this event — they were never
         # owned by this event and their DDERC fallback is handled by whichever
         # event actually controlled them.
@@ -1328,7 +1322,7 @@ class EventProcessor:
             logger.debug("Initial DDERC skip %s: cancelled event with pending timer", program_href)
             return
 
-        devices = self._state.device_mapping.program_to_devices.get(program_href, [])
+        devices = self._unique_devices(program_href)
         if not devices:
             logger.debug("Initial DDERC skip %s: no devices in mapping", program_href)
             return
@@ -1451,6 +1445,21 @@ class EventProcessor:
             if best is None or derp.primacy < best.primacy:
                 best = derp
         return best
+
+    def _unique_devices(self, program_href: str) -> list[str]:
+        """The program's devices, each once, in discovery order.
+
+        Every caller of this treats the list as dispatch targets, and a device
+        listed twice is written to twice -- which for a real connector means two
+        writes to hardware. ``DeviceMapping.add`` no longer admits a repeated
+        pair, so this guards the case it cannot: state populated by an embedding
+        application rather than by discovery.
+
+        dict.fromkeys rather than a set because order is discovery order, which
+        the response fan-out reports in.
+        """
+        devices = self._state.device_mapping.program_to_devices.get(program_href, [])
+        return list(dict.fromkeys(devices))
 
     def _get_device_lfdi(self, dev_href: str) -> bytes | None:
         """Look up LFDI for a device href."""

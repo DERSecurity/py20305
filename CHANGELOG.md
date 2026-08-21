@@ -13,7 +13,14 @@ below says so explicitly.
   through and the server saw one `EventReceived`, two `EventStarted` and one
   `EventCompleted` for a single event. The tracker now reserves the
   `(mrid, code, lfdi)` key before posting and releases it in a `finally`, so a
-  failed or cancelled POST still leaves the response retryable.
+  failed or cancelled POST still leaves the response retryable. A caller that
+  arrives while another is posting waits for that POST's outcome and sends only
+  if it failed -- the status-2 path runs once per state transition and has no
+  retry driver, so a missing `EventStarted` would be permanent.
+- `ResponseTracker.already_sent` now reports an in-flight response as sent, so a
+  concurrent caller does not send a second copy. `has_responded` is unchanged
+  and still answers whether anything reached the server, so the two disagree
+  for the duration of a POST. `ResponseTracker.reserve` is a coroutine.
 - A device reachable through discovery twice -- two function set assignments
   naming one program, or a program repeated across pages -- was added to the
   program's device mapping twice, so the control was applied to it twice and
