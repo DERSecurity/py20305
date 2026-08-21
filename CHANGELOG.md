@@ -7,6 +7,11 @@ below says so explicitly.
 
 ## [Unreleased]
 
+- A device that joins a DERProgram the client already knows is now mapped onto
+  it during a refresh. `refresh_der_programs` branched on whether the *program*
+  was new, while the entry that needs creating is the *(program, device)* pair,
+  so such a device received none of that program's controls and appeared in no
+  response until a full discovery rebuilt the mapping.
 - `GET /api/v1/time` returns the head-end's current time with the observed
   clock offset already applied, for field devices that have no NTP and can
   reach nothing but the utility server. `?format=text` returns bare epoch
