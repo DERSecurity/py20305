@@ -5,8 +5,19 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
-## [Unreleased]
+## [0.4.0] — 2026-08-21
 
+- **Behavior change:** `telemetry.enabled` now defaults to `true`. A
+  deployment that never set the field starts reading its devices and
+  reporting them after upgrading, which means writing to the utility server
+  and polling its devices on a schedule. Set it to `false` to keep observing
+  and dispatching without reporting.
+- **Compatibility:** `queue_telemetry` joins `BaseForwarder`, so a forwarder that
+  satisfies that protocol structurally -- without inheriting `AbstractForwarder`
+  -- must define it to keep satisfying `isinstance`. Inheriting the abstract base
+  needs no change, since it declines by default. This follows `queue_event` in
+  0.3.0 rather than making telemetry a second-class kind routed by capability
+  check.
 - A device that joins a DERProgram the client already knows is now mapped onto
   it during a refresh. `refresh_der_programs` branched on whether the *program*
   was new, while the entry that needs creating is the *(program, device)* pair,
@@ -50,11 +61,6 @@ below says so explicitly.
   program's device mapping twice, so the control was applied to it twice and
   answered for twice. `DeviceMapping.add` now admits a pair once, and the
   dispatch fan-out no longer trusts a repeated target.
-- **Behavior change:** `telemetry.enabled` now defaults to `true`. A
-  deployment that never set the field starts reading its devices and
-  reporting them after upgrading, which means writing to the utility server
-  and polling its devices on a schedule. Set it to `false` to keep observing
-  and dispatching without reporting.
 - The runner now PUTs DERCapability, DERSettings and DERStatus, and posts
   LogEvents and DERAvailability. The managers behind them existed and were
   tested; nothing constructed them, so a deployment reported readings and
@@ -101,12 +107,6 @@ below says so explicitly.
 - `CommandNotPermittedError`, raised by `apply_operation` when a gate refuses the
   write. A caller that named one control needs to tell a refusal from a failure;
   a server-issued control is still reported and dropped rather than raised.
-- **Compatibility:** `queue_telemetry` joins `BaseForwarder`, so a forwarder that
-  satisfies that protocol structurally -- without inheriting `AbstractForwarder`
-  -- must define it to keep satisfying `isinstance`. Inheriting the abstract base
-  needs no change, since it declines by default. This follows `queue_event` in
-  0.3.0 rather than making telemetry a second-class kind routed by capability
-  check.
 - Connection-telemetry hardening: peer-controlled content stays off the
   metadata topic (protocol errors report the status code alone, payload
   errors report where and how big, a redirect's Location is stripped to
