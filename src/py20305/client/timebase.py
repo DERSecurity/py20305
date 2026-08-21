@@ -40,6 +40,13 @@ class TimeObservation:
     receipt_epoch: float  # local time.time() at receipt
     quality: int  # Time.quality (3=NTP-derived ... 7=uncoordinated)
     href: str  # Time resource href observed
+    #: ``time.monotonic()`` at receipt, for measuring how old this observation
+    #: is. Age cannot be derived from ``receipt_epoch``: the clock that stamps
+    #: it is the one a caller of ``GET /time`` is about to step, and a backward
+    #: step would make a stale observation read as fresh (or negative). Optional
+    #: so an observation constructed directly still works; age then falls back
+    #: to the wall clock.
+    receipt_monotonic: float | None = None
 
 
 class ServerTimebase:
@@ -75,7 +82,13 @@ class ServerTimebase:
         # the same instant or the stored age/offset pair skews subtly.
         receipt = time.time()
         offset = float(server_time) - receipt
-        obs = TimeObservation(offset=offset, receipt_epoch=receipt, quality=quality, href=href)
+        obs = TimeObservation(
+            offset=offset,
+            receipt_epoch=receipt,
+            quality=quality,
+            href=href,
+            receipt_monotonic=time.monotonic(),
+        )
         scope = fsa_href or "global"
         if fsa_href is None:
             self._global = obs
@@ -125,15 +138,53 @@ class ServerTimebase:
         """Server-adjusted wall time for time-of-day-sensitive operations."""
         return time.time() + self.offset(fsa_href)
 
+    def server_now(self, fsa_href: str | None = None) -> float | None:
+        """Head-end wall time, or ``None`` when no Time resource was observed.
+
+        Two deliberate differences from :meth:`now`, both about callers who
+        publish this value rather than merely schedule against it (setting a
+        device clock, stamping a record another system reads).
+
+        It never falls back to the local clock. :meth:`now` returning the
+        unadjusted local time when nothing has been observed is right for
+        scheduling, where carrying on beats stalling; for a caller about to
+        write the value somewhere it is the worst outcome, because a wrong
+        answer and a correct one are indistinguishable at the call site.
+
+        It ignores ``enabled``. That flag governs whether *this* client
+        follows server time, not what time the head-end reports -- an
+        operator who dropped the client onto the local clock to troubleshoot
+        can still ask what the server says, and observations keep flowing
+        either way.
+        """
+        obs = self._per_fsa.get(fsa_href) if fsa_href is not None else None
+        obs = obs or self._global
+        if obs is None:
+            return None
+        return time.time() + obs.offset
+
     def snapshot(self) -> dict[str, Any]:
         """Offset/quality/age per scope, for status surfacing."""
+
+        def _age(obs: TimeObservation) -> float:
+            """How long ago the observation was taken, in seconds.
+
+            Measured on the monotonic clock so that a device stepping its own
+            RTC -- the thing this client's Time reporting exists to enable --
+            does not change how old an existing observation appears. Clamped at
+            zero for the fallback path, where the wall clock can still run
+            backwards between receipt and read.
+            """
+            if obs.receipt_monotonic is not None:
+                return round(max(0.0, time.monotonic() - obs.receipt_monotonic), 1)
+            return round(max(0.0, time.time() - obs.receipt_epoch), 1)
 
         def _entry(obs: TimeObservation) -> dict[str, Any]:
             return {
                 "offset_seconds": round(obs.offset, 3),
                 "quality": obs.quality,
                 "href": obs.href,
-                "age_seconds": round(time.time() - obs.receipt_epoch, 1),
+                "age_seconds": _age(obs),
             }
 
         return {
