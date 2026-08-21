@@ -17,7 +17,7 @@ from py20305.client.discovery import (
 )
 from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
 from py20305.client.poll_rate import DEFAULT_POLL_RATE
-from py20305.client.state import DiscoveredState, EndDeviceState
+from py20305.client.state import DiscoveredState
 from py20305.client.timebase import ServerTimebase
 from py20305.models.sep.sep import (
     DefaultDercontrol,
@@ -1931,16 +1931,25 @@ async def test_self_device_cleared_on_rediscovery():
 
 @pytest.mark.asyncio
 async def test_refresh_derp_maps_a_device_onto_a_known_program():
-    """A device joining an already-known program must reach that program.
+    """A device gaining an assignment for a known program must reach it.
 
-    The refresh branches on whether the *program* is new, but the entry that
-    needs creating is the *(program, device)* pair. A device whose new FSA names
-    a program the client already knows took the update branch, its pair was
-    never recorded, and it received none of that program's controls until a full
-    discovery rebuilt the mapping.
+    The refresh branched on whether the *program* was new, but the entry that
+    needs creating is the *(program, device)* pair. A device whose new function
+    set assignment named a program the client already knew took the update
+    branch, its pair was never recorded, and it received none of that program's
+    controls until a full discovery rebuilt the mapping.
+
+    Driven the way the poll loop reaches it -- ``_do_poll_fsa`` and then
+    ``_do_poll_derp`` -- because a *new* device cannot arrive through a refresh
+    at all: ``refresh_end_device_lists`` only updates devices already known, and
+    the sole place a new entry is created is full ``discover()``, which rebuilds
+    the mapping from scratch and never had this bug.
     """
     edev1 = _make_edev("/edev/1")
     edev1.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    edev2 = _make_edev("/edev/2", lfdi=bytes([0xBB]) * 20)
+    edev2.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/2/fsa")
+
     fsa1 = _make_fsa("/fsa/1", derp_list_href="/fsa/1/derp")
     derp = _make_derp("/derp/1", primacy=5)
 
@@ -1948,11 +1957,11 @@ async def test_refresh_derp_maps_a_device_onto_a_known_program():
         {
             "/dcap": _make_dcap(),
             "/tm": _make_time(),
-            "/edev": _make_edev_list(edev1),
+            "/edev": _make_edev_list(edev1, edev2),
             "/edev/1/fsa": _make_fsa_list(fsa1),
             "/fsa/1/derp": _make_derp_list(derp),
-            # The second device's own FSA names the same program.
-            "/fsa/2/derp": _make_derp_list(derp),
+            # The second device carries no assignment yet.
+            "/edev/2/fsa": _make_fsa_list(),
         }
     )
 
@@ -1960,16 +1969,13 @@ async def test_refresh_derp_maps_a_device_onto_a_known_program():
     await discover(client, state)  # type: ignore[arg-type]
     assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1"]
 
-    # A second EndDevice appears, as refresh_end_device_lists would leave it.
-    edev2 = _make_edev("/edev/2")
-    edev2.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/2/fsa")
-    state.end_devices["/edev/2"] = EndDeviceState(
-        device=edev2,
-        href="/edev/2",
-        lfdi=b"\xbb" * 20,
-        fsa_list=[_make_fsa("/fsa/2", derp_list_href="/fsa/2/derp")],
+    # The server gives the second device an assignment naming the same program.
+    client._responses["/edev/2/fsa"] = _make_fsa_list(
+        _make_fsa("/fsa/2", derp_list_href="/fsa/2/derp")
     )
+    client._responses["/fsa/2/derp"] = _make_derp_list(derp)
 
+    await refresh_function_set_assignments(client, state)  # type: ignore[arg-type]
     await refresh_der_programs(client, state)  # type: ignore[arg-type]
 
     assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1", "/edev/2"]

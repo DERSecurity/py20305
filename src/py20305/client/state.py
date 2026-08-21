@@ -138,12 +138,17 @@ class DeviceMapping:
         Lists rather than sets because order is discovery order, which the
         response fan-out reports in.
         """
-        devices = self.program_to_devices.setdefault(program_href, [])
-        if device_href not in devices:
-            devices.append(device_href)
+        # Membership is tested on the device's program list, not the program's
+        # device list: a program in a large deployment holds hundreds of
+        # devices, while a device holds a handful of programs, so this scans the
+        # short side. The alternative -- caching pair membership in a set --
+        # would desync the moment a caller appended to either list directly,
+        # and reintroduce the duplicate this guard exists to prevent.
         programs = self.device_to_programs.setdefault(device_href, [])
-        if program_href not in programs:
-            programs.append(program_href)
+        if program_href in programs:
+            return
+        programs.append(program_href)
+        self.program_to_devices.setdefault(program_href, []).append(device_href)
 
     def remove_program(self, program_href: str) -> None:
         """Remove a program and its device associations."""

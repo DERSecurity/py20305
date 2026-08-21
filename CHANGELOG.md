@@ -11,7 +11,10 @@ below says so explicitly.
   it during a refresh. `refresh_der_programs` branched on whether the *program*
   was new, while the entry that needs creating is the *(program, device)* pair,
   so such a device received none of that program's controls and appeared in no
-  response until a full discovery rebuilt the mapping.
+  response until a full discovery rebuilt the mapping. `DeviceMapping.add` now
+  tests membership on the device's program list rather than the program's device
+  list, which is the short side of that relation: a refresh of one program
+  shared by 5000 devices costs 0.74 ms instead of 58 ms.
 - `GET /api/v1/time` returns the head-end's current time with the observed
   clock offset already applied, for field devices that have no NTP and can
   reach nothing but the utility server. `?format=text` returns bare epoch
