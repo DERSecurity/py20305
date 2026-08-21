@@ -29,8 +29,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Queue size for buffering messages before publish
+# Queue size for buffering captured traffic before publish
 _DEFAULT_QUEUE_SIZE = 1000
+
+# How many devices may hold a pending telemetry frame. A map keyed by device is
+# otherwise unbounded if device identifiers are.
+_DEFAULT_TELEMETRY_DEVICES = 1000
+
+# Telemetry frames published before the loop looks at capture again. Capture has
+# priority, but an unbounded slice would let a large fleet delay it.
+_TELEMETRY_SLICE = 8
+
+# Captured items published before pending telemetry gets a turn. Bounded so
+# sustained protocol traffic delays measurements rather than starving them.
+_CAPTURE_RUN = 64
 
 
 class MQTTForwarder(AbstractForwarder):
@@ -50,25 +62,38 @@ class MQTTForwarder(AbstractForwarder):
         config: MQTTForwarderConfig,
         queue_size: int = _DEFAULT_QUEUE_SIZE,
         message_converter: Any | None = None,
+        telemetry_device_limit: int = _DEFAULT_TELEMETRY_DEVICES,
     ) -> None:
         """Initialize the MQTT forwarder.
 
         Args:
             config: MQTT forwarder configuration
-            queue_size: Max messages to buffer before dropping
+            queue_size: Max captured messages and events to buffer before dropping
             message_converter: Optional callable to convert MessageFrame to dict
                              (defaults to using frame content directly)
+            telemetry_device_limit: Max devices holding a pending telemetry frame
         """
         super().__init__(name="mqtt")
         self._config = config
-        self._queue: asyncio.Queue[MessageFrame | TelemetryFrame | EventFrame] = asyncio.Queue(
+        # Two buffers rather than one, because the kinds want opposite policies
+        # under backpressure. A captured exchange or an event is a distinct
+        # record that nothing will send again, so the capture buffer is lossless
+        # until it is itself full. A measurement is superseded by the next
+        # reading for the same device, so telemetry is held newest-per-device
+        # and can never cost a capture its place.
+        self._capture_queue: asyncio.Queue[MessageFrame | EventFrame] = asyncio.Queue(
             maxsize=queue_size
         )
+        self._telemetry_pending: dict[str, TelemetryFrame] = {}
+        self._telemetry_device_limit = telemetry_device_limit
         self._message_converter = message_converter
         self._telemetry_converter: Any | None = None
         self._client: Any = None  # aiomqtt.Client
         self._publish_task: asyncio.Task[None] | None = None
         self._shutdown_event = asyncio.Event()
+        # Signals the publish loop that a buffer went from empty to occupied,
+        # so an arrival publishes immediately rather than on the next poll.
+        self._wakeup = asyncio.Event()
         self._connected = False
 
         # Generate unique client ID
@@ -204,10 +229,11 @@ class MQTTForwarder(AbstractForwarder):
         if not self._running:
             return
 
-        logger.info("Stopping MQTT forwarder (queue size: %d)", self._queue.qsize())
+        logger.info("Stopping MQTT forwarder (queue size: %d)", self._buffered())
 
         self._running = False
         self._shutdown_event.set()
+        self._wakeup.set()
 
         # Wait for publish task to drain queue
         if self._publish_task:
@@ -262,34 +288,74 @@ class MQTTForwarder(AbstractForwarder):
     def queue_telemetry(self, frame: TelemetryFrame) -> None:
         """Queue measured device state for publishing.
 
-        Same queue and same backpressure as protocol capture: under a slow
-        broker the newest telemetry is what a monitoring upstream wants, and
-        the dropped frames are ones already superseded by a later reading.
+        Held newest-per-device in its own buffer rather than on the capture
+        queue. A second frame for a device supersedes the first -- a monitoring
+        upstream wants the current reading, not a backlog of stale ones -- and
+        a slow broker therefore costs a device its intermediate samples and
+        never costs anyone a captured exchange.
 
         Counted as telemetry rather than as a message, for the same reason
         events are: one number that conflates the two says nothing about either.
         """
-        self._enqueue(frame, counter="telemetry_queued")
+        if not self._accepting():
+            return
+
+        device = frame.device
+        if device in self._telemetry_pending:
+            # Assigning to an existing key keeps its position, so a device
+            # reporting often cannot keep overtaking a quiet one in the drain.
+            self._telemetry_pending[device] = frame
+            self._stats["telemetry_superseded"] = self._stats.get("telemetry_superseded", 0) + 1
+            self._wakeup.set()
+            return
+
+        if len(self._telemetry_pending) >= self._telemetry_device_limit:
+            from py20305.diagnostics import report
+
+            report(
+                "warnings",
+                "MQTT telemetry buffer at its device limit, dropping frame",
+                source="mqtt",
+                dedup_key="mqtt_telemetry_devices_full",
+                details={
+                    "endpoint": self._config.endpoint,
+                    "device_limit": self._telemetry_device_limit,
+                },
+            )
+            self._stats["telemetry_dropped"] = self._stats.get("telemetry_dropped", 0) + 1
+            return
+
+        self._telemetry_pending[device] = frame
+        self._stats["telemetry_queued"] = self._stats.get("telemetry_queued", 0) + 1
+        self._wakeup.set()
+
+    def _accepting(self) -> bool:
+        """Whether the forwarder is in a state to buffer anything at all."""
+        if not self._running:
+            logger.debug("MQTT forwarder not running, dropping message")
+            return False
+
+        if self._shutdown_event.is_set():
+            logger.debug("MQTT forwarder shutting down, dropping message")
+            return False
+
+        return True
 
     def _enqueue(
-        self, item: MessageFrame | TelemetryFrame | EventFrame, *, counter: str = "messages_queued"
+        self, item: MessageFrame | EventFrame, *, counter: str = "messages_queued"
     ) -> None:
-        """Put one item on the publish queue, dropping the oldest when full.
+        """Put one captured item on the publish queue, dropping the oldest when full.
 
         ``counter`` names the statistic to credit, so an event is counted as an
         event rather than inflating the message count as well.
         """
-        if not self._running:
-            logger.debug("MQTT forwarder not running, dropping message")
-            return
-
-        if self._shutdown_event.is_set():
-            logger.debug("MQTT forwarder shutting down, dropping message")
+        if not self._accepting():
             return
 
         try:
-            self._queue.put_nowait(item)
+            self._capture_queue.put_nowait(item)
             self._stats[counter] = self._stats.get(counter, 0) + 1
+            self._wakeup.set()
         except asyncio.QueueFull:
             from py20305.diagnostics import report
 
@@ -304,103 +370,65 @@ class MQTTForwarder(AbstractForwarder):
                 details={"endpoint": self._config.endpoint},
             )
             try:
-                self._queue.get_nowait()  # Drop oldest
+                self._capture_queue.get_nowait()  # Drop oldest
                 self._stats["messages_dropped"] = self._stats.get("messages_dropped", 0) + 1
-                self._queue.put_nowait(item)
+                self._capture_queue.put_nowait(item)
                 self._stats[counter] = self._stats.get(counter, 0) + 1
             except asyncio.QueueEmpty:
                 pass
 
+    def _buffered(self) -> int:
+        """How many items are waiting across both buffers."""
+        return self._capture_queue.qsize() + len(self._telemetry_pending)
+
     async def _publish_loop(self) -> None:
-        """Background task that publishes queued messages."""
+        """Background task that publishes buffered items, capture first.
+
+        Each pass drains up to ``_CAPTURE_RUN`` captured items and then up to
+        ``_TELEMETRY_SLICE`` telemetry frames. Capture keeps priority because
+        it is the payload nothing will send again, while the bound on the run
+        means a client under sustained protocol load still reports measurements
+        -- and since telemetry coalesces, starving it would leave the upstream
+        with no reading at all for that period rather than a delayed one.
+        """
         message_topic = f"{self._config.topic_base}/{PROTOCOL_MESSAGE_TOPIC_SUFFIX}"
         # Its own topic rather than a shared one with a type marker inside: a
         # subscriber that wants only measurements, or only capture, should be able
         # to say so at the broker instead of filtering every message on arrival.
         telemetry_topic = f"{self._config.topic_base}/out/telemetry"
 
-        while self._running or not self._queue.empty():
+        while self._running or self._buffered():
             try:
-                # Wait for message with timeout to check shutdown
-                try:
-                    item = await asyncio.wait_for(
-                        self._queue.get(),
-                        timeout=1.0,
-                    )
-                except TimeoutError:
-                    if not self._running and self._queue.empty():
+                published = 0
+
+                while published < _CAPTURE_RUN:
+                    try:
+                        item = self._capture_queue.get_nowait()
+                    except asyncio.QueueEmpty:
                         break
+                    await self._publish_item(item, message_topic, telemetry_topic)
+                    published += 1
+
+                for _ in range(_TELEMETRY_SLICE):
+                    if not self._telemetry_pending:
+                        break
+                    # Oldest pending device first; a superseding frame kept its
+                    # device's place, so no device can overtake another.
+                    device = next(iter(self._telemetry_pending))
+                    await self._publish_item(
+                        self._telemetry_pending.pop(device), message_topic, telemetry_topic
+                    )
+                    published += 1
+
+                if published:
                     continue
 
-                # Convert to publishable format. An event is already in its
-                # wire form and carries its own topic; a message frame is
-                # converted and goes on the protocol-message topic.
-                try:
-                    if isinstance(item, EventFrame):
-                        topic = f"{self._config.topic_base}/{item.topic_suffix}"
-                        payload = item.payload
-                    elif isinstance(item, TelemetryFrame):
-                        topic = telemetry_topic
-                        if self._telemetry_converter:
-                            payload = self._telemetry_converter(item)
-                        else:
-                            payload = self._telemetry_to_dict(item)
-                    else:
-                        topic = message_topic
-                        if self._message_converter:
-                            payload = self._message_converter(item)
-                        else:
-                            payload = self._frame_to_dict(item)
-
-                    payload_json = json.dumps(payload, default=str)
-                except Exception as e:
-                    from py20305.diagnostics import report
-
-                    report(
-                        "warnings",
-                        f"Failed to serialize MQTT message for {self._config.endpoint}: {e}",
-                        source="mqtt",
-                        dedup_key=f"mqtt_publish:{self._config.endpoint}:serialize",
-                        details={
-                            "endpoint": self._config.endpoint,
-                            "kind": "serialize",
-                            "error": str(e),
-                        },
-                    )
-                    self._record_error(f"Serialization error: {e}")
-                    continue
-
-                # Publish
-                try:
-                    if self._client:
-                        await self._client.publish(
-                            topic,
-                            payload_json.encode("utf-8"),
-                            qos=1,
-                        )
-                        self._record_success()
-                        logger.debug("Published message to %s", topic)
-                    else:
-                        logger.warning("MQTT client not connected")
-                        self._record_error("Client not connected")
-                except Exception as e:
-                    from py20305.diagnostics import report
-
-                    report(
-                        "warnings",
-                        f"Failed to publish MQTT message to {self._config.endpoint}: {e}",
-                        source="mqtt",
-                        dedup_key=f"mqtt_publish:{self._config.endpoint}:publish",
-                        details={
-                            "endpoint": self._config.endpoint,
-                            "kind": "publish",
-                            "error": str(e),
-                        },
-                    )
-                    self._record_error(f"Publish error: {e}")
-                    # On connection error, attempt reconnect
-                    if "connection" in str(e).lower():
-                        self._connected = False
+                # Nothing buffered. Wait to be woken by an arrival rather than
+                # polling, but wake anyway so shutdown is observed even if the
+                # event is missed.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._wakeup.wait(), timeout=1.0)
+                self._wakeup.clear()
 
             except asyncio.CancelledError:
                 logger.debug("Publish loop cancelled")
@@ -421,6 +449,81 @@ class MQTTForwarder(AbstractForwarder):
                     exc_info=True,
                 )
                 self._record_error(f"Loop error: {e}")
+
+    async def _publish_item(
+        self,
+        item: MessageFrame | TelemetryFrame | EventFrame,
+        message_topic: str,
+        telemetry_topic: str,
+    ) -> None:
+        """Convert one buffered item and publish it on the topic for its kind."""
+        # An event is already in its wire form and carries its own topic; a
+        # message frame is converted and goes on the protocol-message topic.
+        try:
+            if isinstance(item, EventFrame):
+                topic = f"{self._config.topic_base}/{item.topic_suffix}"
+                payload = item.payload
+            elif isinstance(item, TelemetryFrame):
+                topic = telemetry_topic
+                if self._telemetry_converter:
+                    payload = self._telemetry_converter(item)
+                else:
+                    payload = self._telemetry_to_dict(item)
+            else:
+                topic = message_topic
+                if self._message_converter:
+                    payload = self._message_converter(item)
+                else:
+                    payload = self._frame_to_dict(item)
+
+            payload_json = json.dumps(payload, default=str)
+        except Exception as e:
+            from py20305.diagnostics import report
+
+            report(
+                "warnings",
+                f"Failed to serialize MQTT message for {self._config.endpoint}: {e}",
+                source="mqtt",
+                dedup_key=f"mqtt_publish:{self._config.endpoint}:serialize",
+                details={
+                    "endpoint": self._config.endpoint,
+                    "kind": "serialize",
+                    "error": str(e),
+                },
+            )
+            self._record_error(f"Serialization error: {e}")
+            return
+
+        try:
+            if self._client:
+                await self._client.publish(
+                    topic,
+                    payload_json.encode("utf-8"),
+                    qos=1,
+                )
+                self._record_success()
+                logger.debug("Published message to %s", topic)
+            else:
+                logger.warning("MQTT client not connected")
+                self._record_error("Client not connected")
+        except Exception as e:
+            from py20305.diagnostics import report
+
+            report(
+                "warnings",
+                f"Failed to publish MQTT message to {self._config.endpoint}: {e}",
+                source="mqtt",
+                dedup_key=f"mqtt_publish:{self._config.endpoint}:publish",
+                details={
+                    "endpoint": self._config.endpoint,
+                    "kind": "publish",
+                    "error": str(e),
+                },
+            )
+            self._record_error(f"Publish error: {e}")
+            # On connection error, attempt reconnect
+            if "connection" in str(e).lower():
+                self._connected = False
 
     def _frame_to_dict(self, frame: MessageFrame) -> dict[str, Any]:
         """Convert MessageFrame to dict for publishing.
@@ -495,7 +598,10 @@ class MQTTForwarder(AbstractForwarder):
                 "connected": self._connected,
                 "broker": f"{self._config.endpoint}:{self._config.port}",
                 "client_id": self._client_id,
-                "queue_size": self._queue.qsize(),
+                # Unchanged meaning: everything buffered, across both kinds.
+                "queue_size": self._buffered(),
+                "capture_queue_size": self._capture_queue.qsize(),
+                "telemetry_pending": len(self._telemetry_pending),
                 "topic": f"{self._config.topic_base}/{PROTOCOL_MESSAGE_TOPIC_SUFFIX}",
             }
         )

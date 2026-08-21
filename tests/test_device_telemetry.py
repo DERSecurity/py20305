@@ -825,7 +825,7 @@ class TestEventsSurviveTheRealTransport:
         manager._running = True
         emitter.record_read("dev1", {"W": 1500}, connector=FakeTcpConnector())
 
-        assert forwarder._queue.qsize() == 1, "the event never reached the MQTT forwarder"
+        assert forwarder._capture_queue.qsize() == 1, "the event never reached the MQTT forwarder"
 
     def test_the_queued_item_is_the_event(self):
         manager, adapter, forwarder = self._real_stack()
@@ -836,7 +836,7 @@ class TestEventsSurviveTheRealTransport:
         emitter = DeviceTelemetryEmitter(manager, DeviceTelemetryConfig(enabled=True))
         emitter.record_read("dev1", {"W": 1500})
 
-        queued = forwarder._queue.get_nowait()
+        queued = forwarder._capture_queue.get_nowait()
         assert isinstance(queued, EventFrame)
         assert queued.kind == "device-telemetry"
 
@@ -848,7 +848,7 @@ class TestEventsSurviveTheRealTransport:
         emitter = DeviceTelemetryEmitter(manager, DeviceTelemetryConfig(enabled=True))
         emitter.record_read("dev1", {"W": 1500})
 
-        assert forwarder._queue.qsize() == 0
+        assert forwarder._capture_queue.qsize() == 0
 
 
 class TestReadsAreReachableInProduction:

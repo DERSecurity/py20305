@@ -1,6 +1,7 @@
 """Tests for MQTT forwarder."""
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,7 +10,13 @@ import pytest
 
 from py20305 import diagnostics
 from py20305.diagnostics import DiagnosticsStore
-from py20305.forwarders.base import MessageDirection, MessageFrame
+from py20305.forwarders.base import (
+    EventFrame,
+    MessageDirection,
+    MessageFrame,
+    TelemetryFrame,
+    TelemetryPoint,
+)
 from py20305.forwarders.config import MQTTForwarderConfig
 from py20305.forwarders.mqtt_forwarder import MQTTForwarder
 
@@ -126,7 +133,7 @@ class TestMQTTForwarder:
         )
         forwarder.queue_message(frame)
         # Should not raise, just drop silently
-        assert forwarder._queue.empty()
+        assert forwarder._capture_queue.empty()
 
     async def test_start_imports_aiomqtt(self, mock_config: MQTTForwarderConfig) -> None:
         forwarder = MQTTForwarder(mock_config)
@@ -286,7 +293,7 @@ class TestMQTTForwarder:
         forwarder.queue_message(frame2)
         forwarder.queue_message(frame3)
 
-        assert forwarder._queue.qsize() == 2
+        assert forwarder._capture_queue.qsize() == 2
         stats = forwarder.get_statistics()
         assert stats.get("messages_dropped", 0) == 1
 
@@ -313,6 +320,193 @@ class TestMQTTForwarder:
         assert result["http_method"] == "GET"
         assert result["uri"] == "/test"
         assert result["status_code"] == 200
+
+
+class TestBufferPolicyByKind:
+    """What survives a slow broker, per payload kind.
+
+    The three kinds want different policies. A captured exchange and an event
+    are each a distinct record -- nothing will send them again -- so the
+    capture buffer is lossless until it is itself full. A measurement is
+    superseded by the next reading for the same device, so the telemetry
+    buffer holds the newest frame per device and never costs a capture its
+    place.
+    """
+
+    @staticmethod
+    def _message(message_type: str) -> MessageFrame:
+        return MessageFrame(
+            direction=MessageDirection.UPSTREAM,
+            message_type=message_type,
+            content={},
+        )
+
+    @staticmethod
+    def _telemetry(device: str, watts: float) -> TelemetryFrame:
+        return TelemetryFrame(
+            device=device,
+            points={"W": TelemetryPoint(value=watts, source_timestamp=100.0, quality="good")},
+            quality="good",
+            last_success=100.0,
+        )
+
+    @staticmethod
+    async def _drain(forwarder: MQTTForwarder) -> list[tuple[str, dict]]:
+        """Run the publish loop to exhaustion and return what it published.
+
+        Drives the real loop rather than reading the buffers, so the assertion
+        is about what reaches the broker rather than about internal shape.
+        """
+        forwarder._running = False
+        await forwarder._publish_loop()
+        return [
+            (call.args[0], json.loads(call.args[1]))
+            for call in forwarder._client.publish.call_args_list
+        ]
+
+    @staticmethod
+    def _armed(config: MQTTForwarderConfig, **kwargs: int) -> MQTTForwarder:
+        """A forwarder accepting frames, with a mock client and no live loop."""
+        forwarder = MQTTForwarder(config, **kwargs)
+        client = MagicMock()
+        client.publish = AsyncMock()
+        forwarder._client = client
+        forwarder._running = True
+        return forwarder
+
+    async def test_telemetry_never_evicts_captured_traffic(
+        self, mock_config: MQTTForwarderConfig
+    ) -> None:
+        """Issue #7: a telemetry flood must not cost a captured exchange."""
+        forwarder = self._armed(mock_config, queue_size=3)
+
+        for name in ("Msg1", "Msg2", "Msg3"):
+            forwarder.queue_message(self._message(name))
+        for index in range(5):
+            forwarder.queue_telemetry(self._telemetry(f"device{index}", float(index)))
+
+        published = await self._drain(forwarder)
+
+        captured = [payload["message_type"] for topic, payload in published if "raw" in topic]
+        assert captured == ["Msg1", "Msg2", "Msg3"]
+        assert forwarder.get_statistics().get("messages_dropped", 0) == 0
+
+    async def test_an_event_is_never_evicted_by_telemetry(
+        self, mock_config: MQTTForwarderConfig
+    ) -> None:
+        """An OCSF event carries a reason no later frame restates."""
+        forwarder = self._armed(mock_config, queue_size=1)
+        forwarder.queue_event(
+            EventFrame(payload={"reason": "cert_expired"}, topic_suffix="out/ocsf")
+        )
+
+        for index in range(5):
+            forwarder.queue_telemetry(self._telemetry(f"device{index}", float(index)))
+
+        published = await self._drain(forwarder)
+
+        assert ("test_topic/out/ocsf", {"reason": "cert_expired"}) in published
+
+    async def test_a_second_frame_for_a_device_supersedes_the_first(
+        self, mock_config: MQTTForwarderConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The newest reading is what a monitoring upstream wants, so no warning."""
+        fresh = DiagnosticsStore()
+        monkeypatch.setattr(diagnostics, "_store", fresh)
+        forwarder = self._armed(mock_config)
+
+        forwarder.queue_telemetry(self._telemetry("device0", 100.0))
+        forwarder.queue_telemetry(self._telemetry("device0", 200.0))
+
+        published = await self._drain(forwarder)
+
+        assert len(published) == 1
+        assert published[0][1]["points"]["W"]["value"] == 200.0
+
+        stats = forwarder.get_statistics()
+        assert stats["telemetry_queued"] == 1
+        assert stats["telemetry_superseded"] == 1
+        assert stats.get("messages_dropped", 0) == 0
+        assert fresh.snapshot()["warnings"] == []
+
+    async def test_one_device_never_supersedes_another(
+        self, mock_config: MQTTForwarderConfig
+    ) -> None:
+        """Coalescing is per device: a chatty device costs a quiet one nothing."""
+        forwarder = self._armed(mock_config)
+
+        forwarder.queue_telemetry(self._telemetry("quiet", 1.0))
+        for watts in (10.0, 20.0, 30.0):
+            forwarder.queue_telemetry(self._telemetry("chatty", watts))
+
+        published = await self._drain(forwarder)
+
+        assert [
+            (payload["device"], payload["points"]["W"]["value"]) for _, payload in published
+        ] == [
+            ("quiet", 1.0),
+            ("chatty", 30.0),
+        ]
+
+    async def test_capture_publishes_before_telemetry(
+        self, mock_config: MQTTForwarderConfig
+    ) -> None:
+        forwarder = self._armed(mock_config)
+
+        forwarder.queue_telemetry(self._telemetry("device0", 1.0))
+        forwarder.queue_message(self._message("Msg1"))
+
+        published = await self._drain(forwarder)
+
+        assert [topic for topic, _ in published] == [
+            "test_topic/out/2030-5-raw",
+            "test_topic/out/telemetry",
+        ]
+
+    async def test_pending_telemetry_is_published_on_shutdown(
+        self, mock_config: MQTTForwarderConfig
+    ) -> None:
+        """The drain on stop covers both buffers, not just capture."""
+        forwarder = MQTTForwarder(mock_config)
+
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.publish = AsyncMock()
+
+        with (
+            patch("py20305.forwarders.mqtt_forwarder.ssl.SSLContext"),
+            patch("aiomqtt.Client", return_value=client),
+        ):
+            await forwarder.start()
+            forwarder.queue_telemetry(self._telemetry("device0", 42.0))
+            await forwarder.stop()
+
+        topics = [call.args[0] for call in client.publish.call_args_list]
+        assert topics == ["test_topic/out/telemetry"]
+
+    async def test_a_new_device_at_the_limit_is_dropped_and_reported(
+        self, mock_config: MQTTForwarderConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The map is keyed by device, so its bound is a device count."""
+        fresh = DiagnosticsStore()
+        monkeypatch.setattr(diagnostics, "_store", fresh)
+        forwarder = self._armed(mock_config, telemetry_device_limit=2)
+
+        for index in range(4):
+            forwarder.queue_telemetry(self._telemetry(f"device{index}", float(index)))
+        # A device already pending needs no slot and is still accepted.
+        forwarder.queue_telemetry(self._telemetry("device0", 99.0))
+
+        stats = forwarder.get_statistics()
+        assert stats["telemetry_pending"] == 2
+        assert stats["telemetry_dropped"] == 2
+        assert stats["telemetry_superseded"] == 1
+
+        warnings = fresh.snapshot()["warnings"]
+        assert len(warnings) == 1
+        assert warnings[0]["message"].startswith("MQTT telemetry buffer at its device limit")
+        assert warnings[0]["details"]["device_limit"] == 2
 
 
 class TestMQTTForwarderPlainMQTT:

@@ -203,6 +203,31 @@ forwarder overrides it. The direction holds as it does for every other kind: a
 forwarder is a sink, fed by whoever produced the frame, with no read path back
 into it.
 
+## Under a slow broker
+
+The MQTT forwarder buffers what it cannot yet publish, and what it sacrifices
+when a buffer fills depends on the kind, because the kinds differ in what a
+lost item costs.
+
+- **Captured messages and events** share a bounded FIFO. Each is a distinct
+  record that nothing will send again, so nothing else may displace them; when
+  that buffer is itself full the oldest is dropped, counted in
+  `messages_dropped`, and reported as a single deduped backpressure warning.
+- **Telemetry** is held newest-per-device in its own buffer. A second frame for
+  a device supersedes the pending one rather than queueing behind it — the
+  newest reading is what a monitoring upstream wants — and it is counted in
+  `telemetry_superseded`, not as a drop. The buffer is bounded by device count
+  (`telemetry_device_limit`, 1000 by default); a frame for a *new* device
+  arriving at that bound is dropped and reported.
+
+The publish loop drains capture first and in bounded runs, so sustained
+protocol traffic delays measurements rather than starving them — and because
+telemetry coalesces, starvation would mean no reading at all for the period
+rather than a late one.
+
+`get_statistics()` reports both buffers: `queue_size` is everything waiting,
+with `capture_queue_size` and `telemetry_pending` beside it.
+
 ## Round-tripping
 
 `to_dict()` and `from_dict()` are inverses, and unknown keys under
