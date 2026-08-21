@@ -178,6 +178,44 @@ def test_observation_dataclass_frozen():
         obs.offset = 2.0  # type: ignore[misc]
 
 
+class TestObservationAge:
+    """Age must survive the device stepping the clock this endpoint exists to set.
+
+    `age_seconds` gates whether a caller trusts the reading enough to set its
+    RTC from it. If age were measured on the wall clock, the very act of
+    correcting that RTC would rewrite how old an existing observation looks --
+    backwards, so a stale reading reads as fresh, or negative.
+    """
+
+    def test_a_backward_clock_step_does_not_make_a_stale_reading_look_fresh(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr("time.time", lambda: 10_000.0)
+        monkeypatch.setattr("time.monotonic", lambda: 500.0)
+        tb = ServerTimebase(drift_warn_seconds=0)
+        tb.observe(10_060)
+
+        # The device applies the correction and steps its RTC back an hour,
+        # while the monotonic clock advances the 30s that really elapsed.
+        monkeypatch.setattr("time.time", lambda: 10_000.0 - 3_600.0 + 30.0)
+        monkeypatch.setattr("time.monotonic", lambda: 530.0)
+
+        age = tb.snapshot()["global"]["age_seconds"]
+        assert age == 30.0
+
+    def test_age_is_never_negative(self, monkeypatch: pytest.MonkeyPatch):
+        """The fallback path still reads a wall clock that can run backwards."""
+        monkeypatch.setattr("time.time", lambda: 10_000.0)
+        tb = ServerTimebase(drift_warn_seconds=0)
+        tb.observe(10_060)
+        # An observation carrying no monotonic stamp, as one constructed
+        # directly would be.
+        tb._global = TimeObservation(offset=60.0, receipt_epoch=10_000.0, quality=3, href="/tm")
+
+        monkeypatch.setattr("time.time", lambda: 9_000.0)
+        assert tb.snapshot()["global"]["age_seconds"] == 0.0
+
+
 def test_observe_uses_single_receipt_instant(monkeypatch: pytest.MonkeyPatch):
     """offset and receipt_epoch must describe the same time.time() call; a
     second capture would skew the stored offset/age pair."""

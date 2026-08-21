@@ -474,6 +474,41 @@ class TestGetTime:
         # observed" from "this client was told not to follow server time".
         assert result["timebase_enabled"] is True
 
+    def test_every_derived_field_is_null_when_unavailable(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        """`dst_active: false` on this path would be indistinguishable from a
+        known, inactive daylight-saving state, which is the one thing the
+        all-null contract exists to prevent."""
+        _with_timebase(service, mock_client)
+        result = service.get_time()
+
+        derived = (
+            "current_time",
+            "local_time",
+            "tz_offset",
+            "dst_offset",
+            "dst_active",
+            "quality",
+            "offset_seconds",
+            "age_seconds",
+            "href",
+        )
+        assert [k for k in derived if result[k] is not None] == []
+
+    def test_the_reading_is_rounded_not_truncated(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        """The server's currentTime is integral, so the fraction here is local
+        time elapsed since the observation. Truncating biases every reading low
+        by up to a second, always in the same direction."""
+        _with_timebase(service, mock_client, observed=1_030, now=1_000.0)
+        # 0.7s after the observation: the true head-end time is 1030.7.
+        with patch("time.time", return_value=1_000.7):
+            result = service.get_time()
+
+        assert result["current_time"] == 1_031
+
     def test_reports_server_corrected_time(
         self, service: ClientAPIService, mock_client: MagicMock
     ):

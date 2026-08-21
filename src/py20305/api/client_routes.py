@@ -68,13 +68,61 @@ def create_client_router(
     # Time
     # -----------------------------------------------------------------
 
+    #: Both variants of the body, declared so ``/openapi.json`` describes the
+    #: text form as well as the JSON one. ``response_model`` cannot express a
+    #: route that answers in two media types, so the schemas are given here.
+    _TIME_JSON_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "current_time": {"type": "integer", "nullable": True},
+            "local_time": {"type": "integer", "nullable": True},
+            "tz_offset": {"type": "integer", "nullable": True},
+            "dst_offset": {"type": "integer", "nullable": True},
+            "dst_active": {"type": "boolean", "nullable": True},
+            "quality": {"type": "integer", "nullable": True},
+            "source": {"type": "string", "enum": ["server", "unavailable"]},
+            "offset_seconds": {"type": "number", "nullable": True},
+            "age_seconds": {"type": "number", "nullable": True},
+            "href": {"type": "string", "nullable": True},
+            "timebase_enabled": {"type": "boolean", "nullable": True},
+        },
+        "required": ["current_time", "source"],
+    }
+
     @router.get(
         "/time",
         response_model=None,
         summary="Head-end time, corrected for local clock drift",
         responses={
-            200: {"description": "A Time resource has been observed; the reading is server-true."},
-            503: {"description": "No Time resource observed yet; no server-true reading exists."},
+            200: {
+                "description": (
+                    "A Time resource has been observed; the reading is server-true. "
+                    "Only `current_time` and `source` are guaranteed: the time zone "
+                    "fields are null whenever no Time resource is currently held, "
+                    "which happens for the duration of a rediscovery."
+                ),
+                "content": {
+                    "application/json": {"schema": _TIME_JSON_SCHEMA},
+                    "text/plain": {
+                        "schema": {"type": "string"},
+                        "example": "1787263352",
+                    },
+                },
+            },
+            503: {
+                "description": (
+                    "No Time resource observed yet; no server-true reading exists. "
+                    "Every derived field is null, and the text variant emits no "
+                    "number."
+                ),
+                "content": {
+                    "application/json": {"schema": _TIME_JSON_SCHEMA},
+                    "text/plain": {
+                        "schema": {"type": "string"},
+                        "example": "unavailable",
+                    },
+                },
+            },
         },
     )
     async def get_time(
@@ -103,17 +151,25 @@ def create_client_router(
         reading for a synchronized one: 503 means no Time resource has been
         observed, and no bare integer is emitted on that path.
         """
-        wants_text = fmt == "text" or "text/plain" in request.headers.get("accept", "")
+        # Media types are case-insensitive (RFC 9110 8.3.1), so `Text/Plain`
+        # selects the text variant exactly as `text/plain` does.
+        accept = request.headers.get("accept", "").lower()
+        wants_text = fmt == "text" or "text/plain" in accept
 
         service = service_getter()
         payload = unavailable_time_body() if service is None else service.get_time()
         available = payload.get("source") == "server"
         status_code = 200 if available else 503
 
+        # A cached clock reading is wrong in a way the consumer cannot detect,
+        # and the text variant is aimed at the stacks most likely to sit behind
+        # an intermediary nobody configured.
+        headers = {"Cache-Control": "no-store"}
+
         if wants_text:
             body = str(payload["current_time"]) if available else "unavailable"
-            return PlainTextResponse(body, status_code=status_code)
-        return JSONResponse(payload, status_code=status_code)
+            return PlainTextResponse(body, status_code=status_code, headers=headers)
+        return JSONResponse(payload, status_code=status_code, headers=headers)
 
     # -----------------------------------------------------------------
     # Devices

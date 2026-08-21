@@ -40,6 +40,13 @@ class TimeObservation:
     receipt_epoch: float  # local time.time() at receipt
     quality: int  # Time.quality (3=NTP-derived ... 7=uncoordinated)
     href: str  # Time resource href observed
+    #: ``time.monotonic()`` at receipt, for measuring how old this observation
+    #: is. Age cannot be derived from ``receipt_epoch``: the clock that stamps
+    #: it is the one a caller of ``GET /time`` is about to step, and a backward
+    #: step would make a stale observation read as fresh (or negative). Optional
+    #: so an observation constructed directly still works; age then falls back
+    #: to the wall clock.
+    receipt_monotonic: float | None = None
 
 
 class ServerTimebase:
@@ -75,7 +82,13 @@ class ServerTimebase:
         # the same instant or the stored age/offset pair skews subtly.
         receipt = time.time()
         offset = float(server_time) - receipt
-        obs = TimeObservation(offset=offset, receipt_epoch=receipt, quality=quality, href=href)
+        obs = TimeObservation(
+            offset=offset,
+            receipt_epoch=receipt,
+            quality=quality,
+            href=href,
+            receipt_monotonic=time.monotonic(),
+        )
         scope = fsa_href or "global"
         if fsa_href is None:
             self._global = obs
@@ -153,12 +166,25 @@ class ServerTimebase:
     def snapshot(self) -> dict[str, Any]:
         """Offset/quality/age per scope, for status surfacing."""
 
+        def _age(obs: TimeObservation) -> float:
+            """How long ago the observation was taken, in seconds.
+
+            Measured on the monotonic clock so that a device stepping its own
+            RTC -- the thing this client's Time reporting exists to enable --
+            does not change how old an existing observation appears. Clamped at
+            zero for the fallback path, where the wall clock can still run
+            backwards between receipt and read.
+            """
+            if obs.receipt_monotonic is not None:
+                return round(max(0.0, time.monotonic() - obs.receipt_monotonic), 1)
+            return round(max(0.0, time.time() - obs.receipt_epoch), 1)
+
         def _entry(obs: TimeObservation) -> dict[str, Any]:
             return {
                 "offset_seconds": round(obs.offset, 3),
                 "quality": obs.quality,
                 "href": obs.href,
-                "age_seconds": round(time.time() - obs.receipt_epoch, 1),
+                "age_seconds": _age(obs),
             }
 
         return {

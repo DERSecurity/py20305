@@ -96,15 +96,23 @@ advances smoothly between polls. `local_time` is derived the same way, using
 the server's own `tzOffset` and `dstOffset` rather than a local time zone
 database, since the head-end is the authority on which it means.
 
+Of the fields above, only `current_time` and `source` are guaranteed on a 200.
+`local_time`, `tz_offset` and `dst_offset` are null whenever the client is not
+currently holding a Time resource, which is the case for the duration of a
+rediscovery: the measured offset survives it, so the clock reading stays good
+while the time zone it would be expressed in is briefly unknown.
+
 `quality` is the server's own claim about its time source, carried through
 unchanged: 3 is an external authoritative source such as NTP, and larger values
 are progressively weaker, up to 7 for intentionally uncoordinated. A server
 reporting 7 is telling you its clock is not traceable to anything.
 
-`age_seconds` is how long ago the offset was measured. Refreshes follow the
-`pollRate` the server advertises on the Time resource, plus the connectivity
-heartbeat, and the reading is served from that cached offset, so polling this
-endpoint costs nothing upstream.
+`age_seconds` is how long ago the offset was measured, on a monotonic clock, so
+that stepping the device's own RTC from this response does not change how old
+an existing reading appears. Refreshes follow the `pollRate` the server
+advertises on DeviceCapability (the Time resource carries none of its own),
+plus the connectivity heartbeat, and the reading is served from that cached
+offset, so polling this endpoint costs nothing upstream.
 
 ### When there is no answer
 
@@ -133,6 +141,10 @@ $ curl http://127.0.0.1:8080/api/v1/time?format=text
 The unavailable path emits no number here either. It returns 503 with the body
 `unavailable`, so a client doing the equivalent of `int(response)` fails loudly
 instead of setting its clock from a plausible-looking wrong value.
+
+Both variants are served with `Cache-Control: no-store`. A cached clock reading
+is wrong in a way the consumer has no way to detect, and this is the endpoint
+most likely to be reached through an intermediary nobody configured.
 
 ### Setting a clock from this
 

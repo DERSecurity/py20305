@@ -67,7 +67,10 @@ def unavailable_time_body(*, enabled: bool | None = None) -> dict[str, Any]:
         "local_time": None,
         "tz_offset": None,
         "dst_offset": None,
-        "dst_active": False,
+        # None, not False: "no Time resource observed" must not be
+        # indistinguishable from "observed, and daylight saving is not in
+        # effect". Every derived field on this path is null for that reason.
+        "dst_active": None,
         "quality": None,
         "source": "unavailable",
         "offset_seconds": None,
@@ -214,7 +217,10 @@ class ClientAPIService:
         if server_now is None or observation is None:
             return unavailable_time_body(enabled=bool(snapshot.get("enabled")))
 
-        current_time = int(server_now)
+        # round, not int: the server's currentTime is integral, so the
+        # fractional part here is local time elapsed since the observation.
+        # Truncating it would bias every reading low by up to a second.
+        current_time = round(server_now)
         tz_offset, dst_offset, dst_active = self._local_offsets(current_time)
         local_time: int | None = None
         if tz_offset is not None:

@@ -474,3 +474,47 @@ class TestTimeRoute:
         schema = connected_client.get("/openapi.json").json()
         assert "/api/v1/time" in schema["paths"]
         assert "503" in schema["paths"]["/api/v1/time"]["get"]["responses"]
+
+    def test_accept_header_is_case_insensitive(self) -> None:
+        """Media types are case-insensitive (RFC 9110 8.3.1). A caller sending
+        `Text/Plain` is asking for the text variant, and handing it JSON breaks
+        exactly the constrained consumer the variant exists for."""
+        client = _observed_time_client()
+        with patch("time.time", return_value=1_000.0):
+            r = client.get("/api/v1/time", headers={"accept": "Text/Plain"})
+        assert r.status_code == 200
+        assert r.text == "1030"
+        assert int(r.text) == 1_030
+
+    def test_a_clock_reading_is_never_cacheable(self) -> None:
+        """A cached time is wrong in the one way the consumer cannot detect."""
+        client = _observed_time_client()
+        with patch("time.time", return_value=1_000.0):
+            json_r = client.get("/api/v1/time")
+            text_r = client.get("/api/v1/time?format=text")
+        assert json_r.headers["cache-control"] == "no-store"
+        assert text_r.headers["cache-control"] == "no-store"
+
+    def test_unavailable_response_is_also_uncacheable(self) -> None:
+        service = _make_service()
+        service._client.http.timebase = ServerTimebase(drift_warn_seconds=0)
+        service._client.state.time = None
+        client = TestClient(_make_test_app(service))
+
+        r = client.get("/api/v1/time")
+        assert r.status_code == 503
+        assert r.headers["cache-control"] == "no-store"
+
+    def test_openapi_describes_both_media_types(self, connected_client: TestClient) -> None:
+        """`response_model` cannot express a two-media-type route, so without an
+        explicit `content` block the text variant is undiscoverable in the
+        schema and the JSON body is untyped."""
+        responses = connected_client.get("/openapi.json").json()["paths"]["/api/v1/time"]["get"][
+            "responses"
+        ]
+        for code in ("200", "503"):
+            content = responses[code]["content"]
+            assert "text/plain" in content
+            props = content["application/json"]["schema"]["properties"]
+            assert "current_time" in props
+            assert "dst_active" in props
