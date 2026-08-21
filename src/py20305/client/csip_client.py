@@ -770,11 +770,47 @@ class CsipClient:
         return found
 
     async def _do_poll_time(self) -> None:
+        """Refresh every Time observation the timebase serves, global and per-FSA.
+
+        Both scopes have to be renewed here. Event classification and timer
+        firing read the FSA-scoped offset (IEEE 2030.5 §9.2.3), which
+        :meth:`ServerTimebase.offset` prefers over the global one, so a per-FSA
+        observation left at its discovery-time value is the offset the client
+        actually runs on. Refreshing only the global scope produced a client
+        whose reported drift was correct and whose scheduling was not: on a host
+        with no NTP, events drifted with the local clock while ``/status`` looked
+        healthy the whole time.
+
+        Each distinct href is fetched once and observed for every scope that
+        names it. A server commonly points DeviceCapability and every FSA at the
+        same ``/tm``, and polling it once per FSA would multiply this poll by the
+        FSA count for no new information.
+        """
         from py20305.models.sep.sep import Time
 
+        # href -> the scopes reading it; None is the global scope.
+        scopes: dict[str, list[str | None]] = {}
         if self._state.time_href:
-            self._state.time = await self._http.get(self._state.time_href, Time)
-            observe_time_resource(self._timebase, self._state.time, href=self._state.time_href)
+            scopes.setdefault(self._state.time_href, []).append(None)
+        for fsa_href, (time_href, _) in self._state.fsa_time.items():
+            scopes.setdefault(time_href, []).append(fsa_href)
+
+        for time_href, hrefs in scopes.items():
+            try:
+                resource = await self._http.get(time_href, Time)
+            except Exception:
+                # One unreachable Time resource must not cost the others their
+                # refresh: dropping the global observation because an FSA's
+                # endpoint is down is how a local failure becomes a fleet-wide
+                # clock problem. The stale observation stays until it succeeds.
+                logger.warning("Time refresh failed at %s; keeping prior observation", time_href)
+                continue
+            for scope in hrefs:
+                if scope is None:
+                    self._state.time = resource
+                else:
+                    self._state.fsa_time[scope] = (time_href, resource)
+                observe_time_resource(self._timebase, resource, fsa_href=scope, href=time_href)
 
     async def _note_successful_contact(self) -> None:
         """Clear the poll-failure streak after the server is reachable again.
