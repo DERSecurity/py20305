@@ -1051,6 +1051,17 @@ async def refresh_der_programs(client: Sep2Client, state: DiscoveredState) -> li
                         continue
 
                     seen_programs.add(derp_href)
+                    # Outside the branches below: those ask whether the
+                    # *program* is new, while the entry that needs creating is
+                    # the *(program, device)* pair. A device whose new function
+                    # set assignment names a program already known took the
+                    # update branch and was never mapped onto it, so it received
+                    # none of that program's controls until a full discovery
+                    # rebuilt the mapping. Unconditional here matches what full
+                    # discovery does, and is safe because `add` admits a pair
+                    # once -- appending on every refresh poll would grow the
+                    # dispatch target list without bound.
+                    state.device_mapping.add(derp_href, edev_href)
 
                     if derp_href in state.der_programs:
                         # Update the program object and primacy
@@ -1063,7 +1074,6 @@ async def refresh_der_programs(client: Sep2Client, state: DiscoveredState) -> li
                         derp_state = await _discover_program(client, derp, derp_href)
                         derp_state.discovered_from_fsa_href = fsa.href
                         state.der_programs[derp_href] = derp_state
-                        state.device_mapping.add(derp_href, edev_href)
                         logger.info(
                             "Discovered new program %s (primacy=%d) during refresh",
                             derp_href,

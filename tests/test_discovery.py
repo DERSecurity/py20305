@@ -1927,3 +1927,88 @@ async def test_self_device_cleared_on_rediscovery():
 
     state.clear()
     assert state.self_device is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_derp_maps_a_device_onto_a_known_program():
+    """A device gaining an assignment for a known program must reach it.
+
+    The refresh branched on whether the *program* was new, but the entry that
+    needs creating is the *(program, device)* pair. A device whose new function
+    set assignment named a program the client already knew took the update
+    branch, its pair was never recorded, and it received none of that program's
+    controls until a full discovery rebuilt the mapping.
+
+    Driven the way the poll loop reaches it -- ``_do_poll_fsa`` and then
+    ``_do_poll_derp`` -- because a *new* device cannot arrive through a refresh
+    at all: ``refresh_end_device_lists`` only updates devices already known, and
+    the sole place a new entry is created is full ``discover()``, which rebuilds
+    the mapping from scratch and never had this bug.
+    """
+    edev1 = _make_edev("/edev/1")
+    edev1.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    edev2 = _make_edev("/edev/2", lfdi=bytes([0xBB]) * 20)
+    edev2.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/2/fsa")
+
+    fsa1 = _make_fsa("/fsa/1", derp_list_href="/fsa/1/derp")
+    derp = _make_derp("/derp/1", primacy=5)
+
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev1, edev2),
+            "/edev/1/fsa": _make_fsa_list(fsa1),
+            "/fsa/1/derp": _make_derp_list(derp),
+            # The second device carries no assignment yet.
+            "/edev/2/fsa": _make_fsa_list(),
+        }
+    )
+
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1"]
+
+    # The server gives the second device an assignment naming the same program.
+    client._responses["/edev/2/fsa"] = _make_fsa_list(
+        _make_fsa("/fsa/2", derp_list_href="/fsa/2/derp")
+    )
+    client._responses["/fsa/2/derp"] = _make_derp_list(derp)
+
+    await refresh_function_set_assignments(client, state)  # type: ignore[arg-type]
+    await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1", "/edev/2"]
+    assert state.device_mapping.device_to_programs["/edev/2"] == ["/derp/1"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_refreshes_do_not_grow_the_mapping():
+    """The reason this could not be fixed before the mapping admitted a pair once.
+
+    An unconditional add on a list that appends would grow by one entry per
+    poll, and that list is the dispatch target list.
+    """
+    edev = _make_edev("/edev/1")
+    edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    fsa = _make_fsa("/fsa/1", derp_list_href="/fsa/1/derp")
+    derp = _make_derp("/derp/1", primacy=5)
+
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev),
+            "/edev/1/fsa": _make_fsa_list(fsa),
+            "/fsa/1/derp": _make_derp_list(derp),
+        }
+    )
+
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    for _ in range(5):
+        await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1"]
+    assert state.device_mapping.device_to_programs["/edev/1"] == ["/derp/1"]
