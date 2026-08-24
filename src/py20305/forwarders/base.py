@@ -219,9 +219,11 @@ class AbstractForwarder(ABC):
         self._running = False
         self._stats: dict[str, Any] = {
             "messages_queued": 0,
-            # Seeded so a forwarder that never carries events reports an
-            # explicit zero rather than omitting the key.
+            # Seeded so a forwarder that never carries a kind reports an
+            # explicit zero rather than omitting the key, which would leave the
+            # statistics schema dependent on what has happened to arrive.
             "events_queued": 0,
+            "telemetry_queued": 0,
             "messages_published": 0,
             "publish_errors": 0,
             "last_publish_time": None,

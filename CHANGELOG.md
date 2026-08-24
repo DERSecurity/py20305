@@ -22,8 +22,11 @@ below says so explicitly.
   rather than starving them. `MQTTForwarder` takes a `telemetry_device_limit`
   (default 1000) bounding that buffer by device count, and statistics gain
   `capture_queue_size`, `telemetry_pending`, `telemetry_superseded` and
-  `telemetry_dropped`. `queue_size` still reports everything buffered and
-  `messages_dropped` still counts only lost capture, so both mean what they did.
+  `telemetry_dropped` -- the counters seeded at zero, like `events_queued`, so
+  the schema does not depend on what has happened to arrive. `telemetry_queued`
+  joins them on `AbstractForwarder` for the same reason. `queue_size` still
+  reports everything buffered and `messages_dropped` still counts only lost
+  capture, so both mean what they did.
 
 ## [0.4.0] — 2026-08-21
 

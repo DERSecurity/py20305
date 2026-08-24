@@ -3,6 +3,7 @@
 import asyncio
 import json
 from datetime import UTC, datetime
+from itertools import groupby
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,7 +19,11 @@ from py20305.forwarders.base import (
     TelemetryPoint,
 )
 from py20305.forwarders.config import MQTTForwarderConfig
-from py20305.forwarders.mqtt_forwarder import MQTTForwarder
+from py20305.forwarders.mqtt_forwarder import (
+    _CAPTURE_RUN,
+    _TELEMETRY_SLICE,
+    MQTTForwarder,
+)
 
 
 @pytest.fixture
@@ -391,6 +396,23 @@ class TestBufferPolicyByKind:
         assert captured == ["Msg1", "Msg2", "Msg3"]
         assert forwarder.get_statistics().get("messages_dropped", 0) == 0
 
+    def test_the_buffer_counters_start_at_explicit_zeros(
+        self, mock_config: MQTTForwarderConfig
+    ) -> None:
+        """What backpressure cost is readable before anything has cost it.
+
+        A consumer must not have to tell a zero from a key that is absent
+        until its first event.
+        """
+        stats = MQTTForwarder(mock_config).get_statistics()
+
+        assert stats["messages_dropped"] == 0
+        assert stats["telemetry_queued"] == 0
+        assert stats["telemetry_superseded"] == 0
+        assert stats["telemetry_dropped"] == 0
+        assert stats["capture_queue_size"] == 0
+        assert stats["telemetry_pending"] == 0
+
     async def test_an_event_is_never_evicted_by_telemetry(
         self, mock_config: MQTTForwarderConfig
     ) -> None:
@@ -448,19 +470,36 @@ class TestBufferPolicyByKind:
             ("chatty", 30.0),
         ]
 
-    async def test_capture_publishes_before_telemetry(
+    async def test_bounded_runs_give_capture_priority_without_starving_telemetry(
         self, mock_config: MQTTForwarderConfig
     ) -> None:
-        forwarder = self._armed(mock_config)
+        """Both bounds, and where each hands over.
 
-        forwarder.queue_telemetry(self._telemetry("device0", 1.0))
-        forwarder.queue_message(self._message("Msg1"))
+        Enough of each kind to exceed both limits, so the assertion pins the
+        interleaving rather than only the fact that capture goes first: drop
+        the capture bound and the first run swallows everything, drop the
+        telemetry slice and the second run never happens.
+        """
+        capture_count = _CAPTURE_RUN + 4
+        device_count = _TELEMETRY_SLICE + 2
+        forwarder = self._armed(mock_config, queue_size=capture_count)
+
+        for index in range(device_count):
+            forwarder.queue_telemetry(self._telemetry(f"device{index}", float(index)))
+        for index in range(capture_count):
+            forwarder.queue_message(self._message(f"Msg{index}"))
 
         published = await self._drain(forwarder)
 
-        assert [topic for topic, _ in published] == [
-            "test_topic/out/2030-5-raw",
-            "test_topic/out/telemetry",
+        kinds = (
+            "telemetry" if topic.endswith("/telemetry") else "capture" for topic, _ in published
+        )
+        runs = [(kind, len(list(group))) for kind, group in groupby(kinds)]
+        assert runs == [
+            ("capture", _CAPTURE_RUN),
+            ("telemetry", _TELEMETRY_SLICE),
+            ("capture", capture_count - _CAPTURE_RUN),
+            ("telemetry", device_count - _TELEMETRY_SLICE),
         ]
 
     async def test_pending_telemetry_is_published_on_shutdown(

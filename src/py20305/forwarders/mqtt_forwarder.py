@@ -86,6 +86,13 @@ class MQTTForwarder(AbstractForwarder):
         )
         self._telemetry_pending: dict[str, TelemetryFrame] = {}
         self._telemetry_device_limit = telemetry_device_limit
+        # Seeded like the kind counters on the base class: a consumer reading
+        # what backpressure has cost should not have to tell a zero from a
+        # missing key. These three describe this forwarder's buffer policy, so
+        # they live here rather than on a base class that has no buffers.
+        self._stats["messages_dropped"] = 0
+        self._stats["telemetry_superseded"] = 0
+        self._stats["telemetry_dropped"] = 0
         self._message_converter = message_converter
         self._telemetry_converter: Any | None = None
         self._client: Any = None  # aiomqtt.Client
