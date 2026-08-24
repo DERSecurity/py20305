@@ -1637,6 +1637,55 @@ class TestServerTimebasePlumbing:
         assert client.timebase.offset() == pytest.approx(90, abs=2)
 
     @pytest.mark.asyncio
+    async def test_a_total_time_failure_is_raised_not_swallowed(self):
+        """Isolating each href must not turn a total failure into a success.
+
+        The caller treats a clean return as proof of contact and clears the
+        failure streak on it. If every Time request fails and this still returns
+        normally, a server answering nothing keeps looking reachable and the
+        rediscovery that recovers from it never runs.
+        """
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time = {"/fsa/1": ("/fsa/1/tm", MagicMock())}
+        client._http.get = AsyncMock(  # type: ignore[method-assign]
+            side_effect=ConnectionError("server is unreachable")
+        )
+
+        with pytest.raises(ConnectionError):
+            await client._do_poll_time()
+
+    @pytest.mark.asyncio
+    async def test_a_partial_failure_is_still_a_successful_poll(self):
+        """The isolation this is paired with: one bad href is not a failed poll."""
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time = {"/fsa/1": ("/fsa/1/tm", MagicMock())}
+
+        def _time_for(href, _model):
+            if href != "/tm":
+                raise ConnectionError("FSA Time endpoint is down")
+            t = MagicMock()
+            t.current_time.value = int(time.time()) + 30
+            t.quality = 3
+            return t
+
+        client._http.get = AsyncMock(side_effect=_time_for)  # type: ignore[method-assign]
+
+        await client._do_poll_time()  # must not raise
+
+        assert client.timebase.offset() == pytest.approx(30, abs=2)
+
+    @pytest.mark.asyncio
+    async def test_no_time_resources_at_all_is_not_a_failure(self):
+        """Nothing to poll is not the same as everything failing."""
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = None
+        client._http.get = AsyncMock(side_effect=AssertionError("should not be called"))  # type: ignore[method-assign]
+
+        await client._do_poll_time()
+
+    @pytest.mark.asyncio
     async def test_connectivity_probe_observes(self):
         client = CsipClient("https://example.com", time_drift_warn_seconds=0)
         client._state.time_href = "/tm"

@@ -1170,6 +1170,53 @@ async def test_fsa_no_removal_returns_empty():
 
 
 @pytest.mark.asyncio
+async def test_time_poll_scheduled_for_an_fsa_only_time_configuration():
+    """A server may publish FSA TimeLinks and no DeviceCapability one.
+
+    The poll rate is what causes the Time poll to be scheduled at all. Gating it
+    on the global href alone left this deployment with a per-FSA observation
+    frozen at discovery -- and that is the offset event classification reads, so
+    scheduling silently followed the local clock while nothing looked wrong.
+    """
+    edev = _make_edev("/edev/1")
+    edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+
+    fsa = _make_fsa("/fsa/1", derp_list_href="/fsa/1/derp", time_href="/fsa/1/tm")
+    derp = _make_derp("/derp/1")
+
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(time_href=None),  # no global TimeLink
+            "/edev": _make_edev_list(edev),
+            "/edev/1/fsa": _make_fsa_list(fsa),
+            "/fsa/1/derp": _make_derp_list(derp),
+            "/fsa/1/tm": _make_time(),
+        }
+    )
+
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.time_href is None
+    assert "/fsa/1" in state.fsa_time
+    assert "time" in state.poll_rates, (
+        "an FSA Time resource still needs the Time poll scheduled, or its "
+        "observation is never renewed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_time_anywhere_schedules_no_time_poll():
+    """Nothing to refresh means no poll; the guard must not fire unconditionally."""
+    client = _MockClient({"/dcap": _make_dcap(time_href=None, edev_href=None)})
+
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert "time" not in state.poll_rates
+
+
+@pytest.mark.asyncio
 async def test_per_fsa_time_discovered():
     """Gap 9: FSA-specific Time resource is fetched during discovery."""
     edev = _make_edev("/edev/1")

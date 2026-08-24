@@ -18,7 +18,12 @@ below says so explicitly.
   timebase serves, fetching each distinct href once so a server that points
   DeviceCapability and all its FSAs at one `/tm` is polled once rather than once
   per FSA, and one unreachable Time resource no longer costs the others their
-  refresh.
+  refresh. A poll where *every* Time resource fails still raises, so a server
+  answering nothing is not mistaken for a reachable one.
+- The Time poll is now scheduled when either DeviceCapability or an FSA
+  advertises a `TimeLink`. It was gated on the DeviceCapability link alone, so a
+  server publishing per-FSA Time resources and no global one never polled Time
+  at all, and its FSA observations stayed frozen at discovery.
 - A per-FSA observation older than `fsa_stale_seconds` (default one hour) now
   yields to a newer global one. §9.2.3 specificity is worth having only while
   the FSA's Time resource is being kept current; past that it is the more

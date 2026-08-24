@@ -690,8 +690,12 @@ async def discover(
             None, resource_key="derp", default=dcap_rate or DEFAULT_POLL_RATE
         )
 
-    # Set poll rate for Time resource (uses dcap rate as Time has no poll_rate attribute)
-    if state.time_href and "time" not in state.poll_rates:
+    # Set poll rate for Time resource (uses dcap rate as Time has no poll_rate attribute).
+    # Either scope is reason enough to schedule it: a server may publish no
+    # DeviceCapability TimeLink while its FSAs each publish one, and gating on the
+    # global href alone left that deployment with a per-FSA observation frozen at
+    # discovery -- the offset event classification actually reads.
+    if (state.time_href or state.fsa_time) and "time" not in state.poll_rates:
         dcap_rate = state.poll_rates.get("dcap")
         state.poll_rates["time"] = normalize_poll_rate(
             None, resource_key="time", default=dcap_rate or DEFAULT_POLL_RATE

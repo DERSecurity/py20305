@@ -795,22 +795,35 @@ class CsipClient:
         for fsa_href, (time_href, _) in self._state.fsa_time.items():
             scopes.setdefault(time_href, []).append(fsa_href)
 
+        refreshed = 0
+        last_error: Exception | None = None
         for time_href, hrefs in scopes.items():
             try:
                 resource = await self._http.get(time_href, Time)
-            except Exception:
+            except Exception as exc:
                 # One unreachable Time resource must not cost the others their
                 # refresh: dropping the global observation because an FSA's
                 # endpoint is down is how a local failure becomes a fleet-wide
                 # clock problem. The stale observation stays until it succeeds.
+                last_error = exc
                 logger.warning("Time refresh failed at %s; keeping prior observation", time_href)
                 continue
+            refreshed += 1
             for scope in hrefs:
                 if scope is None:
                     self._state.time = resource
                 else:
                     self._state.fsa_time[scope] = (time_href, resource)
                 observe_time_resource(self._timebase, resource, fsa_href=scope, href=time_href)
+
+        if refreshed == 0 and last_error is not None:
+            # Isolating each href must not turn a total failure into a success.
+            # The caller treats a clean return as proof of contact and clears the
+            # failure streak on it, so swallowing the last error here would keep
+            # a server that answers nothing looking reachable -- and suppress the
+            # rediscovery that recovers from it. Re-raise the original so the
+            # 404 and 204 handling upstream still sees the status it needs.
+            raise last_error
 
     async def _note_successful_contact(self) -> None:
         """Clear the poll-failure streak after the server is reachable again.
