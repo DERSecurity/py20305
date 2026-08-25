@@ -127,6 +127,37 @@ scheduling. It is independent of the reading: turning it off puts the client on
 the local clock for troubleshooting, but the head-end's time is still observed
 and still reported here.
 
+### Per-FSA clocks, and when one is abandoned
+
+This endpoint reports the global (DeviceCapability) offset. Scheduling does not
+always use it. IEEE 2030.5 §9.2.3 makes a FunctionSetAssignments' own Time
+resource authoritative for events from that FSA's programs, so the client keeps
+an offset per scope and classifies each event against its own. The `timebase`
+block in `GET /api/v1/status` shows all of them: `global`, and one `per_fsa`
+entry per FSA, each with the same `offset_seconds`, `quality`, `href` and
+`age_seconds` fields as above.
+
+An FSA's offset is the better answer only while its Time resource is being
+refreshed. Once the entry is older than the threshold reported as
+`fsa_stale_seconds`, and the global observation is newer, scheduling for that
+FSA's programs falls back to the global one. A specific offset nobody is
+renewing is a more precise way to be wrong, and it is wrong invisibly, since a
+frozen offset and a fresh one look identical where they are used. The fallback
+never goes to a *staler* observation, and an FSA with no global to fall back to
+keeps using what it has.
+
+You can see this happen in two places. The `per_fsa` entry carries
+`"stale": true` while its offset is being bypassed, and the first time each
+scope is bypassed the client raises a warning naming the FSA and its Time href.
+Both mean the same thing: the number shown for that FSA is no longer the one
+its events are scheduled against, and its Time endpoint needs looking at.
+
+`fsa_stale_seconds` follows the cadence Time is actually polled at (three poll
+intervals, and never less than an hour), so a server advertising a slow
+`pollRate` does not retire healthy scopes between two good refreshes. Set
+`server.fsa_stale_seconds` in the configuration to override it; leaving it unset
+is right for most deployments.
+
 ### For constrained clients
 
 `?format=text` (or `Accept: text/plain`) returns the epoch seconds as a bare

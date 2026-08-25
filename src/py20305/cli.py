@@ -178,6 +178,7 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
         registration_pins=config.registration_pins or None,
         server_2018_compat=config.server.server_2018_compat,
         use_server_time=config.server.use_server_time,
+        fsa_stale_seconds=config.server.fsa_stale_seconds,
     )
     # The transport reads this to publish each exchange, and `run` reads it
     # back to start and stop the transport -- so the manager needs no second

@@ -203,6 +203,15 @@ class DiscoveredState:
     #: Per-FSA Time resource (Gap 9): maps FSA href to (time_href, Time)
     fsa_time: dict[str, tuple[str, Time]] = field(default_factory=dict)
 
+    #: Per-FSA Time href as *advertised* by the FSA, whether or not the
+    #: resource has ever been fetched successfully. ``fsa_time`` records only
+    #: what was read, so an endpoint that was down during discovery leaves no
+    #: trace there -- and the Time poll, which is both scheduled from and
+    #: driven by these hrefs, would never retry it once it recovered. Keeping
+    #: the advertisement separate from the last good read is what makes that
+    #: retry possible.
+    fsa_time_hrefs: dict[str, str] = field(default_factory=dict)
+
     #: Previous FSA hrefs per edev (Gap 3): tracks removals between polls
     previous_fsa_hrefs: dict[str, set[str]] = field(default_factory=dict)
 
@@ -222,6 +231,7 @@ class DiscoveredState:
         # pricing_enabled is a config flag (set at client init), not discovered
         # state -- preserve it across rediscovery.
         self.fsa_time.clear()
+        self.fsa_time_hrefs.clear()
         self.previous_fsa_hrefs.clear()
 
     def programs_from_fsa(self, fsa_href: str) -> list[str]:

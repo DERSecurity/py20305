@@ -77,6 +77,16 @@ class ServerConfig(_Strict):
             "The local clock is never modified either way."
         ),
     )
+    fsa_stale_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "How old an FSA's own Time observation may get before scheduling for its "
+            "programs falls back to the global timebase. Unset derives it from the Time "
+            "poll cadence (three polls, at least an hour), which is what a healthy "
+            "deployment wants; set it only to override that."
+        ),
+    )
 
     @field_validator("url")
     @classmethod

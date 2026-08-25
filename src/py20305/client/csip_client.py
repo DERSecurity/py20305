@@ -104,6 +104,36 @@ _MAX_REDISCOVERY_PASSES = 5
 _SERVER_RESTART_DETECTION_THRESHOLD: int = 3
 
 
+def _is_absent_fsa_time(exc: Exception, *, is_global: bool) -> bool:
+    """Whether *exc* means "this FSA simply has no Time resource".
+
+    Mirrors what discovery already concludes from the same statuses on the same
+    hrefs (404 or 204 on an FSA's TimeLink is benign absence). Deliberately not
+    extended to the global href: DeviceCapability advertised that link, so the
+    same status there means the resource moved or went away, which is a real
+    finding and the trigger for rediscovery.
+    """
+    if is_global:
+        return False
+    return isinstance(exc, Sep2ProtocolError) and exc.status_code in (404, 204)
+
+
+def _needs_poll_recovery(exc: Exception, *, is_global: bool) -> bool:
+    """Whether *exc* has to reach ``_poll_with_404_recovery`` rather than be isolated.
+
+    Two kinds qualify. A redirect on any Time href says resources moved
+    (IEEE 2030.5 §5.5.2.7) and rediscovery is the response. Any protocol error
+    on the *global* href qualifies because that is precisely the path whose
+    silent stall this method exists to prevent -- a 404 there means the client's
+    view of the server is out of date, and isolating it would leave the timebase
+    refreshing from FSAs while the scope every status surface reports quietly
+    froze.
+    """
+    if isinstance(exc, Sep2RedirectError):
+        return True
+    return is_global and isinstance(exc, Sep2ProtocolError)
+
+
 class CsipClient:
     """Async IEEE 2030.5 CSIP client with discovery, polling, and shutdown."""
 
@@ -133,6 +163,7 @@ class CsipClient:
         comms_loss_eval_seconds: int = 30,
         use_server_time: bool = True,
         time_drift_warn_seconds: int = 30,
+        fsa_stale_seconds: float | None = None,
         pricing_enabled: bool = False,
     ) -> None:
         #: Application-level server timebase :
@@ -140,7 +171,9 @@ class CsipClient:
         #: the OS clock is never touched. Shared via Sep2Client (discovery,
         #: telemetry) and EventProcessor.
         self._timebase = ServerTimebase(
-            enabled=use_server_time, drift_warn_seconds=time_drift_warn_seconds
+            enabled=use_server_time,
+            drift_warn_seconds=time_drift_warn_seconds,
+            fsa_stale_seconds=fsa_stale_seconds,
         )
         self._http = Sep2Client(
             base_url,
@@ -447,6 +480,10 @@ class CsipClient:
 
         time_rate = rates.get("time")
         if time_rate is not None:
+            # The staleness threshold has to know this: a per-FSA observation
+            # is at its oldest just before the next successful refresh, so a
+            # threshold shorter than the poll interval retires healthy scopes.
+            self._timebase.note_time_poll_rate(time_rate)
             self._scheduler.schedule("time", time_rate, self._poll_time)
 
         # Connectivity liveness heartbeat (issue: stale server_alive). Runs on a
@@ -770,11 +807,90 @@ class CsipClient:
         return found
 
     async def _do_poll_time(self) -> None:
+        """Refresh every Time observation the timebase serves, global and per-FSA.
+
+        Both scopes have to be renewed here. Event classification and timer
+        firing read the FSA-scoped offset (IEEE 2030.5 §9.2.3), which
+        :meth:`ServerTimebase.offset` prefers over the global one, so a per-FSA
+        observation left at its discovery-time value is the offset the client
+        actually runs on. Refreshing only the global scope produced a client
+        whose reported drift was correct and whose scheduling was not: on a host
+        with no NTP, events drifted with the local clock while ``/status`` looked
+        healthy the whole time.
+
+        Each distinct href is fetched once and observed for every scope that
+        names it. A server commonly points DeviceCapability and every FSA at the
+        same ``/tm``, and polling it once per FSA would multiply this poll by the
+        FSA count for no new information.
+
+        Isolation is deliberately partial. An error that ``_poll_with_404_recovery``
+        exists to act on -- a redirect, or anything the global href answers other
+        than 200 -- is re-raised even when other scopes refreshed fine, because
+        swallowing it is the same silent failure this method fixes, one level up:
+        the global Time href moves, the refresh quietly stops, and the recovery
+        that would repair it never runs. The FSA hrefs keep the tolerant path
+        that discovery already gives them, where an absent Time resource
+        (404/204) means this FSA has none rather than that the server is broken.
+        """
         from py20305.models.sep.sep import Time
 
+        # href -> the scopes reading it; None is the global scope. The global
+        # href goes in first, so when several fail it is its error that reaches
+        # the recovery path -- the one that says the client's own view of the
+        # server moved, rather than one FSA's endpoint being down.
+        scopes: dict[str, list[str | None]] = {}
         if self._state.time_href:
-            self._state.time = await self._http.get(self._state.time_href, Time)
-            observe_time_resource(self._timebase, self._state.time, href=self._state.time_href)
+            scopes.setdefault(self._state.time_href, []).append(None)
+        for fsa_href, time_href in self._state.fsa_time_hrefs.items():
+            scopes.setdefault(time_href, []).append(fsa_href)
+
+        refreshed = 0
+        recoverable: Exception | None = None  # must reach _poll_with_404_recovery
+        last_error: Exception | None = None  # any real failure, for a total loss
+        for time_href, hrefs in scopes.items():
+            is_global = None in hrefs
+            try:
+                resource = await self._http.get(time_href, Time)
+            except Exception as exc:
+                if _is_absent_fsa_time(exc, is_global=is_global):
+                    # Same reading discovery gives it: this FSA publishes no
+                    # Time resource. Not a failure, and not a reason to
+                    # rediscover on every poll for the life of the deployment.
+                    logger.debug("FSA Time at %s absent; keeping prior observation", time_href)
+                    continue
+                # Otherwise one unreachable Time resource must not cost the
+                # others their refresh: dropping the global observation because
+                # an FSA's endpoint is down is how a local failure becomes a
+                # fleet-wide clock problem. The stale observation stays until it
+                # succeeds.
+                last_error = exc
+                if recoverable is None and _needs_poll_recovery(exc, is_global=is_global):
+                    recoverable = exc
+                logger.warning("Time refresh failed at %s; keeping prior observation", time_href)
+                continue
+            refreshed += 1
+            for scope in hrefs:
+                if scope is None:
+                    self._state.time = resource
+                else:
+                    self._state.fsa_time[scope] = (time_href, resource)
+                observe_time_resource(self._timebase, resource, fsa_href=scope, href=time_href)
+
+        if recoverable is not None:
+            # Raised even though other scopes refreshed. Selecting it up front
+            # rather than re-raising whichever error came last is what keeps
+            # this independent of href iteration order: a global 404 behind an
+            # FSA connection error still reaches the rediscovery branch.
+            raise recoverable
+
+        if refreshed == 0 and last_error is not None:
+            # Isolating each href must not turn a total failure into a success.
+            # The caller treats a clean return as proof of contact and clears the
+            # failure streak on it, so swallowing the last error here would keep
+            # a server that answers nothing looking reachable -- and suppress the
+            # rediscovery that recovers from it. Re-raise the original so the
+            # 404 and 204 handling upstream still sees the status it needs.
+            raise last_error
 
     async def _note_successful_contact(self) -> None:
         """Clear the poll-failure streak after the server is reachable again.

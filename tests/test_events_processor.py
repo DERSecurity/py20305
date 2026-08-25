@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -3496,4 +3496,95 @@ class TestARepeatedDispatchTarget:
 
         assert statuses.count(ResponseCode.ACTIVE.value) == 1
         assert dispatcher.apply_control.await_count == 1
+        await proc.shutdown()
+
+
+class TestFsaScopedClockRegression:
+    """The reported field failure: events drift with a host clock that drifts.
+
+    Classification reads the FSA-scoped offset. When that observation was taken
+    once at discovery and never renewed, a host whose clock runs fast pushes the
+    classification clock along with it -- while the global observation, and so
+    ``/status``, keeps reporting the drift correctly. An operator sees a correct
+    offset and events that will not fire.
+    """
+
+    @pytest.mark.asyncio
+    async def test_event_still_scheduled_after_the_host_clock_jumps(self, shutdown: asyncio.Event):
+        server_now = int(time.time())
+        skew = 600  # host clock runs ten minutes fast
+
+        # The head-end schedules against its own clock: start in 60s, run 60s.
+        derc = _make_derc(0x01, start=server_now + 60, duration=60)
+        state = _setup_state(der_controls=[derc])
+        state.der_programs["/derp/1"].discovered_from_fsa_href = "/fsa/1"
+
+        timebase = ServerTimebase(drift_warn_seconds=0)
+        # Discovery observed both scopes while the clocks agreed.
+        with patch("time.time", return_value=float(server_now)):
+            timebase.observe(server_now)
+            timebase.observe(server_now, fsa_href="/fsa/1")
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        proc = EventProcessor(http, state, NullDispatcher(), shutdown, timebase=timebase)
+
+        # The host clock steps forward, and the poll refreshes every scope.
+        local_now = float(server_now + skew)
+        with patch("time.time", return_value=local_now):
+            timebase.observe(server_now)
+            timebase.observe(server_now, fsa_href="/fsa/1")
+            assert timebase.offset("/fsa/1") == pytest.approx(-skew)
+
+            await proc.process_controls("/derp/1")
+
+        rec = proc._store.get(derc.m_rid.value)
+        assert rec is not None
+        assert rec.state == EventState.SCHEDULED, (
+            "a control starting 60s out must not be classified against the fast "
+            "local clock, which puts its 60s window eight minutes in the past"
+        )
+
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_same_event_expires_when_only_global_is_refreshed(
+        self, shutdown: asyncio.Event
+    ):
+        """The pre-fix behavior, pinned so the regression cannot return quietly.
+
+        Identical to the test above except the FSA scope keeps its
+        discovery-time observation, which is exactly what a poll that renews
+        only the global scope leaves behind.
+        """
+        server_now = int(time.time())
+        skew = 600
+
+        derc = _make_derc(0x01, start=server_now + 60, duration=60)
+        state = _setup_state(der_controls=[derc])
+        state.der_programs["/derp/1"].discovered_from_fsa_href = "/fsa/1"
+
+        timebase = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=86_400)
+        with patch("time.time", return_value=float(server_now)):
+            timebase.observe(server_now)
+            timebase.observe(server_now, fsa_href="/fsa/1")
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        proc = EventProcessor(http, state, NullDispatcher(), shutdown, timebase=timebase)
+
+        local_now = float(server_now + skew)
+        with patch("time.time", return_value=local_now):
+            timebase.observe(server_now)  # global only, as the old poll did
+            # Global is correct...
+            assert timebase.offset() == pytest.approx(-skew)
+            # ...and the scope classification reads is not.
+            assert timebase.offset("/fsa/1") == pytest.approx(0.0)
+
+            await proc.process_controls("/derp/1")
+
+        assert proc._store.get(derc.m_rid.value) is None, (
+            "with a stale FSA offset the event is classified as already expired"
+        )
+
         await proc.shutdown()

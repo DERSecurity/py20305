@@ -282,3 +282,248 @@ class TestServerNow:
         tb.observe(1_050, fsa_href="/fsa/1")
         assert tb.server_now("/fsa/1") == 1_050.0
         assert tb.server_now() is None
+
+
+def _freeze_clocks(monkeypatch: pytest.MonkeyPatch, wall: float, mono: float) -> None:
+    """Freeze both clocks independently, so a wall-clock step can be told apart
+    from elapsed time -- which is the distinction this module turns on."""
+    monkeypatch.setattr("time.time", lambda: wall)
+    monkeypatch.setattr("time.monotonic", lambda: mono)
+
+
+class TestStaleFsaFallback:
+    """A per-FSA observation nobody is renewing stops being the better answer.
+
+    §9.2.3 makes the FSA's own Time resource authoritative for that FSA's
+    events, and it stays preferred for as long as it is current. Once it is
+    not, it is the more specific way to be wrong, and it is wrong silently --
+    a frozen offset reads exactly like a fresh one at the point of use.
+    """
+
+    def test_fresh_fsa_observation_still_wins(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=3600)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_010)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        _freeze_clocks(monkeypatch, 1_100.0, 200.0)
+        assert tb.offset("/fsa/1") == 50.0
+
+    def test_stale_fsa_observation_yields_to_a_newer_global(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1")  # offset 50, then never renewed
+        _freeze_clocks(monkeypatch, 5_000.0, 4_100.0)  # 4000s of real elapsed time
+        tb.observe(5_200)  # global offset 200, fresh
+        assert tb.offset("/fsa/1") == 200.0
+
+    def test_stale_fsa_is_kept_when_global_is_older_still(self, monkeypatch: pytest.MonkeyPatch):
+        """Falling back to an even staler global would be a downgrade, not a fix."""
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_200)  # global first
+        _freeze_clocks(monkeypatch, 2_000.0, 1_100.0)
+        tb.observe(2_050, fsa_href="/fsa/1")  # FSA newer; both later go stale
+        _freeze_clocks(monkeypatch, 9_000.0, 8_100.0)
+        assert tb.offset("/fsa/1") == 50.0
+
+    def test_stale_fsa_with_no_global_is_still_used(self, monkeypatch: pytest.MonkeyPatch):
+        """A stale offset beats no offset; the alternative is the raw local clock."""
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        _freeze_clocks(monkeypatch, 9_000.0, 8_100.0)
+        assert tb.offset("/fsa/1") == 50.0
+
+    def test_server_now_uses_the_same_resolution(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        _freeze_clocks(monkeypatch, 5_000.0, 4_100.0)
+        tb.observe(5_200)
+        assert tb.server_now("/fsa/1") == 5_200.0
+
+    def test_a_wall_clock_step_does_not_age_an_observation(self, monkeypatch: pytest.MonkeyPatch):
+        """Staleness is elapsed time, not wall-clock distance.
+
+        A device that syncs its RTC from this client steps the wall clock by
+        exactly the offset the client just reported. If that counted as age,
+        every observation would go stale the instant the fix it enabled was
+        applied -- and the timebase would abandon the scope that was working.
+        """
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        tb.observe(1_010)
+        # Wall clock jumps an hour; no real time has passed.
+        _freeze_clocks(monkeypatch, 4_600.0, 100.5)
+        assert tb.offset("/fsa/1") == 50.0
+
+
+class TestStaleThresholdFollowsThePollRate:
+    """A fixed hour retires healthy scopes on a slowly-polled server.
+
+    The Time poll inherits the DeviceCapability pollRate, which may legitimately
+    be up to ``MAX_POLL_RATE`` (7200s). A per-FSA observation is at its oldest
+    just before the next successful refresh, so a threshold shorter than the
+    poll interval drops §9.2.3 specificity on a deployment where nothing failed
+    -- while the connectivity heartbeat keeps the global scope looking fresh.
+    """
+
+    def test_the_default_is_the_floor(self):
+        assert ServerTimebase().fsa_stale_seconds == 3600.0
+
+    def test_a_slow_poll_rate_widens_the_threshold(self):
+        tb = ServerTimebase()
+        tb.note_time_poll_rate(7200)
+        assert tb.fsa_stale_seconds == 21600.0
+
+    def test_a_fast_poll_rate_keeps_the_floor(self):
+        """A 5-minute poll must not make the fallback hair-trigger."""
+        tb = ServerTimebase()
+        tb.note_time_poll_rate(300)
+        assert tb.fsa_stale_seconds == 3600.0
+
+    def test_an_explicit_setting_overrides_the_derivation(self):
+        tb = ServerTimebase(fsa_stale_seconds=120)
+        tb.note_time_poll_rate(7200)
+        assert tb.fsa_stale_seconds == 120
+
+    def test_no_rate_leaves_the_threshold_alone(self):
+        tb = ServerTimebase()
+        tb.note_time_poll_rate(None)
+        tb.note_time_poll_rate(0)
+        assert tb.fsa_stale_seconds == 3600.0
+
+    def test_a_healthy_slow_polled_fsa_is_not_abandoned(self, monkeypatch: pytest.MonkeyPatch):
+        """The reported case, end to end: dcap pollRate 7200, both scopes healthy.
+
+        Between two successful Time polls the FSA observation passes an hour
+        old while the connectivity heartbeat refreshes the global scope alone.
+        Under a fixed hour that returns the global offset for an FSA endpoint
+        that never failed.
+        """
+        tb = ServerTimebase(drift_warn_seconds=0)
+        tb.note_time_poll_rate(7200)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1")  # offset 50
+        # 4200s later the heartbeat refreshes only the global scope.
+        _freeze_clocks(monkeypatch, 5_200.0, 4_300.0)
+        tb.observe(5_400)  # offset 200
+        assert tb.offset("/fsa/1") == 50.0
+
+
+class TestStaleFallbackIsVisible:
+    """A silent fallback is the same failure one level up.
+
+    Classification stops reading the FSA's own Time resource and nothing says
+    so, which is exactly the condition -- a wrong offset indistinguishable from
+    a right one -- that the refresh fix exists to remove.
+    """
+
+    def _go_stale(self, monkeypatch: pytest.MonkeyPatch) -> ServerTimebase:
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1", href="/fsa/1/tm")
+        _freeze_clocks(monkeypatch, 5_000.0, 4_100.0)
+        tb.observe(5_200, href="/tm")
+        return tb
+
+    def test_the_first_fallback_is_reported(self, monkeypatch: pytest.MonkeyPatch):
+        tb = self._go_stale(monkeypatch)
+        with patch.object(diagnostics, "report") as rep:
+            assert tb.offset("/fsa/1") == 200.0
+        rep.assert_called_once()
+        kwargs = rep.call_args.kwargs
+        assert kwargs["dedup_key"] == "timebase:fsa-stale:/fsa/1"
+        assert kwargs["details"]["fsa_href"] == "/fsa/1"
+        assert kwargs["details"]["href"] == "/fsa/1/tm"
+        assert kwargs["details"]["threshold_seconds"] == 60
+
+    def test_it_is_reported_once_not_on_every_classification(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        tb = self._go_stale(monkeypatch)
+        with patch.object(diagnostics, "report") as rep:
+            for _ in range(5):
+                tb.offset("/fsa/1")
+            tb.server_now("/fsa/1")
+        rep.assert_called_once()
+
+    def test_a_refreshed_scope_can_report_again(self, monkeypatch: pytest.MonkeyPatch):
+        """Otherwise a scope that recovers and fails again does so silently."""
+        tb = self._go_stale(monkeypatch)
+        tb.offset("/fsa/1")
+        tb.observe(5_300, fsa_href="/fsa/1", href="/fsa/1/tm")  # endpoint recovers
+        _freeze_clocks(monkeypatch, 9_000.0, 8_100.0)
+        tb.observe(9_400, href="/tm")  # global refreshed; FSA stale again
+        with patch.object(diagnostics, "report") as rep:
+            tb.offset("/fsa/1")
+        rep.assert_called_once()
+
+    def test_a_fresh_scope_reports_nothing(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=3600)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_010)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        _freeze_clocks(monkeypatch, 1_100.0, 200.0)
+        with patch.object(diagnostics, "report") as rep:
+            tb.offset("/fsa/1")
+        rep.assert_not_called()
+
+
+class TestSnapshotReportsTheFallback:
+    """An operator reading a per-FSA offset must be able to tell whether
+    scheduling still uses it."""
+
+    def test_a_stale_scope_is_flagged(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        _freeze_clocks(monkeypatch, 5_000.0, 4_100.0)
+        tb.observe(5_200)
+        snap = tb.snapshot()
+        assert snap["per_fsa"]["/fsa/1"]["stale"] is True
+        assert snap["per_fsa"]["/fsa/1"]["age_seconds"] == 4_000.0
+        assert snap["fsa_stale_seconds"] == 60
+
+    def test_a_current_scope_is_not_flagged(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=3600)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_010)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        _freeze_clocks(monkeypatch, 1_100.0, 200.0)
+        assert tb.snapshot()["per_fsa"]["/fsa/1"]["stale"] is False
+
+    def test_the_global_entry_carries_no_flag(self, monkeypatch: pytest.MonkeyPatch):
+        """There is nothing for the global scope to yield to."""
+        tb = ServerTimebase(drift_warn_seconds=0)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_010)
+        assert "stale" not in tb.snapshot()["global"]
+
+    def test_snapshot_age_matches_the_staleness_measure(self, monkeypatch: pytest.MonkeyPatch):
+        """Both read the monotonic clock, so a wall-clock step moves neither."""
+        tb = ServerTimebase(drift_warn_seconds=0, fsa_stale_seconds=60)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        tb.observe(1_010)
+        _freeze_clocks(monkeypatch, 4_600.0, 100.5)  # RTC stepped an hour
+        snap = tb.snapshot()
+        assert snap["per_fsa"]["/fsa/1"]["age_seconds"] == 0.5
+        assert snap["per_fsa"]["/fsa/1"]["stale"] is False
+
+
+class TestForgetFsa:
+    """An FSA the server withdrew is not a scope this client keeps forever."""
+
+    def test_the_observation_is_dropped(self, monkeypatch: pytest.MonkeyPatch):
+        tb = ServerTimebase(drift_warn_seconds=0)
+        _freeze_clocks(monkeypatch, 1_000.0, 100.0)
+        tb.observe(1_010)
+        tb.observe(1_050, fsa_href="/fsa/1")
+        tb.forget_fsa("/fsa/1")
+        assert "/fsa/1" not in tb.snapshot()["per_fsa"]
+        assert tb.offset("/fsa/1") == 10.0  # falls through to global
+
+    def test_forgetting_an_unknown_scope_is_harmless(self):
+        ServerTimebase(drift_warn_seconds=0).forget_fsa("/fsa/nope")

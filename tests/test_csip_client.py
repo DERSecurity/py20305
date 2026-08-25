@@ -1562,6 +1562,289 @@ class TestServerTimebasePlumbing:
         assert client.timebase.offset() == pytest.approx(120, abs=2)
 
     @pytest.mark.asyncio
+    async def test_do_poll_time_refreshes_per_fsa_scopes(self):
+        """The FSA scope is what event classification reads, so it must be renewed.
+
+        Observed once at discovery and never again, it silently becomes the
+        local clock as the host drifts, while the global scope -- the one
+        ``/status`` reports -- stays correct. That combination is the whole
+        failure: the number an operator checks is the healthy one.
+        """
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time_hrefs = {"/fsa/1": "/fsa/1/tm"}
+
+        def _time_for(href, _model):
+            t = MagicMock()
+            # Distinct offsets so the assertion cannot pass by reading the
+            # wrong resource and getting a plausible number.
+            t.current_time.value = int(time.time()) + (120 if href == "/tm" else 300)
+            t.quality = 3
+            return t
+
+        client._http.get = AsyncMock(side_effect=_time_for)  # type: ignore[method-assign]
+
+        await client._do_poll_time()
+
+        assert client.timebase.offset() == pytest.approx(120, abs=2)
+        assert client.timebase.offset("/fsa/1") == pytest.approx(300, abs=2)
+
+    @pytest.mark.asyncio
+    async def test_do_poll_time_fetches_a_shared_href_once(self):
+        """DeviceCapability and every FSA commonly point at the same /tm.
+
+        Polling per scope would multiply this poll by the FSA count for no new
+        information, on the connection least able to spare it.
+        """
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time_hrefs = {"/fsa/1": "/tm", "/fsa/2": "/tm"}
+        t = MagicMock()
+        t.current_time.value = int(time.time()) + 45
+        t.quality = 3
+        get = AsyncMock(return_value=t)
+        client._http.get = get  # type: ignore[method-assign]
+
+        await client._do_poll_time()
+
+        assert get.await_count == 1
+        assert client.timebase.offset() == pytest.approx(45, abs=2)
+        assert client.timebase.offset("/fsa/1") == pytest.approx(45, abs=2)
+        assert client.timebase.offset("/fsa/2") == pytest.approx(45, abs=2)
+
+    @pytest.mark.asyncio
+    async def test_one_unreachable_time_resource_does_not_cost_the_others(self):
+        """An FSA endpoint that is down must not drop the global observation."""
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time_hrefs = {"/fsa/1": "/fsa/1/tm"}
+
+        def _time_for(href, _model):
+            if href != "/tm":
+                raise ConnectionError("FSA Time endpoint is down")
+            t = MagicMock()
+            t.current_time.value = int(time.time()) + 90
+            t.quality = 3
+            return t
+
+        client._http.get = AsyncMock(side_effect=_time_for)  # type: ignore[method-assign]
+
+        await client._do_poll_time()
+
+        assert client.timebase.offset() == pytest.approx(90, abs=2)
+
+    @pytest.mark.asyncio
+    async def test_a_total_time_failure_is_raised_not_swallowed(self):
+        """Isolating each href must not turn a total failure into a success.
+
+        The caller treats a clean return as proof of contact and clears the
+        failure streak on it. If every Time request fails and this still returns
+        normally, a server answering nothing keeps looking reachable and the
+        rediscovery that recovers from it never runs.
+        """
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time_hrefs = {"/fsa/1": "/fsa/1/tm"}
+        client._http.get = AsyncMock(  # type: ignore[method-assign]
+            side_effect=ConnectionError("server is unreachable")
+        )
+
+        with pytest.raises(ConnectionError):
+            await client._do_poll_time()
+
+    @pytest.mark.asyncio
+    async def test_a_partial_failure_is_still_a_successful_poll(self):
+        """The isolation this is paired with: one bad href is not a failed poll."""
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time_hrefs = {"/fsa/1": "/fsa/1/tm"}
+
+        def _time_for(href, _model):
+            if href != "/tm":
+                raise ConnectionError("FSA Time endpoint is down")
+            t = MagicMock()
+            t.current_time.value = int(time.time()) + 30
+            t.quality = 3
+            return t
+
+        client._http.get = AsyncMock(side_effect=_time_for)  # type: ignore[method-assign]
+
+        await client._do_poll_time()  # must not raise
+
+        assert client.timebase.offset() == pytest.approx(30, abs=2)
+
+    @pytest.mark.asyncio
+    async def test_no_time_resources_at_all_is_not_a_failure(self):
+        """Nothing to poll is not the same as everything failing."""
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = None
+        client._http.get = AsyncMock(side_effect=AssertionError("should not be called"))  # type: ignore[method-assign]
+
+        await client._do_poll_time()
+
+    @pytest.mark.asyncio
+    async def test_an_fsa_time_href_that_failed_at_discovery_is_retried(self):
+        """Discovery records the advertisement, not just what it managed to read.
+
+        An FSA Time endpoint that was 404 or unreachable during discovery leaves
+        no entry in ``fsa_time``. Driving the poll off that map would mean the
+        endpoint is never asked again until the next rediscovery -- the same
+        frozen-scope failure, reached a different way.
+        """
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = None
+        client._state.fsa_time_hrefs = {"/fsa/1": "/fsa/1/tm"}
+        assert client._state.fsa_time == {}  # discovery never got a reading
+
+        t = MagicMock()
+        t.current_time.value = int(time.time()) + 300
+        t.quality = 3
+        client._http.get = AsyncMock(return_value=t)  # type: ignore[method-assign]
+
+        await client._do_poll_time()
+
+        assert client.timebase.offset("/fsa/1") == pytest.approx(300, abs=2)
+        assert client._state.fsa_time["/fsa/1"][0] == "/fsa/1/tm"
+
+    @pytest.mark.asyncio
+    async def test_an_absent_fsa_time_resource_is_not_a_failed_poll(self):
+        """404 on an FSA's TimeLink is what discovery already calls benign absence.
+
+        Escalating it would trigger rediscovery on every Time poll for the life
+        of a deployment whose FSA advertises a link it does not serve.
+        """
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = None
+        client._state.fsa_time_hrefs = {"/fsa/1": "/fsa/1/tm"}
+        client._http.get = AsyncMock(  # type: ignore[method-assign]
+            side_effect=Sep2ProtocolError("Not found", 404)
+        )
+
+        await client._do_poll_time()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_a_global_404_is_raised_even_when_an_fsa_refreshed(self):
+        """Isolation must not swallow the error the recovery path exists for.
+
+        A global Time href that moves is precisely the silent stall this poll
+        was written to prevent, one level up: the refresh quietly stops, every
+        status surface keeps reporting the frozen global scope, and the
+        rediscovery that would repair it never runs.
+        """
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time_hrefs = {"/fsa/1": "/fsa/1/tm"}
+
+        def _time_for(href, _model):
+            if href == "/tm":
+                raise Sep2ProtocolError("Not found", 404)
+            t = MagicMock()
+            t.current_time.value = int(time.time()) + 300
+            t.quality = 3
+            return t
+
+        client._http.get = AsyncMock(side_effect=_time_for)  # type: ignore[method-assign]
+
+        with pytest.raises(Sep2ProtocolError) as exc_info:
+            await client._do_poll_time()
+        assert exc_info.value.status_code == 404
+        # The FSA still got its refresh; isolation is preserved, not abandoned.
+        assert client.timebase.offset("/fsa/1") == pytest.approx(300, abs=2)
+
+    @pytest.mark.asyncio
+    async def test_a_global_404_outranks_a_later_fsa_connection_error(self):
+        """Which error survives cannot depend on href iteration order.
+
+        Re-raising whichever failure came last hands ``_poll_with_404_recovery``
+        a ConnectionError, and the 404 branch that triggers rediscovery never
+        fires -- while reversing the two hrefs would have triggered it.
+        """
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time_hrefs = {"/fsa/1": "/fsa/1/tm"}
+
+        def _time_for(href, _model):
+            if href == "/tm":
+                raise Sep2ProtocolError("Not found", 404)
+            raise ConnectionError("FSA Time endpoint is down")
+
+        client._http.get = AsyncMock(side_effect=_time_for)  # type: ignore[method-assign]
+
+        with pytest.raises(Sep2ProtocolError) as exc_info:
+            await client._do_poll_time()
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_on_an_fsa_href_is_raised(self):
+        """A redirect means resources moved (§5.5.2.7); rediscovery is the answer.
+
+        Tolerating it on the FSA path would leave the client following a href
+        the server has stopped serving from.
+        """
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time_hrefs = {"/fsa/1": "/fsa/1/tm"}
+
+        def _time_for(href, _model):
+            if href != "/tm":
+                raise Sep2RedirectError("moved", location="/new/tm")
+            t = MagicMock()
+            t.current_time.value = int(time.time()) + 60
+            t.quality = 3
+            return t
+
+        client._http.get = AsyncMock(side_effect=_time_for)  # type: ignore[method-assign]
+
+        with pytest.raises(Sep2RedirectError):
+            await client._do_poll_time()
+
+    @pytest.mark.asyncio
+    async def test_an_fsa_server_error_still_leaves_the_global_refreshed(self):
+        """A 500 on one FSA is a local failure, not a reason to drop every scope."""
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.fsa_time_hrefs = {"/fsa/1": "/fsa/1/tm"}
+
+        def _time_for(href, _model):
+            if href != "/tm":
+                raise Sep2ProtocolError("Server error", 500)
+            t = MagicMock()
+            t.current_time.value = int(time.time()) + 75
+            t.quality = 3
+            return t
+
+        client._http.get = AsyncMock(side_effect=_time_for)  # type: ignore[method-assign]
+
+        await client._do_poll_time()  # must not raise
+
+        assert client.timebase.offset() == pytest.approx(75, abs=2)
+
+    @pytest.mark.asyncio
+    async def test_the_stale_threshold_follows_the_time_poll_rate(self):
+        """Scheduling the poll is where the cadence becomes known."""
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0)
+        client._state.time_href = "/tm"
+        client._state.poll_rates["time"] = 7200
+
+        client._start_polls()
+        try:
+            assert client.timebase.fsa_stale_seconds == 21600.0
+        finally:
+            await client._scheduler.cancel_all()
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_stale_threshold_survives_scheduling(self):
+        client = CsipClient("https://example.com", time_drift_warn_seconds=0, fsa_stale_seconds=120)
+        client._state.time_href = "/tm"
+        client._state.poll_rates["time"] = 7200
+
+        client._start_polls()
+        try:
+            assert client.timebase.fsa_stale_seconds == 120
+        finally:
+            await client._scheduler.cancel_all()
+
+    @pytest.mark.asyncio
     async def test_connectivity_probe_observes(self):
         client = CsipClient("https://example.com", time_drift_warn_seconds=0)
         client._state.time_href = "/tm"
