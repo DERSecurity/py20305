@@ -1217,6 +1217,81 @@ async def test_no_time_anywhere_schedules_no_time_poll():
 
 
 @pytest.mark.asyncio
+async def test_an_advertised_fsa_time_href_is_kept_when_the_fetch_fails():
+    """The advertisement is what schedules the poll, not the reading.
+
+    ``fsa_time`` records only resources actually read, so an FSA Time endpoint
+    that is 404 or down during discovery leaves nothing behind. Gating on it
+    means the poll is never scheduled, and the endpoint is never asked again
+    once it recovers -- the same never-renewed scope, reached a different way.
+    """
+    edev = _make_edev("/edev/1")
+    edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+
+    fsa = _make_fsa("/fsa/1", derp_list_href="/fsa/1/derp", time_href="/fsa/1/tm")
+    derp = _make_derp("/derp/1")
+
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(time_href=None),  # no global TimeLink either
+            "/edev": _make_edev_list(edev),
+            "/edev/1/fsa": _make_fsa_list(fsa),
+            "/fsa/1/derp": _make_derp_list(derp),
+            "/fsa/1/tm": Sep2ProtocolError("Not found", 404),
+        }
+    )
+
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.fsa_time == {}, "nothing was read, so nothing should be cached"
+    assert state.fsa_time_hrefs == {"/fsa/1": "/fsa/1/tm"}
+    assert "time" in state.poll_rates, (
+        "the poll that would retry this endpoint has to be scheduled, or a "
+        "transient failure at discovery is permanent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_removed_fsa_stops_being_polled_for_time():
+    """A withdrawn FSA's Time resource is fetched forever otherwise.
+
+    Its 404 is benign to the Time poll -- the surviving scopes still refresh --
+    so nothing escalates it and nothing else removes the entry.
+    """
+    edev = _make_edev("/edev/1")
+    edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+
+    fsa1 = _make_fsa("/fsa/1", derp_list_href="/fsa/1/derp", time_href="/fsa/1/tm")
+    fsa2 = _make_fsa("/fsa/2", derp_list_href="/fsa/2/derp", time_href="/fsa/2/tm")
+
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev),
+            "/edev/1/fsa": _make_fsa_list(fsa1, fsa2),
+            "/fsa/1/derp": _make_derp_list(_make_derp("/derp/1")),
+            "/fsa/2/derp": _make_derp_list(_make_derp("/derp/2")),
+            "/fsa/1/tm": _make_time(),
+            "/fsa/2/tm": _make_time(),
+        }
+    )
+
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+    assert set(state.fsa_time_hrefs) == {"/fsa/1", "/fsa/2"}
+    assert "/fsa/2" in client.timebase.snapshot()["per_fsa"]
+
+    client._responses["/edev/1/fsa"] = _make_fsa_list(fsa1)
+    await refresh_function_set_assignments(client, state)  # type: ignore[arg-type]
+
+    assert set(state.fsa_time_hrefs) == {"/fsa/1"}
+    assert set(state.fsa_time) == {"/fsa/1"}
+    assert "/fsa/2" not in client.timebase.snapshot()["per_fsa"]
+
+
+@pytest.mark.asyncio
 async def test_per_fsa_time_discovered():
     """Gap 9: FSA-specific Time resource is fetched during discovery."""
     edev = _make_edev("/edev/1")

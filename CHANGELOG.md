@@ -44,13 +44,34 @@ below says so explicitly.
   advertises a `TimeLink`. It was gated on the DeviceCapability link alone, so a
   server publishing per-FSA Time resources and no global one never polled Time
   at all, and its FSA observations stayed frozen at discovery.
-- A per-FSA observation older than `fsa_stale_seconds` (default one hour) now
-  yields to a newer global one. §9.2.3 specificity is worth having only while
+- The Time poll now drives off the FSA Time hrefs the server *advertises*,
+  rather than the resources previously read from them. An FSA Time endpoint
+  that was down or 404 during discovery left no record, so nothing scheduled
+  the poll that would have retried it and nothing asked again until the next
+  rediscovery. An FSA the server withdraws is now dropped from the poll and the
+  timebase instead of being fetched forever.
+- An error the poll-recovery path exists to act on -- a redirect, or any
+  protocol error on the global Time href -- is raised even when other Time
+  scopes refreshed successfully, and is selected up front rather than being
+  whichever failure came last, so it no longer depends on href iteration order.
+  Isolating those was the same silent stall one level up: the global href
+  moves, the refresh quietly stops, and the rediscovery that repairs it never
+  runs. A 404 or 204 on an *FSA's* Time href stays benign absence, the reading
+  discovery already gives it.
+- A per-FSA observation older than `fsa_stale_seconds` now yields to a newer
+  global one. §9.2.3 specificity is worth having only while
   the FSA's Time resource is being kept current; past that it is the more
   precise way to be wrong, and it fails silently because a frozen offset is
   indistinguishable from a fresh one where it is used. Staleness is measured on
   the monotonic clock, so stepping the wall clock -- exactly what a device
-  syncing its RTC from this client does -- does not age an observation.
+  syncing its RTC from this client does -- does not age an observation. The
+  threshold follows the cadence Time is actually polled at (three poll
+  intervals, and never less than an hour) rather than a fixed hour, because a
+  server advertising a slow `pollRate` would otherwise retire a healthy FSA
+  scope between two successful refreshes; `server.fsa_stale_seconds` overrides
+  it. The fallback is no longer silent: `/status` marks the bypassed `per_fsa`
+  entry `"stale": true` and reports the threshold, and the client raises a
+  warning naming the FSA the first time each scope is bypassed.
 
 ## [0.4.0] — 2026-08-21
 

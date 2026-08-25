@@ -623,6 +623,13 @@ async def discover(
 
                         # Gap 9: fetch per-FSA Time resource if available
                         fsa_time_href = _extract_href(fsa.time_link)
+                        if fsa_time_href and fsa.href:
+                            # Recorded from the advertisement, before the fetch
+                            # that may fail. The Time poll drives off this map,
+                            # so an endpoint that is down right now is retried on
+                            # the next poll instead of being forgotten until the
+                            # next rediscovery.
+                            state.fsa_time_hrefs[fsa.href] = fsa_time_href
                         if fsa_time_href and fsa.href and fsa.href not in state.fsa_time:
                             try:
                                 fsa_time = await client.get(fsa_time_href, Time)
@@ -694,8 +701,11 @@ async def discover(
     # Either scope is reason enough to schedule it: a server may publish no
     # DeviceCapability TimeLink while its FSAs each publish one, and gating on the
     # global href alone left that deployment with a per-FSA observation frozen at
-    # discovery -- the offset event classification actually reads.
-    if (state.time_href or state.fsa_time) and "time" not in state.poll_rates:
+    # discovery -- the offset event classification actually reads. The advertised
+    # hrefs are what gate it, not the resources successfully read: an FSA Time
+    # endpoint that was down during discovery still needs the poll that retries
+    # it, and gating on the read would have scheduled nothing at all.
+    if (state.time_href or state.fsa_time_hrefs) and "time" not in state.poll_rates:
         dcap_rate = state.poll_rates.get("dcap")
         state.poll_rates["time"] = normalize_poll_rate(
             None, resource_key="time", default=dcap_rate or DEFAULT_POLL_RATE
@@ -988,6 +998,13 @@ async def refresh_function_set_assignments(
             )
             for removed_fsa_href in removed_fsas:
                 removed_program_hrefs.extend(state.programs_from_fsa(removed_fsa_href))
+                # Stop polling the departed FSA's Time resource. Left in place
+                # these entries are fetched forever: a 404 on a removed FSA is
+                # benign to the Time poll (its siblings still refresh), so
+                # nothing ever escalates and nothing ever removes them.
+                state.fsa_time.pop(removed_fsa_href, None)
+                state.fsa_time_hrefs.pop(removed_fsa_href, None)
+                client.timebase.forget_fsa(removed_fsa_href)
 
         # Update snapshot for next poll
         state.previous_fsa_hrefs[edev_href] = current_fsa_hrefs
