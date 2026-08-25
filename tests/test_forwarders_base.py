@@ -169,6 +169,11 @@ class TestAbstractForwarder:
         forwarder = ConcreteForwarder("test")
         assert forwarder.get_statistics()["events_queued"] == 0
 
+    def test_telemetry_queued_starts_at_an_explicit_zero(self) -> None:
+        """The same for telemetry: a kind counter is seeded, not conjured."""
+        forwarder = ConcreteForwarder("test")
+        assert forwarder.get_statistics()["telemetry_queued"] == 0
+
     def test_record_queued_increments_counter(self) -> None:
         forwarder = ConcreteForwarder()
         frame = MessageFrame(

@@ -7,6 +7,26 @@ below says so explicitly.
 
 ## [Unreleased]
 
+- Telemetry can no longer evict captured protocol traffic from the MQTT
+  forwarder under broker backpressure. One queue carried all three payload
+  kinds and dropped the oldest item when full regardless of kind, so a
+  measurement arriving on a timer could displace a captured exchange or an OCSF
+  event -- records nothing will send again -- and the item it displaced could
+  belong to an unrelated device. The forwarder now holds two buffers with the
+  policies the kinds actually want: captured messages and events keep the
+  bounded FIFO and its drop-oldest eviction, unchanged, while telemetry is held
+  newest-per-device and never touches the capture buffer. A second frame for a
+  device supersedes the first rather than queueing behind it, which is correct
+  for a measurement and wrong for a capture. The publish loop drains capture
+  first, in bounded runs, so sustained protocol traffic delays measurements
+  rather than starving them. `MQTTForwarder` takes a `telemetry_device_limit`
+  (default 1000) bounding that buffer by device count, and statistics gain
+  `capture_queue_size`, `telemetry_pending`, `telemetry_superseded` and
+  `telemetry_dropped` -- the counters seeded at zero, like `events_queued`, so
+  the schema does not depend on what has happened to arrive. `telemetry_queued`
+  joins them on `AbstractForwarder` for the same reason. `queue_size` still
+  reports everything buffered and `messages_dropped` still counts only lost
+  capture, so both mean what they did.
 - **Fixed: events drifted with the local clock while the reported offset stayed
   correct.** Event classification and timer firing read the FSA-scoped offset
   (IEEE 2030.5 §9.2.3), but only the global offset was refreshed. The per-FSA
