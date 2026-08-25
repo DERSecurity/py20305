@@ -5,7 +5,7 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
-## [Unreleased]
+## [0.5.0] — 2026-08-25
 
 - Telemetry can no longer evict captured protocol traffic from the MQTT
   forwarder under broker backpressure. One queue carried all three payload
