@@ -28,6 +28,12 @@ server:
   # clock. The local clock is never modified either way.
   # use_server_time: true
 
+  # How old an FSA's own Time observation may get before scheduling for its
+  # programs falls back to the global timebase. Unset derives it from the Time
+  # poll cadence (three polls, at least an hour), which is what a healthy
+  # deployment wants; set it only to override that.
+  # fsa_stale_seconds: 3600
+
 tls:
   # The LFDI derived from this certificate is what the utility registers.
   # `--check` prints it.
