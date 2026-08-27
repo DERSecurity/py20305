@@ -3,7 +3,8 @@
 A recorded run of the CSIP client test suite against py20305, kept here as
 interop evidence: what the client was asked to do, and how it answered.
 
-`2026-08-26_17-25-36-220_client_test.xlsx` — 45 tests, all passing.
+[`2026-08-26_17-25-36-220_client_test.xlsx`](2026-08-26_17-25-36-220_client_test.xlsx)
+— 45 tests, all passing.
 
 - **Summary** — one row per test with its result.
 - **CORE Tests** — polling, time, end device, function set assignments, DER
@@ -23,7 +24,7 @@ A passing run here says the client behaved correctly against this suite on
 this date. It is SunSpec CSIP conformant, but it does not make a
 product built on py20305 certified. Certification is a property of the
 assembled product, tested as a whole. See
-[Certification](../../README.md#certification) for the process.
+[Certification](../index.md#certification) for the process.
 
 ## Reading the certificate columns
 
