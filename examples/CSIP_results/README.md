@@ -20,7 +20,7 @@ rather than reconstructed.
 ## This is not a certification
 
 A passing run here says the client behaved correctly against this suite on
-this date. It is not a SunSpec CSIP certification, and it does not make a
+this date. It is SunSpec CSIP conformant, but it does not make a
 product built on py20305 certified. Certification is a property of the
 assembled product, tested as a whole. See
 [Certification](../../README.md#certification) for the process.
