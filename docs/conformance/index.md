@@ -18,6 +18,18 @@ The detail sheets carry the request and response bodies each test exchanged,
 so a disagreement about what the client sent can be settled from the file
 rather than reconstructed.
 
+## The raw exchanges
+
+`2026-08-26_17-25-36-220_client_test/` holds the same run as one JSON file per
+test, which is the form to reach for when the question is mechanical rather
+than pass or fail. Each file is `{cid, tests, messages}`, and every message
+carries its type (`req` or `resp`), timestamp, headers and body, in the order
+they went over the wire.
+
+The exchanges name no host beyond `localhost`, and no device beyond the LFDI
+and SFDI derived from the test certificates. No manufacturer, model, serial
+number or software version of any real hardware appears in them.
+
 ## This is not a certification
 
 The client passed every test in this suite on this date. That is not a

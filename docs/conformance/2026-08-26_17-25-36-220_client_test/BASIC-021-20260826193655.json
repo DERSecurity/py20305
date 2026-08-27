@@ -1,0 +1,3658 @@
+{
+  "cid": 1,
+  "tests": [
+    "BASIC-021"
+  ],
+  "messages": [
+    {
+      "type": "req",
+      "time": 1787797902,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "632"
+      },
+      "method": "PUT",
+      "uri": "/der/1/ders",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERStatus xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><alarmStatus>00000001</alarmStatus><connectStatus><dateTime>1787797902</dateTime><value>01</value></connectStatus><inverterStatus><dateTime>1787797902</dateTime><value>3</value></inverterStatus><manufacturerStatus><dateTime>1787797902</dateTime><value>1000</value></manufacturerStatus><operationalModeStatus><dateTime>1787797902</dateTime><value>1</value></operationalModeStatus><readingTime>1787797902</readingTime><stateOfChargeStatus><dateTime>1787797902</dateTime><value>0</value></stateOfChargeStatus></DERStatus>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:31:42 GMT"
+      },
+      "type": "resp",
+      "time": 1787797902,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787797902,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "2741"
+      },
+      "method": "POST",
+      "uri": "/mup/1",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MirrorMeterReadingList xmlns=\"urn:ieee:std:2030.5:ns\" all=\"7\" results=\"7\" schemaVer=\"2.2\"><MirrorMeterReading><mRID>37081755590018A23EAFC6230000D17E</mRID><description>Real Power</description><lastUpdateTime>1787797901</lastUpdateTime><nextUpdateTime>1787797961</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0020</qualityFlags><timePeriod><duration>60</duration><start>1787797901</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590028A23EAFC6230000D17E</mRID><description>Reactive Power</description><lastUpdateTime>1787797901</lastUpdateTime><nextUpdateTime>1787797961</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787797901</start></timePeriod><value>0</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590038A23EAFC6230000D17E</mRID><description>Frequency</description><lastUpdateTime>1787797901</lastUpdateTime><nextUpdateTime>1787797961</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0010</qualityFlags><timePeriod><duration>0</duration><start>1787797901</start></timePeriod><value>60000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590048A23EAFC6230000D17E</mRID><description>Voltage</description><lastUpdateTime>1787797901</lastUpdateTime><nextUpdateTime>1787797961</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>60</duration><start>1787797901</start></timePeriod><value>2400</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590058A23EAFC6230000D17E</mRID><description>Power Factor</description><lastUpdateTime>1787797901</lastUpdateTime><nextUpdateTime>1787797961</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787797901</start></timePeriod><value>980</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590068A23EAFC6230000D17E</mRID><description>Apparent Power</description><lastUpdateTime>1787797901</lastUpdateTime><nextUpdateTime>1787797961</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787797901</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590078A23EAFC6230000D17E</mRID><description>Current</description><lastUpdateTime>1787797901</lastUpdateTime><nextUpdateTime>1787797961</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787797901</start></timePeriod><value>119</value></Reading></MirrorMeterReading></MirrorMeterReadingList>"
+    },
+    {
+      "code": 201,
+      "reason": "Created",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:31:42 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "0",
+        "Location": "/upt/1/mr"
+      },
+      "type": "resp",
+      "time": 1787797902,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787797902,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "407"
+      },
+      "method": "PUT",
+      "uri": "/der/1/dera",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERAvailability xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><availabilityDuration>86400</availabilityDuration><readingTime>1787797902</readingTime><reservePercent>8000</reservePercent><statVarAvail><multiplier>0</multiplier><value>5000</value></statVarAvail><statWAvail><multiplier>0</multiplier><value>10000</value></statWAvail></DERAvailability>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:31:42 GMT"
+      },
+      "type": "resp",
+      "time": 1787797902,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787797917,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:31:57 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "721"
+      },
+      "type": "resp",
+      "time": 1787797917,
+      "vers": "HTTP/1.1",
+      "body": "<FunctionSetAssignmentsList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><FunctionSetAssignments href=\"/fsa/1\"><DERProgramListLink href=\"/edev/1/fsa/1/derp\" all=\"1\" /><TariffProfileListLink href=\"/tp\" all=\"0\" /><TimeLink href=\"/tm\" /><mRID>FFFFFFFFFFFFFFFFFFFF0000</mRID><description>Non-Topology</description></FunctionSetAssignments><FunctionSetAssignments href=\"/fsa/2\" subscribable=\"1\"><DERProgramListLink href=\"/edev/1/fsa/2/derp\" all=\"2\" /><TimeLink href=\"/tm\" /><mRID>F411B327040E87325E680002</mRID><description>Topology</description></FunctionSetAssignments></FunctionSetAssignmentsList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "439"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp\" subscribable=\"1\" all=\"1\" results=\"1\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/1/derp/1\" subscribable=\"1\"><mRID>00005B4EB2130000006F00001183</mRID><description>DERP 1</description><DERControlListLink href=\"/edev/1/fsa/1/derp/1/derc\" all=\"0\" /><primacy>25</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "1047"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/2/derp/1\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0001</mRID><description>A1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/1/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/1/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/1/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" /><primacy>7</primacy></DERProgram><DERProgram href=\"/edev/1/fsa/2/derp/2\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0002</mRID><description>A1-B1-C1-D1-E1-F1-G1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/2/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/2/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/2/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" /><primacy>1</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dderc\" subscribable=\"1\"><mRID>07A8A089A22DCBED1A2D66E2</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>950</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "904"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/1/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>44E6771D962B977E718B0001</mRID><description>DER Control</description><version>1</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>0</currentStatus><dateTime>1787797893</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>120</duration><start>1787798013</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>900</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dderc\" subscribable=\"1\"><mRID>906066F482D59BD639531041</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>920</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "903"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/2/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>0673CDB09D6C0091E5A20001</mRID><description>DER Control</description><version>1</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>0</currentStatus><dateTime>1787797893</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>60</duration><start>1787798073</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>910</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "189"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp/1/derc\" subscribable=\"1\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dderc\" subscribable=\"1\"><mRID>07A8A089A22DCBED1A2D66E2</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>950</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "904"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/1/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>44E6771D962B977E718B0001</mRID><description>DER Control</description><version>1</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>0</currentStatus><dateTime>1787797893</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>120</duration><start>1787798013</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>900</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dderc\" subscribable=\"1\"><mRID>906066F482D59BD639531041</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>920</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "903"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/2/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>0673CDB09D6C0091E5A20001</mRID><description>DER Control</description><version>1</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>0</currentStatus><dateTime>1787797893</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>60</duration><start>1787798073</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>910</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "345"
+      },
+      "method": "POST",
+      "uri": "/rsps/0/rsp",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERControlResponse xmlns=\"urn:ieee:std:2030.5:ns\" schemaVer=\"2.2\"><createdDateTime>1787797921</createdDateTime><endDeviceLFDI>8A23EAFC6235ABD1BB7DD21FDDF3EF15B4B01179</endDeviceLFDI><status>1</status><subject>44E6771D962B977E718B0001</subject><modesResponded>0000002C</modesResponded></DERControlResponse>"
+    },
+    {
+      "code": 201,
+      "reason": "Created",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:01 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "0",
+        "Location": "/rsps/0/rsp/1"
+      },
+      "type": "resp",
+      "time": 1787797921,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787797921,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "345"
+      },
+      "method": "POST",
+      "uri": "/rsps/0/rsp",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERControlResponse xmlns=\"urn:ieee:std:2030.5:ns\" schemaVer=\"2.2\"><createdDateTime>1787797921</createdDateTime><endDeviceLFDI>8A23EAFC6235ABD1BB7DD21FDDF3EF15B4B01179</endDeviceLFDI><status>1</status><subject>0673CDB09D6C0091E5A20001</subject><modesResponded>0000002C</modesResponded></DERControlResponse>"
+    },
+    {
+      "code": 201,
+      "reason": "Created",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:02 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "0",
+        "Location": "/rsps/0/rsp/2"
+      },
+      "type": "resp",
+      "time": 1787797922,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787797922,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "345"
+      },
+      "method": "POST",
+      "uri": "/rsps/0/rsp",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERControlResponse xmlns=\"urn:ieee:std:2030.5:ns\" schemaVer=\"2.2\"><createdDateTime>1787797921</createdDateTime><endDeviceLFDI>8A23EAFC6235ABD1BB7DD21FDDF3EF15B4B01179</endDeviceLFDI><status>7</status><subject>44E6771D962B977E718B0001</subject><modesResponded>0000002C</modesResponded></DERControlResponse>"
+    },
+    {
+      "code": 201,
+      "reason": "Created",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:02 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "0",
+        "Location": "/rsps/0/rsp/3"
+      },
+      "type": "resp",
+      "time": 1787797922,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787797947,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:27 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "721"
+      },
+      "type": "resp",
+      "time": 1787797947,
+      "vers": "HTTP/1.1",
+      "body": "<FunctionSetAssignmentsList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><FunctionSetAssignments href=\"/fsa/1\"><DERProgramListLink href=\"/edev/1/fsa/1/derp\" all=\"1\" /><TariffProfileListLink href=\"/tp\" all=\"0\" /><TimeLink href=\"/tm\" /><mRID>FFFFFFFFFFFFFFFFFFFF0000</mRID><description>Non-Topology</description></FunctionSetAssignments><FunctionSetAssignments href=\"/fsa/2\" subscribable=\"1\"><DERProgramListLink href=\"/edev/1/fsa/2/derp\" all=\"2\" /><TimeLink href=\"/tm\" /><mRID>F411B327040E87325E680002</mRID><description>Topology</description></FunctionSetAssignments></FunctionSetAssignmentsList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797952,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:32 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "439"
+      },
+      "type": "resp",
+      "time": 1787797952,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp\" subscribable=\"1\" all=\"1\" results=\"1\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/1/derp/1\" subscribable=\"1\"><mRID>00005B4EB2130000006F00001183</mRID><description>DERP 1</description><DERControlListLink href=\"/edev/1/fsa/1/derp/1/derc\" all=\"0\" /><primacy>25</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797952,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:32 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "1047"
+      },
+      "type": "resp",
+      "time": 1787797952,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/2/derp/1\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0001</mRID><description>A1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/1/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/1/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/1/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" /><primacy>7</primacy></DERProgram><DERProgram href=\"/edev/1/fsa/2/derp/2\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0002</mRID><description>A1-B1-C1-D1-E1-F1-G1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/2/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/2/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/2/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" /><primacy>1</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797952,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:32 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "189"
+      },
+      "type": "resp",
+      "time": 1787797952,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp/1/derc\" subscribable=\"1\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787797952,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:32 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787797952,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dderc\" subscribable=\"1\"><mRID>07A8A089A22DCBED1A2D66E2</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>950</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787797952,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:32 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787797952,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787797952,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:32 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "904"
+      },
+      "type": "resp",
+      "time": 1787797952,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/1/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>44E6771D962B977E718B0001</mRID><description>DER Control</description><version>1</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>0</currentStatus><dateTime>1787797893</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>120</duration><start>1787798013</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>900</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797952,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:32 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787797952,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dderc\" subscribable=\"1\"><mRID>906066F482D59BD639531041</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>920</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787797952,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:32 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787797952,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787797952,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:32 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "903"
+      },
+      "type": "resp",
+      "time": 1787797952,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/2/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>0673CDB09D6C0091E5A20001</mRID><description>DER Control</description><version>1</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>0</currentStatus><dateTime>1787797893</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>60</duration><start>1787798073</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>910</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797962,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "632"
+      },
+      "method": "PUT",
+      "uri": "/der/1/ders",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERStatus xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><alarmStatus>00000001</alarmStatus><connectStatus><dateTime>1787797962</dateTime><value>01</value></connectStatus><inverterStatus><dateTime>1787797962</dateTime><value>3</value></inverterStatus><manufacturerStatus><dateTime>1787797962</dateTime><value>1000</value></manufacturerStatus><operationalModeStatus><dateTime>1787797962</dateTime><value>1</value></operationalModeStatus><readingTime>1787797962</readingTime><stateOfChargeStatus><dateTime>1787797962</dateTime><value>0</value></stateOfChargeStatus></DERStatus>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:42 GMT"
+      },
+      "type": "resp",
+      "time": 1787797962,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787797962,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "2741"
+      },
+      "method": "POST",
+      "uri": "/mup/1",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MirrorMeterReadingList xmlns=\"urn:ieee:std:2030.5:ns\" all=\"7\" results=\"7\" schemaVer=\"2.2\"><MirrorMeterReading><mRID>37081755590018A23EAFC6230000D17E</mRID><description>Real Power</description><lastUpdateTime>1787797962</lastUpdateTime><nextUpdateTime>1787798022</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0020</qualityFlags><timePeriod><duration>60</duration><start>1787797962</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590028A23EAFC6230000D17E</mRID><description>Reactive Power</description><lastUpdateTime>1787797962</lastUpdateTime><nextUpdateTime>1787798022</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787797962</start></timePeriod><value>0</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590038A23EAFC6230000D17E</mRID><description>Frequency</description><lastUpdateTime>1787797962</lastUpdateTime><nextUpdateTime>1787798022</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0010</qualityFlags><timePeriod><duration>0</duration><start>1787797962</start></timePeriod><value>60000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590048A23EAFC6230000D17E</mRID><description>Voltage</description><lastUpdateTime>1787797962</lastUpdateTime><nextUpdateTime>1787798022</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>60</duration><start>1787797962</start></timePeriod><value>2400</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590058A23EAFC6230000D17E</mRID><description>Power Factor</description><lastUpdateTime>1787797962</lastUpdateTime><nextUpdateTime>1787798022</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787797962</start></timePeriod><value>980</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590068A23EAFC6230000D17E</mRID><description>Apparent Power</description><lastUpdateTime>1787797962</lastUpdateTime><nextUpdateTime>1787798022</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787797962</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590078A23EAFC6230000D17E</mRID><description>Current</description><lastUpdateTime>1787797962</lastUpdateTime><nextUpdateTime>1787798022</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787797962</start></timePeriod><value>119</value></Reading></MirrorMeterReading></MirrorMeterReadingList>"
+    },
+    {
+      "code": 201,
+      "reason": "Created",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:42 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "0",
+        "Location": "/upt/1/mr"
+      },
+      "type": "resp",
+      "time": 1787797962,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787797962,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "407"
+      },
+      "method": "PUT",
+      "uri": "/der/1/dera",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERAvailability xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><availabilityDuration>86400</availabilityDuration><readingTime>1787797962</readingTime><reservePercent>8000</reservePercent><statVarAvail><multiplier>0</multiplier><value>5000</value></statVarAvail><statWAvail><multiplier>0</multiplier><value>10000</value></statWAvail></DERAvailability>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:43 GMT"
+      },
+      "type": "resp",
+      "time": 1787797963,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787797977,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:32:57 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "721"
+      },
+      "type": "resp",
+      "time": 1787797977,
+      "vers": "HTTP/1.1",
+      "body": "<FunctionSetAssignmentsList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><FunctionSetAssignments href=\"/fsa/1\"><DERProgramListLink href=\"/edev/1/fsa/1/derp\" all=\"1\" /><TariffProfileListLink href=\"/tp\" all=\"0\" /><TimeLink href=\"/tm\" /><mRID>FFFFFFFFFFFFFFFFFFFF0000</mRID><description>Non-Topology</description></FunctionSetAssignments><FunctionSetAssignments href=\"/fsa/2\" subscribable=\"1\"><DERProgramListLink href=\"/edev/1/fsa/2/derp\" all=\"2\" /><TimeLink href=\"/tm\" /><mRID>F411B327040E87325E680002</mRID><description>Topology</description></FunctionSetAssignments></FunctionSetAssignmentsList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797982,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:02 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "439"
+      },
+      "type": "resp",
+      "time": 1787797982,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp\" subscribable=\"1\" all=\"1\" results=\"1\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/1/derp/1\" subscribable=\"1\"><mRID>00005B4EB2130000006F00001183</mRID><description>DERP 1</description><DERControlListLink href=\"/edev/1/fsa/1/derp/1/derc\" all=\"0\" /><primacy>25</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797982,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:02 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "1047"
+      },
+      "type": "resp",
+      "time": 1787797982,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/2/derp/1\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0001</mRID><description>A1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/1/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/1/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/1/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" /><primacy>7</primacy></DERProgram><DERProgram href=\"/edev/1/fsa/2/derp/2\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0002</mRID><description>A1-B1-C1-D1-E1-F1-G1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/2/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/2/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/2/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" /><primacy>1</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797982,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:02 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "189"
+      },
+      "type": "resp",
+      "time": 1787797982,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp/1/derc\" subscribable=\"1\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787797982,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:02 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787797982,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dderc\" subscribable=\"1\"><mRID>07A8A089A22DCBED1A2D66E2</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>950</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787797982,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:02 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787797982,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787797982,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:02 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "904"
+      },
+      "type": "resp",
+      "time": 1787797982,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/1/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>44E6771D962B977E718B0001</mRID><description>DER Control</description><version>1</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>0</currentStatus><dateTime>1787797893</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>120</duration><start>1787798013</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>900</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787797982,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:02 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787797982,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dderc\" subscribable=\"1\"><mRID>906066F482D59BD639531041</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>920</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787797983,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:03 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787797983,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787797983,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:03 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "903"
+      },
+      "type": "resp",
+      "time": 1787797983,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/2/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>0673CDB09D6C0091E5A20001</mRID><description>DER Control</description><version>1</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>0</currentStatus><dateTime>1787797893</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>60</duration><start>1787798073</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>910</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798007,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:27 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "721"
+      },
+      "type": "resp",
+      "time": 1787798007,
+      "vers": "HTTP/1.1",
+      "body": "<FunctionSetAssignmentsList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><FunctionSetAssignments href=\"/fsa/1\"><DERProgramListLink href=\"/edev/1/fsa/1/derp\" all=\"1\" /><TariffProfileListLink href=\"/tp\" all=\"0\" /><TimeLink href=\"/tm\" /><mRID>FFFFFFFFFFFFFFFFFFFF0000</mRID><description>Non-Topology</description></FunctionSetAssignments><FunctionSetAssignments href=\"/fsa/2\" subscribable=\"1\"><DERProgramListLink href=\"/edev/1/fsa/2/derp\" all=\"2\" /><TimeLink href=\"/tm\" /><mRID>F411B327040E87325E680002</mRID><description>Topology</description></FunctionSetAssignments></FunctionSetAssignmentsList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798013,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:33 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "439"
+      },
+      "type": "resp",
+      "time": 1787798013,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp\" subscribable=\"1\" all=\"1\" results=\"1\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/1/derp/1\" subscribable=\"1\"><mRID>00005B4EB2130000006F00001183</mRID><description>DERP 1</description><DERControlListLink href=\"/edev/1/fsa/1/derp/1/derc\" all=\"0\" /><primacy>25</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798013,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:33 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "1047"
+      },
+      "type": "resp",
+      "time": 1787798013,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/2/derp/1\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0001</mRID><description>A1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/1/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/1/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/1/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" /><primacy>7</primacy></DERProgram><DERProgram href=\"/edev/1/fsa/2/derp/2\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0002</mRID><description>A1-B1-C1-D1-E1-F1-G1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/2/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/2/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/2/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" /><primacy>1</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798013,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:33 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "189"
+      },
+      "type": "resp",
+      "time": 1787798013,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp/1/derc\" subscribable=\"1\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798013,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:33 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798013,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dderc\" subscribable=\"1\"><mRID>07A8A089A22DCBED1A2D66E2</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>950</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798013,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:33 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798013,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798013,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:33 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "904"
+      },
+      "type": "resp",
+      "time": 1787798013,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/1/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>44E6771D962B977E718B0001</mRID><description>DER Control</description><version>2</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>1</currentStatus><dateTime>1787798013</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>120</duration><start>1787798013</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>900</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798013,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:33 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798013,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dderc\" subscribable=\"1\"><mRID>906066F482D59BD639531041</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>920</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798013,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:33 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798013,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798013,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:33 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "903"
+      },
+      "type": "resp",
+      "time": 1787798013,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/2/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>0673CDB09D6C0091E5A20001</mRID><description>DER Control</description><version>1</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>0</currentStatus><dateTime>1787797893</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>60</duration><start>1787798073</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>910</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798022,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "632"
+      },
+      "method": "PUT",
+      "uri": "/der/1/ders",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERStatus xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><alarmStatus>00000001</alarmStatus><connectStatus><dateTime>1787798022</dateTime><value>01</value></connectStatus><inverterStatus><dateTime>1787798022</dateTime><value>3</value></inverterStatus><manufacturerStatus><dateTime>1787798022</dateTime><value>1000</value></manufacturerStatus><operationalModeStatus><dateTime>1787798022</dateTime><value>1</value></operationalModeStatus><readingTime>1787798022</readingTime><stateOfChargeStatus><dateTime>1787798022</dateTime><value>0</value></stateOfChargeStatus></DERStatus>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:42 GMT"
+      },
+      "type": "resp",
+      "time": 1787798022,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798023,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "2741"
+      },
+      "method": "POST",
+      "uri": "/mup/1",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MirrorMeterReadingList xmlns=\"urn:ieee:std:2030.5:ns\" all=\"7\" results=\"7\" schemaVer=\"2.2\"><MirrorMeterReading><mRID>37081755590018A23EAFC6230000D17E</mRID><description>Real Power</description><lastUpdateTime>1787798022</lastUpdateTime><nextUpdateTime>1787798082</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0020</qualityFlags><timePeriod><duration>60</duration><start>1787798022</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590028A23EAFC6230000D17E</mRID><description>Reactive Power</description><lastUpdateTime>1787798022</lastUpdateTime><nextUpdateTime>1787798082</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798022</start></timePeriod><value>0</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590038A23EAFC6230000D17E</mRID><description>Frequency</description><lastUpdateTime>1787798022</lastUpdateTime><nextUpdateTime>1787798082</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0010</qualityFlags><timePeriod><duration>0</duration><start>1787798022</start></timePeriod><value>60000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590048A23EAFC6230000D17E</mRID><description>Voltage</description><lastUpdateTime>1787798022</lastUpdateTime><nextUpdateTime>1787798082</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>60</duration><start>1787798022</start></timePeriod><value>2400</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590058A23EAFC6230000D17E</mRID><description>Power Factor</description><lastUpdateTime>1787798022</lastUpdateTime><nextUpdateTime>1787798082</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798022</start></timePeriod><value>980</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590068A23EAFC6230000D17E</mRID><description>Apparent Power</description><lastUpdateTime>1787798022</lastUpdateTime><nextUpdateTime>1787798082</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798022</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590078A23EAFC6230000D17E</mRID><description>Current</description><lastUpdateTime>1787798022</lastUpdateTime><nextUpdateTime>1787798082</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798022</start></timePeriod><value>119</value></Reading></MirrorMeterReading></MirrorMeterReadingList>"
+    },
+    {
+      "code": 201,
+      "reason": "Created",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:43 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "0",
+        "Location": "/upt/1/mr"
+      },
+      "type": "resp",
+      "time": 1787798023,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798023,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "407"
+      },
+      "method": "PUT",
+      "uri": "/der/1/dera",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERAvailability xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><availabilityDuration>86400</availabilityDuration><readingTime>1787798023</readingTime><reservePercent>8000</reservePercent><statVarAvail><multiplier>0</multiplier><value>5000</value></statVarAvail><statWAvail><multiplier>0</multiplier><value>10000</value></statWAvail></DERAvailability>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:43 GMT"
+      },
+      "type": "resp",
+      "time": 1787798023,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798037,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:33:57 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "721"
+      },
+      "type": "resp",
+      "time": 1787798037,
+      "vers": "HTTP/1.1",
+      "body": "<FunctionSetAssignmentsList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><FunctionSetAssignments href=\"/fsa/1\"><DERProgramListLink href=\"/edev/1/fsa/1/derp\" all=\"1\" /><TariffProfileListLink href=\"/tp\" all=\"0\" /><TimeLink href=\"/tm\" /><mRID>FFFFFFFFFFFFFFFFFFFF0000</mRID><description>Non-Topology</description></FunctionSetAssignments><FunctionSetAssignments href=\"/fsa/2\" subscribable=\"1\"><DERProgramListLink href=\"/edev/1/fsa/2/derp\" all=\"2\" /><TimeLink href=\"/tm\" /><mRID>F411B327040E87325E680002</mRID><description>Topology</description></FunctionSetAssignments></FunctionSetAssignmentsList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798043,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:03 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "439"
+      },
+      "type": "resp",
+      "time": 1787798043,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp\" subscribable=\"1\" all=\"1\" results=\"1\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/1/derp/1\" subscribable=\"1\"><mRID>00005B4EB2130000006F00001183</mRID><description>DERP 1</description><DERControlListLink href=\"/edev/1/fsa/1/derp/1/derc\" all=\"0\" /><primacy>25</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798043,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:03 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "1047"
+      },
+      "type": "resp",
+      "time": 1787798043,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/2/derp/1\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0001</mRID><description>A1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/1/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/1/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/1/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" /><primacy>7</primacy></DERProgram><DERProgram href=\"/edev/1/fsa/2/derp/2\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0002</mRID><description>A1-B1-C1-D1-E1-F1-G1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/2/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/2/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/2/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" /><primacy>1</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798043,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:03 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "189"
+      },
+      "type": "resp",
+      "time": 1787798043,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp/1/derc\" subscribable=\"1\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798043,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:03 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798043,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dderc\" subscribable=\"1\"><mRID>07A8A089A22DCBED1A2D66E2</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>950</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798043,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:03 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798043,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798043,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:03 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "904"
+      },
+      "type": "resp",
+      "time": 1787798043,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/1/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>44E6771D962B977E718B0001</mRID><description>DER Control</description><version>2</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>1</currentStatus><dateTime>1787798013</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>120</duration><start>1787798013</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>900</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798043,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:03 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798043,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dderc\" subscribable=\"1\"><mRID>906066F482D59BD639531041</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>920</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798043,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:04 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798044,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798044,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:04 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "903"
+      },
+      "type": "resp",
+      "time": 1787798044,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/2/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>0673CDB09D6C0091E5A20001</mRID><description>DER Control</description><version>1</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>0</currentStatus><dateTime>1787797893</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>60</duration><start>1787798073</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>910</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798068,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:28 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "721"
+      },
+      "type": "resp",
+      "time": 1787798068,
+      "vers": "HTTP/1.1",
+      "body": "<FunctionSetAssignmentsList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><FunctionSetAssignments href=\"/fsa/1\"><DERProgramListLink href=\"/edev/1/fsa/1/derp\" all=\"1\" /><TariffProfileListLink href=\"/tp\" all=\"0\" /><TimeLink href=\"/tm\" /><mRID>FFFFFFFFFFFFFFFFFFFF0000</mRID><description>Non-Topology</description></FunctionSetAssignments><FunctionSetAssignments href=\"/fsa/2\" subscribable=\"1\"><DERProgramListLink href=\"/edev/1/fsa/2/derp\" all=\"2\" /><TimeLink href=\"/tm\" /><mRID>F411B327040E87325E680002</mRID><description>Topology</description></FunctionSetAssignments></FunctionSetAssignmentsList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798073,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "345"
+      },
+      "method": "POST",
+      "uri": "/rsps/0/rsp",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERControlResponse xmlns=\"urn:ieee:std:2030.5:ns\" schemaVer=\"2.2\"><createdDateTime>1787798073</createdDateTime><endDeviceLFDI>8A23EAFC6235ABD1BB7DD21FDDF3EF15B4B01179</endDeviceLFDI><status>2</status><subject>0673CDB09D6C0091E5A20001</subject><modesResponded>0000002C</modesResponded></DERControlResponse>"
+    },
+    {
+      "code": 201,
+      "reason": "Created",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:33 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "0",
+        "Location": "/rsps/0/rsp/4"
+      },
+      "type": "resp",
+      "time": 1787798073,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798074,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:34 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "439"
+      },
+      "type": "resp",
+      "time": 1787798074,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp\" subscribable=\"1\" all=\"1\" results=\"1\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/1/derp/1\" subscribable=\"1\"><mRID>00005B4EB2130000006F00001183</mRID><description>DERP 1</description><DERControlListLink href=\"/edev/1/fsa/1/derp/1/derc\" all=\"0\" /><primacy>25</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798074,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:34 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "1047"
+      },
+      "type": "resp",
+      "time": 1787798074,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/2/derp/1\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0001</mRID><description>A1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/1/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/1/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/1/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" /><primacy>7</primacy></DERProgram><DERProgram href=\"/edev/1/fsa/2/derp/2\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0002</mRID><description>A1-B1-C1-D1-E1-F1-G1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/2/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/2/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/2/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" /><primacy>1</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798074,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:34 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "189"
+      },
+      "type": "resp",
+      "time": 1787798074,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp/1/derc\" subscribable=\"1\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798074,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:34 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798074,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dderc\" subscribable=\"1\"><mRID>07A8A089A22DCBED1A2D66E2</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>950</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798074,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:34 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798074,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798074,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:34 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "904"
+      },
+      "type": "resp",
+      "time": 1787798074,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/1/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>44E6771D962B977E718B0001</mRID><description>DER Control</description><version>2</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>1</currentStatus><dateTime>1787798013</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>120</duration><start>1787798013</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>900</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798074,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:34 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798074,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dderc\" subscribable=\"1\"><mRID>906066F482D59BD639531041</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>920</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798074,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:34 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798074,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798074,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:34 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "903"
+      },
+      "type": "resp",
+      "time": 1787798074,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/2/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>0673CDB09D6C0091E5A20001</mRID><description>DER Control</description><version>2</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>1</currentStatus><dateTime>1787798073</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>60</duration><start>1787798073</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>910</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798082,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "632"
+      },
+      "method": "PUT",
+      "uri": "/der/1/ders",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERStatus xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><alarmStatus>00000001</alarmStatus><connectStatus><dateTime>1787798082</dateTime><value>01</value></connectStatus><inverterStatus><dateTime>1787798082</dateTime><value>3</value></inverterStatus><manufacturerStatus><dateTime>1787798082</dateTime><value>1000</value></manufacturerStatus><operationalModeStatus><dateTime>1787798082</dateTime><value>1</value></operationalModeStatus><readingTime>1787798082</readingTime><stateOfChargeStatus><dateTime>1787798082</dateTime><value>0</value></stateOfChargeStatus></DERStatus>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:42 GMT"
+      },
+      "type": "resp",
+      "time": 1787798082,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798083,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "2741"
+      },
+      "method": "POST",
+      "uri": "/mup/1",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MirrorMeterReadingList xmlns=\"urn:ieee:std:2030.5:ns\" all=\"7\" results=\"7\" schemaVer=\"2.2\"><MirrorMeterReading><mRID>37081755590018A23EAFC6230000D17E</mRID><description>Real Power</description><lastUpdateTime>1787798082</lastUpdateTime><nextUpdateTime>1787798142</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0020</qualityFlags><timePeriod><duration>60</duration><start>1787798082</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590028A23EAFC6230000D17E</mRID><description>Reactive Power</description><lastUpdateTime>1787798082</lastUpdateTime><nextUpdateTime>1787798142</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798082</start></timePeriod><value>0</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590038A23EAFC6230000D17E</mRID><description>Frequency</description><lastUpdateTime>1787798082</lastUpdateTime><nextUpdateTime>1787798142</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0010</qualityFlags><timePeriod><duration>0</duration><start>1787798082</start></timePeriod><value>60000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590048A23EAFC6230000D17E</mRID><description>Voltage</description><lastUpdateTime>1787798082</lastUpdateTime><nextUpdateTime>1787798142</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>60</duration><start>1787798082</start></timePeriod><value>2400</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590058A23EAFC6230000D17E</mRID><description>Power Factor</description><lastUpdateTime>1787798082</lastUpdateTime><nextUpdateTime>1787798142</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798082</start></timePeriod><value>980</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590068A23EAFC6230000D17E</mRID><description>Apparent Power</description><lastUpdateTime>1787798082</lastUpdateTime><nextUpdateTime>1787798142</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798082</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590078A23EAFC6230000D17E</mRID><description>Current</description><lastUpdateTime>1787798082</lastUpdateTime><nextUpdateTime>1787798142</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798082</start></timePeriod><value>119</value></Reading></MirrorMeterReading></MirrorMeterReadingList>"
+    },
+    {
+      "code": 201,
+      "reason": "Created",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:43 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "0",
+        "Location": "/upt/1/mr"
+      },
+      "type": "resp",
+      "time": 1787798083,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798083,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "407"
+      },
+      "method": "PUT",
+      "uri": "/der/1/dera",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERAvailability xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><availabilityDuration>86400</availabilityDuration><readingTime>1787798083</readingTime><reservePercent>8000</reservePercent><statVarAvail><multiplier>0</multiplier><value>5000</value></statVarAvail><statWAvail><multiplier>0</multiplier><value>10000</value></statWAvail></DERAvailability>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:43 GMT"
+      },
+      "type": "resp",
+      "time": 1787798083,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798098,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:34:58 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "721"
+      },
+      "type": "resp",
+      "time": 1787798098,
+      "vers": "HTTP/1.1",
+      "body": "<FunctionSetAssignmentsList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><FunctionSetAssignments href=\"/fsa/1\"><DERProgramListLink href=\"/edev/1/fsa/1/derp\" all=\"1\" /><TariffProfileListLink href=\"/tp\" all=\"0\" /><TimeLink href=\"/tm\" /><mRID>FFFFFFFFFFFFFFFFFFFF0000</mRID><description>Non-Topology</description></FunctionSetAssignments><FunctionSetAssignments href=\"/fsa/2\" subscribable=\"1\"><DERProgramListLink href=\"/edev/1/fsa/2/derp\" all=\"2\" /><TimeLink href=\"/tm\" /><mRID>F411B327040E87325E680002</mRID><description>Topology</description></FunctionSetAssignments></FunctionSetAssignmentsList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798104,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:04 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "439"
+      },
+      "type": "resp",
+      "time": 1787798104,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp\" subscribable=\"1\" all=\"1\" results=\"1\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/1/derp/1\" subscribable=\"1\"><mRID>00005B4EB2130000006F00001183</mRID><description>DERP 1</description><DERControlListLink href=\"/edev/1/fsa/1/derp/1/derc\" all=\"0\" /><primacy>25</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798104,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:04 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "1047"
+      },
+      "type": "resp",
+      "time": 1787798104,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/2/derp/1\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0001</mRID><description>A1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/1/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/1/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/1/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" /><primacy>7</primacy></DERProgram><DERProgram href=\"/edev/1/fsa/2/derp/2\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0002</mRID><description>A1-B1-C1-D1-E1-F1-G1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/2/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/2/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/2/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" /><primacy>1</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798104,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:04 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "189"
+      },
+      "type": "resp",
+      "time": 1787798104,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp/1/derc\" subscribable=\"1\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798104,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:04 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798104,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dderc\" subscribable=\"1\"><mRID>07A8A089A22DCBED1A2D66E2</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>950</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798104,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:04 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798104,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798104,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:04 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "904"
+      },
+      "type": "resp",
+      "time": 1787798104,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/1/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>44E6771D962B977E718B0001</mRID><description>DER Control</description><version>2</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>1</currentStatus><dateTime>1787798013</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>120</duration><start>1787798013</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>900</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798104,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:04 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798104,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dderc\" subscribable=\"1\"><mRID>906066F482D59BD639531041</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>920</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798104,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:04 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798104,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798104,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:05 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "903"
+      },
+      "type": "resp",
+      "time": 1787798105,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/2/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>0673CDB09D6C0091E5A20001</mRID><description>DER Control</description><version>2</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>1</currentStatus><dateTime>1787798073</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>60</duration><start>1787798073</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>910</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798122,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:22 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "672"
+      },
+      "type": "resp",
+      "time": 1787798122,
+      "vers": "HTTP/1.1",
+      "body": "<EndDeviceList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev\" subscribable=\"1\" all=\"1\" results=\"1\" pollRate=\"300\"><EndDevice href=\"/edev/1\" subscribable=\"1\"><DERListLink href=\"/der\" all=\"1\" /><DeviceInformationLink href=\"/di\" /><lFDI>8a23eafc6235abd1bb7dd21fddf3ef15b4b01179</lFDI><LogEventListLink href=\"/edev/1/lel\" all=\"0\" /><PowerStatusLink href=\"/edev/1/ps\" /><sFDI>370817555900</sFDI><changedTime>1787797887</changedTime><FunctionSetAssignmentsListLink href=\"/edev/1/fsa\" all=\"2\" /><RegistrationLink href=\"/edev/1/rg\" /><SubscriptionListLink href=\"/edev/1/sub\" all=\"0\" /></EndDevice></EndDeviceList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798128,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:28 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "721"
+      },
+      "type": "resp",
+      "time": 1787798128,
+      "vers": "HTTP/1.1",
+      "body": "<FunctionSetAssignmentsList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><FunctionSetAssignments href=\"/fsa/1\"><DERProgramListLink href=\"/edev/1/fsa/1/derp\" all=\"1\" /><TariffProfileListLink href=\"/tp\" all=\"0\" /><TimeLink href=\"/tm\" /><mRID>FFFFFFFFFFFFFFFFFFFF0000</mRID><description>Non-Topology</description></FunctionSetAssignments><FunctionSetAssignments href=\"/fsa/2\" subscribable=\"1\"><DERProgramListLink href=\"/edev/1/fsa/2/derp\" all=\"2\" /><TimeLink href=\"/tm\" /><mRID>F411B327040E87325E680002</mRID><description>Topology</description></FunctionSetAssignments></FunctionSetAssignmentsList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798133,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "345"
+      },
+      "method": "POST",
+      "uri": "/rsps/0/rsp",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERControlResponse xmlns=\"urn:ieee:std:2030.5:ns\" schemaVer=\"2.2\"><createdDateTime>1787798133</createdDateTime><endDeviceLFDI>8A23EAFC6235ABD1BB7DD21FDDF3EF15B4B01179</endDeviceLFDI><status>3</status><subject>0673CDB09D6C0091E5A20001</subject><modesResponded>0000002C</modesResponded></DERControlResponse>"
+    },
+    {
+      "code": 201,
+      "reason": "Created",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:33 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "0",
+        "Location": "/rsps/0/rsp/5"
+      },
+      "type": "resp",
+      "time": 1787798133,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798135,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:35 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "439"
+      },
+      "type": "resp",
+      "time": 1787798135,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp\" subscribable=\"1\" all=\"1\" results=\"1\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/1/derp/1\" subscribable=\"1\"><mRID>00005B4EB2130000006F00001183</mRID><description>DERP 1</description><DERControlListLink href=\"/edev/1/fsa/1/derp/1/derc\" all=\"0\" /><primacy>25</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798135,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:35 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "1047"
+      },
+      "type": "resp",
+      "time": 1787798135,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/2/derp/1\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0001</mRID><description>A1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/1/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/1/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/1/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" /><primacy>7</primacy></DERProgram><DERProgram href=\"/edev/1/fsa/2/derp/2\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0002</mRID><description>A1-B1-C1-D1-E1-F1-G1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/2/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/2/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/2/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" /><primacy>1</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798135,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:35 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "189"
+      },
+      "type": "resp",
+      "time": 1787798135,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp/1/derc\" subscribable=\"1\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798135,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:35 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798135,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dderc\" subscribable=\"1\"><mRID>07A8A089A22DCBED1A2D66E2</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>950</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798135,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:35 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798135,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798135,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:35 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "904"
+      },
+      "type": "resp",
+      "time": 1787798135,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/1/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>44E6771D962B977E718B0001</mRID><description>DER Control</description><version>3</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>5</currentStatus><dateTime>1787798133</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>120</duration><start>1787798013</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>900</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798135,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:35 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798135,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dderc\" subscribable=\"1\"><mRID>906066F482D59BD639531041</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>920</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798135,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:35 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798135,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798135,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:35 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "903"
+      },
+      "type": "resp",
+      "time": 1787798135,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/2/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>0673CDB09D6C0091E5A20001</mRID><description>DER Control</description><version>3</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>5</currentStatus><dateTime>1787798133</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>60</duration><start>1787798073</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>910</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798142,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "632"
+      },
+      "method": "PUT",
+      "uri": "/der/1/ders",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERStatus xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><alarmStatus>00000001</alarmStatus><connectStatus><dateTime>1787798142</dateTime><value>01</value></connectStatus><inverterStatus><dateTime>1787798142</dateTime><value>3</value></inverterStatus><manufacturerStatus><dateTime>1787798142</dateTime><value>1000</value></manufacturerStatus><operationalModeStatus><dateTime>1787798142</dateTime><value>1</value></operationalModeStatus><readingTime>1787798142</readingTime><stateOfChargeStatus><dateTime>1787798142</dateTime><value>0</value></stateOfChargeStatus></DERStatus>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:42 GMT"
+      },
+      "type": "resp",
+      "time": 1787798142,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798143,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "2741"
+      },
+      "method": "POST",
+      "uri": "/mup/1",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MirrorMeterReadingList xmlns=\"urn:ieee:std:2030.5:ns\" all=\"7\" results=\"7\" schemaVer=\"2.2\"><MirrorMeterReading><mRID>37081755590018A23EAFC6230000D17E</mRID><description>Real Power</description><lastUpdateTime>1787798142</lastUpdateTime><nextUpdateTime>1787798202</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0020</qualityFlags><timePeriod><duration>60</duration><start>1787798142</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590028A23EAFC6230000D17E</mRID><description>Reactive Power</description><lastUpdateTime>1787798142</lastUpdateTime><nextUpdateTime>1787798202</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798142</start></timePeriod><value>0</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590038A23EAFC6230000D17E</mRID><description>Frequency</description><lastUpdateTime>1787798142</lastUpdateTime><nextUpdateTime>1787798202</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0010</qualityFlags><timePeriod><duration>0</duration><start>1787798142</start></timePeriod><value>60000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590048A23EAFC6230000D17E</mRID><description>Voltage</description><lastUpdateTime>1787798142</lastUpdateTime><nextUpdateTime>1787798202</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>60</duration><start>1787798142</start></timePeriod><value>2400</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590058A23EAFC6230000D17E</mRID><description>Power Factor</description><lastUpdateTime>1787798142</lastUpdateTime><nextUpdateTime>1787798202</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798142</start></timePeriod><value>980</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590068A23EAFC6230000D17E</mRID><description>Apparent Power</description><lastUpdateTime>1787798142</lastUpdateTime><nextUpdateTime>1787798202</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798142</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590078A23EAFC6230000D17E</mRID><description>Current</description><lastUpdateTime>1787798142</lastUpdateTime><nextUpdateTime>1787798202</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798142</start></timePeriod><value>119</value></Reading></MirrorMeterReading></MirrorMeterReadingList>"
+    },
+    {
+      "code": 201,
+      "reason": "Created",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:43 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "0",
+        "Location": "/upt/1/mr"
+      },
+      "type": "resp",
+      "time": 1787798143,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798143,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "407"
+      },
+      "method": "PUT",
+      "uri": "/der/1/dera",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERAvailability xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><availabilityDuration>86400</availabilityDuration><readingTime>1787798143</readingTime><reservePercent>8000</reservePercent><statVarAvail><multiplier>0</multiplier><value>5000</value></statVarAvail><statWAvail><multiplier>0</multiplier><value>10000</value></statWAvail></DERAvailability>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:43 GMT"
+      },
+      "type": "resp",
+      "time": 1787798143,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798159,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:35:59 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "721"
+      },
+      "type": "resp",
+      "time": 1787798159,
+      "vers": "HTTP/1.1",
+      "body": "<FunctionSetAssignmentsList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><FunctionSetAssignments href=\"/fsa/1\"><DERProgramListLink href=\"/edev/1/fsa/1/derp\" all=\"1\" /><TariffProfileListLink href=\"/tp\" all=\"0\" /><TimeLink href=\"/tm\" /><mRID>FFFFFFFFFFFFFFFFFFFF0000</mRID><description>Non-Topology</description></FunctionSetAssignments><FunctionSetAssignments href=\"/fsa/2\" subscribable=\"1\"><DERProgramListLink href=\"/edev/1/fsa/2/derp\" all=\"2\" /><TimeLink href=\"/tm\" /><mRID>F411B327040E87325E680002</mRID><description>Topology</description></FunctionSetAssignments></FunctionSetAssignmentsList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798165,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:05 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "439"
+      },
+      "type": "resp",
+      "time": 1787798165,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp\" subscribable=\"1\" all=\"1\" results=\"1\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/1/derp/1\" subscribable=\"1\"><mRID>00005B4EB2130000006F00001183</mRID><description>DERP 1</description><DERControlListLink href=\"/edev/1/fsa/1/derp/1/derc\" all=\"0\" /><primacy>25</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798165,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:05 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "1047"
+      },
+      "type": "resp",
+      "time": 1787798165,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/2/derp/1\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0001</mRID><description>A1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/1/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/1/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/1/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" /><primacy>7</primacy></DERProgram><DERProgram href=\"/edev/1/fsa/2/derp/2\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0002</mRID><description>A1-B1-C1-D1-E1-F1-G1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/2/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/2/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/2/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" /><primacy>1</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798165,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:05 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "189"
+      },
+      "type": "resp",
+      "time": 1787798165,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp/1/derc\" subscribable=\"1\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798165,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:05 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798165,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dderc\" subscribable=\"1\"><mRID>07A8A089A22DCBED1A2D66E2</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>950</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798165,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:05 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798165,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798165,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:05 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "904"
+      },
+      "type": "resp",
+      "time": 1787798165,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/1/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>44E6771D962B977E718B0001</mRID><description>DER Control</description><version>3</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>5</currentStatus><dateTime>1787798133</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>120</duration><start>1787798013</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>900</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798165,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:05 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798165,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dderc\" subscribable=\"1\"><mRID>906066F482D59BD639531041</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>920</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798165,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:05 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798165,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798166,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:06 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "903"
+      },
+      "type": "resp",
+      "time": 1787798166,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/2/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>0673CDB09D6C0091E5A20001</mRID><description>DER Control</description><version>3</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>5</currentStatus><dateTime>1787798133</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>60</duration><start>1787798073</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>910</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798189,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:29 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "721"
+      },
+      "type": "resp",
+      "time": 1787798189,
+      "vers": "HTTP/1.1",
+      "body": "<FunctionSetAssignmentsList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><FunctionSetAssignments href=\"/fsa/1\"><DERProgramListLink href=\"/edev/1/fsa/1/derp\" all=\"1\" /><TariffProfileListLink href=\"/tp\" all=\"0\" /><TimeLink href=\"/tm\" /><mRID>FFFFFFFFFFFFFFFFFFFF0000</mRID><description>Non-Topology</description></FunctionSetAssignments><FunctionSetAssignments href=\"/fsa/2\" subscribable=\"1\"><DERProgramListLink href=\"/edev/1/fsa/2/derp\" all=\"2\" /><TimeLink href=\"/tm\" /><mRID>F411B327040E87325E680002</mRID><description>Topology</description></FunctionSetAssignments></FunctionSetAssignmentsList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798196,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:36 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "439"
+      },
+      "type": "resp",
+      "time": 1787798196,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp\" subscribable=\"1\" all=\"1\" results=\"1\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/1/derp/1\" subscribable=\"1\"><mRID>00005B4EB2130000006F00001183</mRID><description>DERP 1</description><DERControlListLink href=\"/edev/1/fsa/1/derp/1/derc\" all=\"0\" /><primacy>25</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798196,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:36 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "1047"
+      },
+      "type": "resp",
+      "time": 1787798196,
+      "vers": "HTTP/1.1",
+      "body": "<DERProgramList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp\" subscribable=\"1\" all=\"2\" results=\"2\" pollRate=\"30\"><DERProgram href=\"/edev/1/fsa/2/derp/1\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0001</mRID><description>A1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/1/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/1/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/1/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" /><primacy>7</primacy></DERProgram><DERProgram href=\"/edev/1/fsa/2/derp/2\" subscribable=\"1\"><mRID>4CBDCD734C6A060C844A0002</mRID><description>A1-B1-C1-D1-E1-F1-G1</description><ActiveDERControlListLink href=\"/edev/1/fsa/2/derp/2/actderc\" all=\"0\" /><DefaultDERControlLink href=\"/edev/1/fsa/2/derp/2/dderc\" /><DERControlListLink href=\"/edev/1/fsa/2/derp/2/derc\" all=\"1\" /><DERCurveListLink href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" /><primacy>1</primacy></DERProgram></DERProgramList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798196,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/1/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:36 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "189"
+      },
+      "type": "resp",
+      "time": 1787798196,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/1/derp/1/derc\" subscribable=\"1\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798196,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:36 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798196,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dderc\" subscribable=\"1\"><mRID>07A8A089A22DCBED1A2D66E2</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>950</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798196,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:36 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798196,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798196,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/1/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:36 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "904"
+      },
+      "type": "resp",
+      "time": 1787798196,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/1/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/1/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>44E6771D962B977E718B0001</mRID><description>DER Control</description><version>3</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>5</currentStatus><dateTime>1787798133</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>120</duration><start>1787798013</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>900</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798196,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dderc",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:36 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "527"
+      },
+      "type": "resp",
+      "time": 1787798196,
+      "vers": "HTTP/1.1",
+      "body": "<DefaultDERControl xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dderc\" subscribable=\"1\"><mRID>906066F482D59BD639531041</mRID><description>Default DER Control</description><version>1</version><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>920</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DefaultDERControl>"
+    },
+    {
+      "type": "req",
+      "time": 1787798196,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/dc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:36 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "168"
+      },
+      "type": "resp",
+      "time": 1787798196,
+      "vers": "HTTP/1.1",
+      "body": "<DERCurveList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/dc\" all=\"0\" results=\"0\" />"
+    },
+    {
+      "type": "req",
+      "time": 1787798196,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3"
+      },
+      "method": "GET",
+      "uri": "/edev/1/fsa/2/derp/2/derc?s=0&l=50",
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "code": 200,
+      "reason": "OK",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:36 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "903"
+      },
+      "type": "resp",
+      "time": 1787798196,
+      "vers": "HTTP/1.1",
+      "body": "<DERControlList xmlns=\"urn:ieee:std:2030.5:ns\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" schemaVer=\"2.2\" href=\"/edev/1/fsa/2/derp/2/derc\" subscribable=\"1\" all=\"1\" results=\"1\"><DERControl href=\"/edev/1/fsa/2/derp/2/derc/1\" replyTo=\"/rsps/0/rsp\" responseRequired=\"07\" subscribable=\"1\"><mRID>0673CDB09D6C0091E5A20001</mRID><description>DER Control</description><version>3</version><creationTime>1787797893</creationTime><EventStatus><currentStatus>5</currentStatus><dateTime>1787798133</dateTime><potentiallySuperseded>false</potentiallySuperseded></EventStatus><interval><duration>60</duration><start>1787798073</start></interval><DERControlBase><opModConnect>true</opModConnect><opModEnergize>true</opModEnergize><opModFixedPFInjectW><displacement>910</displacement><excitation>false</excitation><multiplier>-3</multiplier></opModFixedPFInjectW></DERControlBase></DERControl></DERControlList>"
+    },
+    {
+      "type": "req",
+      "time": 1787798202,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "632"
+      },
+      "method": "PUT",
+      "uri": "/der/1/ders",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERStatus xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><alarmStatus>00000001</alarmStatus><connectStatus><dateTime>1787798202</dateTime><value>01</value></connectStatus><inverterStatus><dateTime>1787798202</dateTime><value>3</value></inverterStatus><manufacturerStatus><dateTime>1787798202</dateTime><value>1000</value></manufacturerStatus><operationalModeStatus><dateTime>1787798202</dateTime><value>1</value></operationalModeStatus><readingTime>1787798202</readingTime><stateOfChargeStatus><dateTime>1787798202</dateTime><value>0</value></stateOfChargeStatus></DERStatus>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:42 GMT"
+      },
+      "type": "resp",
+      "time": 1787798202,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798203,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "2741"
+      },
+      "method": "POST",
+      "uri": "/mup/1",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MirrorMeterReadingList xmlns=\"urn:ieee:std:2030.5:ns\" all=\"7\" results=\"7\" schemaVer=\"2.2\"><MirrorMeterReading><mRID>37081755590018A23EAFC6230000D17E</mRID><description>Real Power</description><lastUpdateTime>1787798202</lastUpdateTime><nextUpdateTime>1787798262</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0020</qualityFlags><timePeriod><duration>60</duration><start>1787798202</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590028A23EAFC6230000D17E</mRID><description>Reactive Power</description><lastUpdateTime>1787798202</lastUpdateTime><nextUpdateTime>1787798262</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798202</start></timePeriod><value>0</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590038A23EAFC6230000D17E</mRID><description>Frequency</description><lastUpdateTime>1787798202</lastUpdateTime><nextUpdateTime>1787798262</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0010</qualityFlags><timePeriod><duration>0</duration><start>1787798202</start></timePeriod><value>60000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590048A23EAFC6230000D17E</mRID><description>Voltage</description><lastUpdateTime>1787798202</lastUpdateTime><nextUpdateTime>1787798262</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>60</duration><start>1787798202</start></timePeriod><value>2400</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590058A23EAFC6230000D17E</mRID><description>Power Factor</description><lastUpdateTime>1787798202</lastUpdateTime><nextUpdateTime>1787798262</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798202</start></timePeriod><value>980</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590068A23EAFC6230000D17E</mRID><description>Apparent Power</description><lastUpdateTime>1787798202</lastUpdateTime><nextUpdateTime>1787798262</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798202</start></timePeriod><value>10000</value></Reading></MirrorMeterReading><MirrorMeterReading><mRID>37081755590078A23EAFC6230000D17E</mRID><description>Current</description><lastUpdateTime>1787798202</lastUpdateTime><nextUpdateTime>1787798262</nextUpdateTime><Reading subscribable=\"0\"><qualityFlags>0001</qualityFlags><timePeriod><duration>0</duration><start>1787798202</start></timePeriod><value>119</value></Reading></MirrorMeterReading></MirrorMeterReadingList>"
+    },
+    {
+      "code": 201,
+      "reason": "Created",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:43 GMT",
+        "Content-Type": "application/sep+xml",
+        "Content-Length": "0",
+        "Location": "/upt/1/mr"
+      },
+      "type": "resp",
+      "time": 1787798203,
+      "vers": "HTTP/1.1",
+      "body": ""
+    },
+    {
+      "type": "req",
+      "time": 1787798203,
+      "headers": {
+        "host": "localhost:8443",
+        "accept": "application/sep+xml",
+        "content-type": "application/sep+xml",
+        "accept-encoding": "gzip, deflate",
+        "user-agent": "Python/3.12 aiohttp/3.14.3",
+        "content-length": "407"
+      },
+      "method": "PUT",
+      "uri": "/der/1/dera",
+      "vers": "HTTP/1.1",
+      "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<DERAvailability xmlns=\"urn:ieee:std:2030.5:ns\" subscribable=\"0\" schemaVer=\"2.2\"><availabilityDuration>86400</availabilityDuration><readingTime>1787798203</readingTime><reservePercent>8000</reservePercent><statVarAvail><multiplier>0</multiplier><value>5000</value></statVarAvail><statWAvail><multiplier>0</multiplier><value>10000</value></statWAvail></DERAvailability>"
+    },
+    {
+      "code": 204,
+      "reason": "No Content",
+      "headers": {
+        "Date": "Thu, 27 Aug 2026 02:36:43 GMT"
+      },
+      "type": "resp",
+      "time": 1787798203,
+      "vers": "HTTP/1.1",
+      "body": ""
+    }
+  ]
+}
