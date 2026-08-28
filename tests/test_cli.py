@@ -28,13 +28,14 @@ from py20305.cli import (
     parse_args,
     setup_logging,
 )
+from py20305.client.dnssd import DiscoveredServer
 from py20305.client.errors import (
     Sep2ConnectionError,
     Sep2PayloadError,
     Sep2ProtocolError,
     Sep2TlsError,
 )
-from py20305.config import ClientConfig, LoggingConfig
+from py20305.config import ClientConfig, ConfigError, LoggingConfig
 
 _CERT = """-----BEGIN CERTIFICATE-----
 MIIBIjCBygIUJ4Wl3xL4qk8jvmH5nHwq2m8Vd6owCgYIKoZIzj0EAwIwFDESMBAG
@@ -640,3 +641,281 @@ class TestGracefulShutdown:
             assert await cli.run(_config(tmp_path)) == EXIT_OK
 
         client.shutdown.assert_awaited_once()
+
+
+class TestMulticastTransportArgument:
+    def test_transport_choices(self) -> None:
+        for value in ("mdns", "xmdns", "both", "off"):
+            args = parse_args(["-c", "a.yaml", "--multicast-transport", value])
+            assert args.multicast_transport == value
+
+    def test_an_unknown_transport_is_rejected(self) -> None:
+        with pytest.raises(SystemExit):
+            parse_args(["-c", "a.yaml", "--multicast-transport", "llmnr"])
+
+    def test_discover_is_a_flag(self) -> None:
+        assert parse_args(["-c", "a.yaml", "--discover"]).discover is True
+        assert parse_args(["-c", "a.yaml"]).discover is False
+
+    def test_the_override_applies_to_both_halves(self, tmp_path: Path) -> None:
+        """One flag, because it answers one question: which transport, here."""
+        config = cli_module._apply_transport_override(_config(tmp_path), "xmdns")
+        assert config.discovery.transport == "xmdns"
+        assert config.advertise.transport == "xmdns"
+        assert config.discovery.enabled is True
+
+    def test_off_silences_announcement_and_discovery(self, tmp_path: Path) -> None:
+        config = cli_module._apply_transport_override(_config(tmp_path), "off")
+        assert config.advertise.transport == "off"
+        assert config.discovery.enabled is False
+
+    def test_off_is_refused_when_it_would_leave_no_way_to_find_a_server(
+        self, tmp_path: Path
+    ) -> None:
+        """Rejected here rather than as a connection failure much later."""
+        config = _config(tmp_path, server={})
+        with pytest.raises(ConfigError, match="no way to find a server"):
+            cli_module._apply_transport_override(config, "off")
+
+
+class TestDiscoverReport:
+    """--discover is a diagnostic, and has to honor the switches that silence it."""
+
+    @staticmethod
+    def _report(config: ClientConfig, tmp_path: Path) -> tuple[int, MagicMock]:
+        """Run the report with a readable certificate, so the gate is what decides.
+
+        Without the stub every case returns EXIT_CONFIG_ERROR at the
+        certificate read and the assertions below hold no matter what the gate
+        does -- which is a test that cannot fail.
+        """
+        (tmp_path / "client.pem").write_text("stub", encoding="utf-8")
+        with (
+            patch.object(cli_module, "compute_lfdi", return_value="3e" + "a" * 38),
+            patch.object(cli_module, "find_servers", return_value=[]) as find,
+        ):
+            return cli_module._report_discovery(config), find
+
+    def test_it_queries_nothing_when_discovery_is_disabled(self, tmp_path: Path) -> None:
+        config = _config(tmp_path, discovery={"enabled": False})
+        code, find = self._report(config, tmp_path)
+        assert code == EXIT_CONFIG_ERROR
+        find.assert_not_called()
+
+    def test_transport_off_also_silences_it(self, tmp_path: Path) -> None:
+        """`off` clears `enabled` and leaves `transport` alone, so reading the
+        transport here would query for an operator who asked for silence."""
+        config = cli_module._apply_transport_override(_config(tmp_path), "off")
+        code, find = self._report(config, tmp_path)
+        assert code == EXIT_CONFIG_ERROR
+        find.assert_not_called()
+
+    def test_it_queries_when_discovery_is_on(self, tmp_path: Path) -> None:
+        code, find = self._report(_config(tmp_path), tmp_path)
+        assert code == EXIT_OK
+        find.assert_called_once()
+
+
+class TestAdvertiserWiring:
+    def test_nothing_is_announced_by_default(self, tmp_path: Path) -> None:
+        assert cli_module.build_advertiser(_config(tmp_path)) is None
+
+    def test_nothing_is_announced_without_a_port_to_name(self, tmp_path: Path) -> None:
+        """A service record pointing at a dead port is worse than no record."""
+        config = _config(tmp_path, advertise={"transport": "mdns"})
+        assert cli_module.build_advertiser(config) is None
+
+    def test_the_management_api_port_is_advertised_when_it_is_reachable(
+        self, tmp_path: Path
+    ) -> None:
+        config = _config(
+            tmp_path,
+            advertise={"transport": "mdns"},
+            api={"enabled": True, "host": "0.0.0.0", "port": 8080},
+        )
+        assert cli_module._advertised_port(config) == 8080
+
+    def test_a_loopback_bound_api_is_not_advertised(self, tmp_path: Path) -> None:
+        """api.host defaults to 127.0.0.1, which the SRV address cannot reach.
+
+        Publishing it would advertise an endpoint that refuses every
+        connection, which is worse than publishing nothing.
+        """
+        config = _config(
+            tmp_path,
+            advertise={"transport": "mdns"},
+            api={"enabled": True, "host": "127.0.0.1", "port": 8080},
+        )
+        assert cli_module._advertised_port(config) is None
+
+    def test_an_explicit_port_wins_over_the_api(self, tmp_path: Path) -> None:
+        config = _config(
+            tmp_path,
+            advertise={"transport": "mdns", "port": 9999},
+            api={"enabled": True, "host": "0.0.0.0", "port": 8080},
+        )
+        assert cli_module._advertised_port(config) == 9999
+
+    def test_an_explicit_port_is_taken_on_trust_behind_loopback(
+        self, tmp_path: Path
+    ) -> None:
+        """An operator naming a port may have a proxy in front of it."""
+        config = _config(
+            tmp_path,
+            advertise={"transport": "mdns", "port": 9999},
+            api={"enabled": True, "host": "127.0.0.1", "port": 8080},
+        )
+        assert cli_module._advertised_port(config) == 9999
+
+    def test_an_advertiser_is_built_when_there_is_something_to_name(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "client.pem").write_text(_CERT, encoding="utf-8")
+        config = _config(
+            tmp_path,
+            advertise={"transport": "mdns"},
+            api={"enabled": True, "host": "0.0.0.0", "port": 8080},
+        )
+        with patch.object(cli_module, "compute_lfdi", return_value="3e" + "a" * 38):
+            advertiser = cli_module.build_advertiser(config)
+        assert advertiser is not None
+        assert advertiser.running is False
+
+    def test_the_certificate_is_not_read_when_nothing_is_announced(
+        self, tmp_path: Path
+    ) -> None:
+        """The default path must not depend on certificate material at all."""
+        with patch.object(cli_module, "compute_lfdi") as lfdi:
+            assert cli_module.build_advertiser(_config(tmp_path)) is None
+        lfdi.assert_not_called()
+
+
+class TestDiscoveryWiring:
+    async def test_a_configured_url_means_no_query_is_made(self, tmp_path: Path) -> None:
+        """§7.6 a) makes a known URI an equally valid way to find a server.
+
+        Asserts the query never happens, rather than asserting the condition
+        that guards it -- the latter stays green if the guard is deleted.
+        """
+        client = MagicMock()
+        client.http.forwarder = None
+        client.shutdown = AsyncMock()
+        with (
+            patch.object(cli_module, "build_client", return_value=(client, "a" * 40)),
+            patch.object(cli_module, "find_servers") as find,
+            patch.object(
+                cli_module, "connect_with_retry", new=AsyncMock(return_value=False)
+            ),
+        ):
+            await cli_module.run(_config(tmp_path))
+        find.assert_not_called()
+
+    async def test_discovery_runs_when_no_url_is_configured(self, tmp_path: Path) -> None:
+        """The other side of the same branch, so both directions are pinned."""
+        client = MagicMock()
+        client.http.forwarder = None
+        client.shutdown = AsyncMock()
+        found = MagicMock()
+        found.base_url = "https://192.168.1.40:8443"
+        found.instance = "srv._smartenergy._tcp.local"
+        found.is_2018 = False
+        # The discovery path derives this client's SFDI from its certificate,
+        # to ask for its own EndDevice first. Stubbed, because what is under
+        # test is whether the query happens, not how identity is computed.
+        (tmp_path / "client.pem").write_text("stub", encoding="utf-8")
+        with (
+            patch.object(cli_module, "build_client", return_value=(client, "a" * 40)),
+            patch.object(cli_module, "compute_lfdi", return_value="3e" + "a" * 38),
+            patch.object(cli_module, "find_servers", return_value=[found]) as find,
+            patch.object(
+                cli_module, "connect_with_retry", new=AsyncMock(return_value=False)
+            ),
+        ):
+            await cli_module.run(_config(tmp_path, server={}))
+        find.assert_called_once()
+
+    async def test_the_discovered_dcap_path_reaches_the_client(self, tmp_path: Path) -> None:
+        """A server not using /dcap is otherwise found and then asked for the wrong thing."""
+        config = await self._run_discovery(tmp_path, dcap="/smartenergy/dcap")
+        assert config.server.url == "https://192.168.1.40:8443"
+        assert config.server.dcap_path == "/smartenergy/dcap"
+
+    async def test_a_discovered_2018_server_sets_compat_when_unset(
+        self, tmp_path: Path
+    ) -> None:
+        """§5.7 makes the advertised level the server's own answer to that question."""
+        config = await self._run_discovery(tmp_path, level="-S1")
+        assert config.server.server_2018_compat is True
+
+    async def test_a_configured_compat_flag_wins_over_the_advertised_level(
+        self, tmp_path: Path
+    ) -> None:
+        """The operator answered it; a record on the network does not overrule them."""
+        config = await self._run_discovery(
+            tmp_path, level="-S1", server={"server_2018_compat": False}
+        )
+        assert config.server.server_2018_compat is False
+
+    @staticmethod
+    async def _run_discovery(
+        tmp_path: Path,
+        *,
+        dcap: str = "/dcap",
+        level: str = "-S2",
+        server: dict | None = None,
+    ) -> ClientConfig:
+        """Run the discovery branch and return the config build_client was handed."""
+        client = MagicMock()
+        client.http.forwarder = None
+        client.shutdown = AsyncMock()
+        found = DiscoveredServer(
+            instance="srv._smartenergy._tcp.local",
+            host="192.168.1.40",
+            port=8443,
+            txt={"txtvers": "1", "dcap": dcap, "level": level},
+            transport="mdns",
+        )
+        seen: list[ClientConfig] = []
+
+        def capture(config: ClientConfig) -> tuple[MagicMock, str]:
+            seen.append(config)
+            return client, "a" * 40
+
+        (tmp_path / "client.pem").write_text("stub", encoding="utf-8")
+        with (
+            patch.object(cli_module, "build_client", side_effect=capture),
+            patch.object(cli_module, "compute_lfdi", return_value="3e" + "a" * 38),
+            patch.object(cli_module, "find_servers", return_value=[found]),
+            patch.object(
+                cli_module, "connect_with_retry", new=AsyncMock(return_value=False)
+            ),
+        ):
+            await cli_module.run(_config(tmp_path, server=server or {}))
+        assert seen, "build_client was never reached"
+        return seen[0]
+
+    def test_build_client_refuses_an_unresolved_url(self, tmp_path: Path) -> None:
+        """Reaching build_client with no URL is a wiring fault, not an operator one."""
+        config = _config(tmp_path, server={})
+        with pytest.raises(ValueError, match="not resolved"):
+            cli_module.build_client(config)
+
+    def test_find_servers_asks_over_the_configured_transport(self, tmp_path: Path) -> None:
+        config = _config(tmp_path, discovery={"transport": "xmdns", "timeout_seconds": 0.01})
+        with patch.object(cli_module, "discover_for_client", return_value=[]) as discover:
+            cli_module.find_servers(config, own_sfdi=123)
+        transports = discover.call_args.args[0]
+        assert [t.name for t in transports] == ["xmdns"]
+
+    def test_the_client_sfdi_drives_the_default_query(self, tmp_path: Path) -> None:
+        with patch.object(cli_module, "discover_for_client", return_value=[]) as discover:
+            cli_module.find_servers(_config(tmp_path), own_sfdi=123)
+        assert discover.call_args.kwargs["sfdi"] == 123
+        assert discover.call_args.kwargs["subtype"] is None
+
+    def test_a_configured_subtype_reaches_the_query(self, tmp_path: Path) -> None:
+        """It goes into the PTR name, so dropping it asks a different question."""
+        config = _config(tmp_path, discovery={"subtype": "derp"})
+        with patch.object(cli_module, "discover_for_client", return_value=[]) as discover:
+            cli_module.find_servers(config, own_sfdi=123)
+        assert discover.call_args.kwargs["subtype"] == "derp"

@@ -64,6 +64,7 @@ nav:
   - Quickstart: quickstart.md
   - Running a client: running.md
   - Guides:
+      - Finding servers: discovery.md
       - Connecting devices: connectors.md
       - Management API: api.md
       - Forwarding traffic: forwarding.md

@@ -225,3 +225,76 @@ class TestTelemetryDefaults:
         """Zero would schedule a cycle that never waits."""
         with pytest.raises(ValidationError):
             ClientConfig.model_validate({**MINIMAL, "telemetry": {field: 0}})
+
+
+class TestDiscoveryAndAnnouncement:
+    """server.url is optional because IEEE 2030.5 §7.6 a) makes it one of three
+    ways to find a server, and §6.9.2 makes querying for one the client's job."""
+
+    def test_a_server_url_is_not_required_when_discovery_can_find_one(
+        self, tmp_path: Path
+    ) -> None:
+        data = {**MINIMAL, "server": {}}
+        config = load_config(_write(tmp_path, data))
+        assert config.server.url is None
+        assert config.discovery.enabled is True
+
+    def test_discovery_is_on_by_default(self, tmp_path: Path) -> None:
+        """§6.9.2 states it as a client SHALL, so it is not opt-in."""
+        config = load_config(_write(tmp_path, MINIMAL))
+        assert config.discovery.enabled is True
+        assert config.discovery.transport == "mdns"
+
+    def test_announcement_is_off_by_default(self, tmp_path: Path) -> None:
+        """Not part of the standard, and it discloses this client's identity."""
+        config = load_config(_write(tmp_path, MINIMAL))
+        assert config.advertise.transport == "off"
+
+    def test_no_url_and_no_discovery_is_rejected(self, tmp_path: Path) -> None:
+        """Neither leaves the client with no way to reach anything."""
+        data = {**MINIMAL, "server": {}, "discovery": {"enabled": False}}
+        with pytest.raises(ConfigError, match="server.url"):
+            load_config(_write(tmp_path, data))
+
+    def test_a_url_is_still_validated_when_present(self, tmp_path: Path) -> None:
+        data = {**MINIMAL, "server": {"url": "http://server.example.com"}}
+        with pytest.raises(ConfigError, match="https"):
+            load_config(_write(tmp_path, data))
+
+    @pytest.mark.parametrize("transport", ["mdns", "xmdns", "both"])
+    def test_discovery_transports(self, tmp_path: Path, transport: str) -> None:
+        data = {**MINIMAL, "discovery": {"transport": transport}}
+        assert load_config(_write(tmp_path, data)).discovery.transport == transport
+
+    def test_discovery_has_no_off_transport(self, tmp_path: Path) -> None:
+        """`enabled` turns it off; a second way to say so would be ambiguous."""
+        data = {**MINIMAL, "discovery": {"transport": "off"}}
+        with pytest.raises(ConfigError):
+            load_config(_write(tmp_path, data))
+
+    def test_a_subtype_starting_with_an_underscore_is_rejected(self, tmp_path: Path) -> None:
+        """§7.5: subtype strings SHALL NOT begin with an underscore."""
+        data = {**MINIMAL, "discovery": {"subtype": "_derp"}}
+        with pytest.raises(ConfigError, match="underscore"):
+            load_config(_write(tmp_path, data))
+
+    def test_the_advertised_service_must_be_a_dns_sd_service_name(
+        self, tmp_path: Path
+    ) -> None:
+        data = {**MINIMAL, "advertise": {"service": "py20305"}}
+        with pytest.raises(ConfigError, match="_name._tcp"):
+            load_config(_write(tmp_path, data))
+
+    def test_the_default_advertised_service_is_not_the_registered_one(
+        self, tmp_path: Path
+    ) -> None:
+        """Claiming _smartenergy._tcp would misrepresent this client as a server."""
+        config = load_config(_write(tmp_path, MINIMAL))
+        assert config.advertise.service == "_py20305._tcp"
+        assert "smartenergy" not in config.advertise.service
+
+    def test_an_oversized_instance_name_is_rejected(self, tmp_path: Path) -> None:
+        """§7.2 caps the instance label at 63 bytes of UTF-8."""
+        data = {**MINIMAL, "advertise": {"instance": "x" * 64}}
+        with pytest.raises(ConfigError, match="63 bytes"):
+            load_config(_write(tmp_path, data))

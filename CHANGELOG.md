@@ -5,6 +5,184 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
+## [Unreleased]
+
+- The client can now locate an IEEE 2030.5 server on the local network instead
+  of being told where one is. IEEE 2030.5 6.9.2 puts this on the client --
+  "Clients SHALL locate local services by performing DNS service discovery
+  (DNS-SD) queries to the local network" -- and it was the one part of Clause 7
+  this client did not implement. `server.url` is now optional; leave it out and
+  the client queries at startup, following the sequence Annex C describes: a
+  subtype query for the server already holding this client's own EndDevice,
+  keyed by its SFDI, and only then a query for any server at all. Asking the
+  narrow question first matters on a network with several servers, because the
+  one holding your registration is the one to talk to and a generic query
+  returns it alongside servers that have never heard of this device. A
+  configured `server.url` still wins and suppresses the query entirely, which
+  is not a shortcut: 7.6 a) lists "use known URI(s) to DeviceCapability
+  resource(s) of interest" as one of three equally valid ways to find a server,
+  so an operator who named one has already answered the question. `--discover`
+  runs the query, prints what answers and exits without connecting.
+- The four TXT rules of 7.4 are applied as the standard states them, because
+  each one fails silently when it is not. A record whose `txtvers` is anything
+  but 1, or whose `dcap` or `level` is absent or empty, is discarded. The
+  `https` key is read as the three states it has: absent means the server
+  offers only plain HTTP, present with no value means HTTPS on 443, and present
+  with a value means that port. Collapsing the middle state into "absent" is
+  the natural mistake, and it downgrades a TLS-only server to a plaintext
+  connection. Relatedly, the TLS port comes from that key and never from the
+  SRV record: 7.5 fixes the SRV port as the one "specified for the default
+  (http) scheme" and requires every SRV record on a device to be identical, so
+  an implementation reaching for `srv.port` over TLS is using a number the
+  standard guarantees is wrong. A server advertising only plain HTTP is skipped
+  with a warning rather than connected to, since IEEE 2030.5 is mutual TLS
+  throughout and this client has no way to use one.
+- A discovered server's schema extensibility level is reported, and 5.7 ties it
+  to an edition: `S1` is IEEE 2030.5-2018 and `S2` is IEEE 2030.5-2023. That
+  makes it the server's own statement about which edition it implements, which
+  is a better answer than asking an operator to know it -- so the client acts
+  on it, and a discovered `-S1` sets `server_2018_compat` where the
+  configuration has not. An explicit setting still wins either way, because an
+  operator who answered the question should not be overruled by a record
+  arriving off a multicast group.
+- The DeviceCapability path travels with the discovered URL. 7.4 gives the TXT
+  `dcap` key as the path of that resource, so a server advertising
+  `dcap=/smartenergy/dcap` is contacted there rather than at the configured
+  `server.dcap_path` -- without which a server not using `/dcap` is discovered,
+  logged correctly and then asked for a resource it does not serve. The value
+  must be a path rooted at `/`; an absolute URL, a bare word or a
+  protocol-relative `//host/x` is discarded, since it arrives unauthenticated
+  and becomes part of a URL this client then requests.
+- A single reply can name more instances than a segment plausibly holds, and
+  each name costs a follow-up query multicast to the whole group. The client
+  considers the first sixteen and logs what it dropped, so one packet from an
+  unauthenticated source cannot turn into a burst on the link.
+- `--discover` honors the switches that silence discovery. `discovery.enabled:
+  false` and `--multicast-transport off` now stop the diagnostic from querying,
+  rather than only stopping the client from querying at startup.
+- Announcement joins its multicast group on the configured `interface`, not
+  only sending on it. Joining on the default interface while sending on the
+  chosen one gives a responder that announces where it was told to and listens
+  somewhere else, which presents as one that answers nothing.
+- The client can announce itself on the local network, so an inventory tool, a
+  commissioning laptop or a passive monitor on the same segment can find it
+  without probing. Off by default. This is **not** part of IEEE 2030.5 and is
+  not claimed to be: the standard gives the advertising role to servers and the
+  querying role to clients, and no clause describes a client publishing a
+  record about itself. It is here because operators need to know what is
+  running on a network they own. The default service name is `_py20305._tcp`
+  rather than the registered `_smartenergy._tcp` for that reason -- announcing
+  under the registered name would make every conformant client on the link
+  believe it had found a server and then fail against a DeviceCapability
+  resource this process does not serve. The records follow the standard's own
+  conventions where they apply: the instance name ends with the SFDI as 7.2
+  requires, rendered as 12 decimal digits with leading zeros, and the TXT
+  record leads with `txtvers=1`. Announcement discloses this client's LFDI and
+  SFDI to the segment. Both already cross the wire in the clear on every TLS
+  handshake it makes, so this is not a new secret, but it does make collecting
+  them much easier, which is the reason the default is off.
+- Both halves take a transport, because the two editions of the standard
+  disagree about which multicast carries the exchange: `mdns` is normative in
+  IEEE 2030.5-2023 (`.local`, RFC 6762), `xmdns` is the 2018 transport
+  (`.site`, site-local `FF05::FB`) and is "DEPRECATED but still normative" in
+  2023, and `both` uses each in turn. The records are byte-for-byte the same in
+  both editions -- the same service name, the same Table 17 subtypes, the same
+  TXT keys down to `txtvers=1` -- so this is a multicast group and a domain,
+  not a record format, and it is one setting rather than a schema version.
+  `--multicast-transport mdns|xmdns|both|off` overrides both at once.
+- Queries are sent from an ephemeral port rather than from 5353. RFC 6762 6.7
+  has a responder treat a query whose source port is not 5353 as a legacy query
+  and answer it by unicast, which is what lets this run without binding the
+  well-known port and joining the group -- a client library that bound 5353
+  would fight the host's own responder for it and lose on most systems. The
+  announcer does try for 5353, since it has to receive queries to answer them,
+  and falls back to announcing from an ephemeral port when the port is taken,
+  which leaves the client advertised but unable to answer a later query.
+- The second discovery round asks one QTYPE ANY question per instance rather
+  than a separate SRV and TXT question. Beyond saving a round trip, this is what
+  keeps compressed names readable: a compression pointer is an offset from the
+  start of the message that wrote it, so SRV and TXT records collected from two
+  different datagrams cannot be read as though they shared one buffer. Asking
+  one question that returns both records means every name resolves against the
+  bytes it was written against.
+- Announcement publishes only an address a receiver can connect to. A
+  link-local IPv6 address is not one: the scope identifier that would make it
+  usable is meaningful only on the host that holds it and cannot travel in a
+  record. A host with no routable IPv6 address now announces over IPv4 alone
+  rather than publishing an `fe80::` address nothing off-host can dial, which
+  is also what §7.1 requires of xmDNS, where IEEE 2030.5 "SHALL use global
+  addresses or Unique Local Addresses (IETF RFC 4193)".
+- Responses are rate limited. Multicast answers are capped at one per second
+  per interface, which RFC 6762 §6 states as a MUST NOT. Unicast answers are
+  capped at ten per second, which the standard does not ask for: a UDP source
+  address is trivially spoofed, and an unbounded responder is a small amplifier
+  aimed at whoever an attacker names. One exchange is all a genuine querier
+  needs.
+- A unicast answer keeps the full source address. `recvfrom` on an IPv6 socket
+  returns a scope identifier alongside the host and port, and sending to a
+  link-local peer without it fails, which would have left the querier waiting
+  out its timeout with no indication why.
+- Retrying a discovery query that found nothing follows the existing
+  `connection` block rather than a switch of its own. "The server is not there
+  yet" is the same situation whether a query goes unanswered or a connection is
+  refused, and an operator who set `retry_forever: false` so a supervisor owns
+  restarts meant that for both.
+- Multicast traffic goes out with the TTL and hop limit RFC 6762 §11 requires,
+  255 on both address families. That is not a routing decision -- the scope is
+  already fixed by the group address -- but a value a receiver checks to tell a
+  packet that genuinely came from the local link from one that did not, and a
+  responder is permitted to discard anything else.
+- A unicast answer to a querier whose source port is not 5353 uses the legacy
+  encoding of RFC 6762 §6.7: the query's transaction id, its question echoed
+  back, and TTLs capped at ten seconds. That querier is an ordinary DNS
+  resolver as far as it knows, so it matches the reply to its request by id.
+  Answering with id zero left the reply unmatchable, including by this
+  package's own discovery side, which drops replies carrying an id it did not
+  send -- so the two halves could not have talked to each other.
+- A name inside a record may not run past that record. `read_name` works
+  against the whole message, because a compression pointer legitimately reaches
+  backwards outside the record, but the uncompressed part of a name is now
+  bounded by RDLENGTH. Without that check a short RDLENGTH let a name consume
+  the record following it, and the result was accepted as a valid target.
+- Announcement no longer falls back to an ephemeral source port when UDP 5353
+  is already held. RFC 6762 §6 requires an mDNS response to be sent *from*
+  5353 and has receivers ignore responses from any other source port, so the
+  fallback produced packets a conformant listener discards while the log
+  claimed the client was advertised. The transport is now reported unavailable,
+  naming the likely cause: a responder already running on the host owns the
+  port.
+- A port is inferred for announcement only when its listener is bound to an
+  address something else can reach. `api.host` defaults to `127.0.0.1`, so the
+  previous behavior published the API's port alongside the LAN address in the
+  SRV record, advertising an endpoint that refuses every connection. An
+  explicit `advertise.port` is still taken on trust, since an operator naming
+  one may have a proxy in front of a loopback listener.
+- A configured `discovery.subtype` reaches the query. It was being used only to
+  suppress the SFDI lookup, after which a generic `_smartenergy._tcp` query ran
+  -- so an operator asking about one function set silently got every server
+  instead. The subtype goes into the PTR name, so it has to be part of the
+  question rather than a filter applied to the answer.
+- The second discovery round now runs when either the SRV or the TXT record is
+  missing, rather than only when SRV is. A PTR answered with an SRV and no TXT
+  is just as unusable as one with neither, and treating it as a rejection lost
+  the server silently.
+- A link-local source address is no longer accepted as a server's host. A
+  responder on IPv6 commonly answers from one, and the scope identifier that
+  would make it dialable does not survive the source tuple, so accepting it
+  produced a URL like `https://[fe80::1]:8443` that fails at connect. This is
+  the same rule already applied to a link-local AAAA record, now applied to the
+  fallback as well.
+- Announcement starts before discovery rather than after it. A client with no
+  configured URL retries its query until a server answers, so building the
+  advertiser afterwards left it invisible during exactly the local outage where
+  someone would go looking for it.
+- The DNS decoder only follows a compression pointer that points strictly
+  backwards. A forward or self-referential pointer is the shape every
+  "malformed DNS packet hangs the parser" bug takes, and bounding the iteration
+  count instead would still let a crafted datagram cost far more work than it
+  took to send. A multicast group is the one place on this path where bytes
+  arrive from an unauthenticated source.
+
 ## [0.5.0] — 2026-08-25
 
 - Telemetry can no longer evict captured protocol traffic from the MQTT

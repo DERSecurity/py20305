@@ -12,6 +12,11 @@
 # `docker logs` collect stderr either way.
 
 server:
+  # Omit this to have the client locate a server on the local network by
+  # DNS-SD query at startup, which is what IEEE 2030.5 6.9.2 asks a client to
+  # do. A utility server reached over the internet will never answer such a
+  # query -- multicast does not cross a router -- so name it here for that
+  # case, which is also what CSIP expects.
   url: https://server.example.com:8443
 
   # Standard servers publish DeviceCapability at /dcap. Override only if told to.
@@ -33,6 +38,46 @@ server:
   # poll cadence (three polls, at least an hour), which is what a healthy
   # deployment wants; set it only to override that.
   # fsa_stale_seconds: 3600
+
+# Locating a server on the local network. Only used when server.url above is
+# not set; a configured URL is an equally valid answer under 7.6 a).
+# discovery:
+#   enabled: true
+#
+#   # mdns is the transport IEEE 2030.5-2023 makes normative (.local domain).
+#   # xmdns is the 2018 transport (.site, site-local ff05::fb) and is
+#   # deprecated. `both` queries each in turn.
+#   transport: mdns
+#
+#   timeout_seconds: 3.0
+#
+#   # Retrying a query that found nothing follows the `connection` block
+#   # below, the same as retrying a connection that failed.
+#
+#   # Ask about one function set instead, using a 7.5 Table 17 subtype string.
+#   # Unset asks for this client's own EndDevice first, then for any server.
+#   # subtype: derp
+#
+#   # Which interface to query from on a multi-homed host: an address for
+#   # IPv4, an interface name for IPv6.
+#   # interface: 192.168.1.10
+
+# Announcing this client on the local network, so an inventory tool or a
+# commissioning laptop on the same segment can find it. Off by default, and
+# outside IEEE 2030.5: the standard has servers advertise and clients query.
+# The records carry this client's LFDI and SFDI, so anything on the segment
+# can inventory clients by their utility identity.
+# advertise:
+#   transport: mdns          # mdns | xmdns | both | off
+#
+#   # Deliberately not _smartenergy._tcp: this is not an IEEE 2030.5 server,
+#   # and claiming that name would make conformant clients try to read a
+#   # DeviceCapability resource it does not serve.
+#   service: _py20305._tcp
+#
+#   # The port to advertise. Unset names the management API when enabled,
+#   # otherwise the notification server, and announces nothing when neither is.
+#   # port: 8080
 
 tls:
   # The LFDI derived from this certificate is what the utility registers.

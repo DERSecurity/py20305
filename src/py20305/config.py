@@ -27,6 +27,7 @@ from pydantic import (
     model_validator,
 )
 
+from py20305.client.dnssd.wire import DEFAULT_SERVICE, validate_service, validate_subtype
 from py20305.connectors.config import DeviceConfig
 from py20305.forwarders.config import ForwarderConfig
 
@@ -56,7 +57,14 @@ class _Strict(BaseModel):
 class ServerConfig(_Strict):
     """The IEEE 2030.5 server this client talks to."""
 
-    url: str = Field(description="Base URL of the server, e.g. https://server.example.com:8443")
+    url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL of the server, e.g. https://server.example.com:8443. Omit it to "
+            "have the client locate a server by DNS-SD query at startup, which is what "
+            "IEEE 2030.5 §6.9.2 asks a client to do; `discovery` then has to be enabled."
+        ),
+    )
 
     dcap_path: str = Field(
         default="/dcap",
@@ -90,7 +98,7 @@ class ServerConfig(_Strict):
 
     @field_validator("url")
     @classmethod
-    def _must_be_a_usable_https_url(cls, v: str) -> str:
+    def _must_be_a_usable_https_url(cls, v: str | None) -> str | None:
         """Reject an unusable URL at load rather than at handshake.
 
         IEEE 2030.5 is mutual TLS throughout, so a plain http:// URL cannot
@@ -99,12 +107,166 @@ class ServerConfig(_Strict):
         inside the HTTP client, outside this module's error handling and
         looking like the server is down.
         """
+        if v is None:
+            return None
         parsed = urlparse(v)
         if parsed.scheme != "https":
             raise ValueError(f"must be an https:// URL (IEEE 2030.5 requires TLS), got {v!r}")
         if not parsed.hostname:
             raise ValueError(f"must include a host, got {v!r}")
         return v.rstrip("/")
+
+
+class DiscoveryConfig(_Strict):
+    """Locate an IEEE 2030.5 server by DNS-SD query, per Clause 7.
+
+    On by default because the standard puts it on the client: §6.9.2 says
+    "Clients SHALL locate local services by performing DNS service discovery
+    (DNS-SD) queries to the local network." It only runs when no `server.url`
+    is configured, though, because §7.6 a) lists "use known URI(s) to
+    DeviceCapability resource(s) of interest" as an equally valid way to find
+    a server, and an operator who named one has already answered the question.
+
+    Retrying a query that found nothing is governed by the `connection` block,
+    the same as retrying a connection that failed. A client that starts before
+    its server is on the network and a client whose server is briefly down are
+    the same situation to whoever set that policy.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Locate a server by DNS-SD query when no server.url is set. Turning this "
+            "off makes server.url required."
+        ),
+    )
+    transport: Literal["mdns", "xmdns", "both"] = Field(
+        default="mdns",
+        description=(
+            "Which multicast transport to query over. mdns is normative in "
+            "IEEE 2030.5-2023 (.local); xmdns is the 2018 transport (.site) and is "
+            "deprecated; both queries each in turn."
+        ),
+    )
+    timeout_seconds: float = Field(
+        default=3.0,
+        gt=0,
+        le=60,
+        description="How long to listen for answers, per transport.",
+    )
+    subtype: str | None = Field(
+        default=None,
+        description=(
+            "Narrow the query to one function set using a IEEE 2030.5 §7.5 Table 17 "
+            "subtype, such as `derp`. Unset asks for the client's own EndDevice first "
+            "and then for any server, which is the sequence Annex C describes."
+        ),
+    )
+    interface: str | None = Field(
+        default=None,
+        description=(
+            "Interface to query from -- an address for IPv4, a name for IPv6. Unset "
+            "uses the route to the multicast group, which on a gateway with both a "
+            "utility uplink and a device LAN may not be the intended one."
+        ),
+    )
+    @field_validator("subtype")
+    @classmethod
+    def _subtype_is_one_label(cls, v: str | None) -> str | None:
+        """§7.5: a subtype string is one DNS label and does not start with `_`."""
+        if v is None:
+            return v
+        try:
+            return validate_subtype(v)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
+
+class AdvertiseConfig(_Strict):
+    """Announce this client on the local network over multicast DNS-SD.
+
+    IEEE 2030.5 §7.1 defines two multicast transports and the editions differ
+    over which is normative: the 2018 edition on xmDNS (site-local
+    ``FF05::FB``, the ``.site`` domain) and the 2023 edition on plain mDNS
+    (link-local, ``.local``), where xmDNS is retained but deprecated. The
+    records themselves are identical either way, so the choice is a transport
+    rather than a format.
+    """
+
+    transport: Literal["mdns", "xmdns", "both", "off"] = Field(
+        default="off",
+        description=(
+            "Which multicast transport to announce on. mdns uses the .local domain "
+            "and xmdns the .site one, both announces on each, and off announces "
+            "nothing. Off by default: announcing is not part of IEEE 2030.5, and it "
+            "publishes this client's LFDI and SFDI to everything on the segment."
+        ),
+    )
+    service: str = Field(
+        default=DEFAULT_SERVICE,
+        description=(
+            "The DNS-SD service to announce under. The default is deliberately not "
+            "the registered _smartenergy._tcp: this client is not an IEEE 2030.5 "
+            "server, and claiming that name would have conformant clients try to "
+            "read a DeviceCapability resource it does not serve."
+        ),
+    )
+    port: int | None = Field(
+        default=None,
+        gt=0,
+        le=65535,
+        description=(
+            "The TCP port to advertise. Unset advertises the management API when it "
+            "is enabled, otherwise the notification server, and announces nothing "
+            "when neither is -- a service record has to point at something."
+        ),
+    )
+    instance: str | None = Field(
+        default=None,
+        description=(
+            "Override the instance name. The default ends with this client's SFDI, "
+            "which IEEE 2030.5 §7.2 gives as the way to keep the name unique; set "
+            "this only when two clients share one certificate."
+        ),
+    )
+    interface: str | None = Field(
+        default=None,
+        description=(
+            "Interface to announce from -- an address for IPv4, a name for IPv6. "
+            "Unset uses the route to the multicast group, which on a gateway with "
+            "both a utility uplink and a device LAN may not be the intended one."
+        ),
+    )
+    txt: dict[str, str] = Field(
+        default_factory=dict,
+        description="Additional TXT record keys to publish alongside the defaults.",
+    )
+
+    @field_validator("service")
+    @classmethod
+    def _must_be_a_dns_sd_service(cls, v: str) -> str:
+        """Reject a malformed service name at load rather than at announcement.
+
+        Deferring it would surface as a name nothing ever answers, which looks
+        like a network fault rather than a typo in this field.
+        """
+        try:
+            validate_service(v)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        return v
+
+    @field_validator("instance")
+    @classmethod
+    def _instance_fits_a_label(cls, v: str | None) -> str | None:
+        """§7.2: an instance label is up to 63 bytes of UTF-8."""
+        if v is None:
+            return v
+        if not v:
+            raise ValueError("instance must not be empty")
+        if len(v.encode("utf-8")) > 63:
+            raise ValueError(f"instance {v!r} is longer than 63 bytes (IEEE 2030.5 §7.2)")
+        return v
 
 
 class TlsFileConfig(_Strict):
@@ -277,6 +439,8 @@ class ClientConfig(_Strict):
     connection: ConnectionConfig = Field(default_factory=ConnectionConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     subscription: SubscriptionConfig = Field(default_factory=SubscriptionConfig)
+    discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
+    advertise: AdvertiseConfig = Field(default_factory=AdvertiseConfig)
     forwarders: ForwarderConfig | None = Field(
         default=None,
         description=(
@@ -325,6 +489,21 @@ class ClientConfig(_Strict):
                 raise ValueError(f"duplicate device lfdi {device.lfdi!r}")
             seen.add(lfdi)
         return devices
+
+    @model_validator(mode="after")
+    def _a_server_has_to_be_findable(self) -> ClientConfig:
+        """Either name a server or leave discovery able to find one.
+
+        With neither, the client has no way to reach anything and would fail
+        at the first connect attempt, which reads as an unreachable server
+        rather than as the configuration gap it is.
+        """
+        if self.server.url is None and not self.discovery.enabled:
+            raise ValueError(
+                "set server.url, or leave discovery.enabled on so the client can "
+                "locate a server by DNS-SD query (IEEE 2030.5 §6.9.2)"
+            )
+        return self
 
     def resolve_paths(self, base: Path) -> ClientConfig:
         """Return a copy with relative certificate paths resolved against ``base``.
