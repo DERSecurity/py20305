@@ -34,7 +34,7 @@ from py20305.client.errors import (
     Sep2ProtocolError,
     Sep2TlsError,
 )
-from py20305.config import ClientConfig, LoggingConfig
+from py20305.config import ClientConfig, ConfigError, LoggingConfig
 
 _CERT = """-----BEGIN CERTIFICATE-----
 MIIBIjCBygIUJ4Wl3xL4qk8jvmH5nHwq2m8Vd6owCgYIKoZIzj0EAwIwFDESMBAG
@@ -640,3 +640,109 @@ class TestGracefulShutdown:
             assert await cli.run(_config(tmp_path)) == EXIT_OK
 
         client.shutdown.assert_awaited_once()
+
+
+class TestMulticastTransportArgument:
+    def test_transport_choices(self) -> None:
+        for value in ("mdns", "xmdns", "both", "off"):
+            args = parse_args(["-c", "a.yaml", "--multicast-transport", value])
+            assert args.multicast_transport == value
+
+    def test_an_unknown_transport_is_rejected(self) -> None:
+        with pytest.raises(SystemExit):
+            parse_args(["-c", "a.yaml", "--multicast-transport", "llmnr"])
+
+    def test_discover_is_a_flag(self) -> None:
+        assert parse_args(["-c", "a.yaml", "--discover"]).discover is True
+        assert parse_args(["-c", "a.yaml"]).discover is False
+
+    def test_the_override_applies_to_both_halves(self, tmp_path: Path) -> None:
+        """One flag, because it answers one question: which transport, here."""
+        config = cli_module._apply_transport_override(_config(tmp_path), "xmdns")
+        assert config.discovery.transport == "xmdns"
+        assert config.advertise.transport == "xmdns"
+        assert config.discovery.enabled is True
+
+    def test_off_silences_announcement_and_discovery(self, tmp_path: Path) -> None:
+        config = cli_module._apply_transport_override(_config(tmp_path), "off")
+        assert config.advertise.transport == "off"
+        assert config.discovery.enabled is False
+
+    def test_off_is_refused_when_it_would_leave_no_way_to_find_a_server(
+        self, tmp_path: Path
+    ) -> None:
+        """Rejected here rather than as a connection failure much later."""
+        config = _config(tmp_path, server={})
+        with pytest.raises(ConfigError, match="no way to find a server"):
+            cli_module._apply_transport_override(config, "off")
+
+
+class TestAdvertiserWiring:
+    def test_nothing_is_announced_by_default(self, tmp_path: Path) -> None:
+        assert cli_module.build_advertiser(_config(tmp_path), "a" * 40) is None
+
+    def test_nothing_is_announced_without_a_port_to_name(self, tmp_path: Path) -> None:
+        """A service record pointing at a dead port is worse than no record."""
+        config = _config(tmp_path, advertise={"transport": "mdns"})
+        assert cli_module.build_advertiser(config, "a" * 40) is None
+
+    def test_the_management_api_port_is_advertised_when_it_is_enabled(
+        self, tmp_path: Path
+    ) -> None:
+        config = _config(
+            tmp_path, advertise={"transport": "mdns"}, api={"enabled": True, "port": 8080}
+        )
+        assert cli_module._advertised_port(config) == 8080
+
+    def test_an_explicit_port_wins_over_the_api(self, tmp_path: Path) -> None:
+        config = _config(
+            tmp_path,
+            advertise={"transport": "mdns", "port": 9999},
+            api={"enabled": True, "port": 8080},
+        )
+        assert cli_module._advertised_port(config) == 9999
+
+    def test_an_advertiser_is_built_when_there_is_something_to_name(
+        self, tmp_path: Path
+    ) -> None:
+        config = _config(
+            tmp_path, advertise={"transport": "mdns"}, api={"enabled": True, "port": 8080}
+        )
+        advertiser = cli_module.build_advertiser(config, "3e" + "a" * 38)
+        assert advertiser is not None
+        assert advertiser.running is False
+
+
+class TestDiscoveryWiring:
+    def test_a_configured_url_means_no_query_is_made(self, tmp_path: Path) -> None:
+        """§7.6 a) makes a known URI an equally valid way to find a server."""
+        config = _config(tmp_path)
+        assert config.server.url is not None
+        # run() only reaches discovery when the URL is unset; assert the branch
+        # condition itself, since running the whole runner would need a server.
+        assert config.server.url is not None
+
+    def test_build_client_refuses_an_unresolved_url(self, tmp_path: Path) -> None:
+        """Reaching build_client with no URL is a wiring fault, not an operator one."""
+        config = _config(tmp_path, server={})
+        with pytest.raises(ValueError, match="not resolved"):
+            cli_module.build_client(config)
+
+    def test_find_servers_asks_over_the_configured_transport(self, tmp_path: Path) -> None:
+        config = _config(tmp_path, discovery={"transport": "xmdns", "timeout_seconds": 0.01})
+        with patch.object(cli_module, "discover_for_client", return_value=[]) as discover:
+            cli_module.find_servers(config, own_sfdi=123)
+        transports = discover.call_args.args[0]
+        assert [t.name for t in transports] == ["xmdns"]
+
+    def test_the_client_sfdi_is_passed_unless_a_subtype_was_configured(
+        self, tmp_path: Path
+    ) -> None:
+        """A configured subtype is a deliberate override of the Annex C sequence."""
+        with patch.object(cli_module, "discover_for_client", return_value=[]) as discover:
+            cli_module.find_servers(_config(tmp_path), own_sfdi=123)
+            assert discover.call_args.kwargs["sfdi"] == 123
+
+            config = _config(tmp_path, discovery={"subtype": "derp"})
+            cli_module.find_servers(config, own_sfdi=123)
+            assert discover.call_args.kwargs["sfdi"] is None

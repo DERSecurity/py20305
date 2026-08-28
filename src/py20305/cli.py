@@ -30,6 +30,13 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from py20305.client import CsipClient, TlsConfig
+from py20305.client.dnssd import (
+    DiscoveredServer,
+    MulticastAdvertiser,
+    build_advertisement,
+    discover_for_client,
+    transports_for,
+)
 from py20305.client.errors import (
     Sep2ConnectionError,
     Sep2Error,
@@ -39,7 +46,7 @@ from py20305.config import ClientConfig, ConfigError, load_config
 from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
 from py20305.connectors.dispatcher import ConnectorDispatcher
 from py20305.connectors.registry import ConnectorConfigRegistry
-from py20305.security import compute_cert_fingerprint, compute_lfdi
+from py20305.security import compute_cert_fingerprint, compute_lfdi, compute_sfdi
 from py20305.version_info import get_package_version, get_version_string
 
 if TYPE_CHECKING:
@@ -122,12 +129,133 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Override the configured log level.",
     )
+    parser.add_argument(
+        "--discover",
+        action="store_true",
+        help=(
+            "Query the local network for IEEE 2030.5 servers, print what answers, "
+            "then exit. Does not connect to anything."
+        ),
+    )
+    parser.add_argument(
+        "--multicast-transport",
+        choices=["mdns", "xmdns", "both", "off"],
+        help=(
+            "Multicast transport for both discovery and announcement: mdns for "
+            "IEEE 2030.5-2023 (.local), xmdns for IEEE 2030.5-2018 (.site), both, or "
+            "off. Overrides discovery.transport and advertise.transport."
+        ),
+    )
     parser.add_argument("--version", action="version", version=get_version_string())
     return parser.parse_args(argv)
 
 
+def _apply_transport_override(config: ClientConfig, selection: str) -> ClientConfig:
+    """Apply --multicast-transport to both the query and the announce side.
+
+    One flag for both because they are one question: which multicast transport
+    does this client speak on this network. ``off`` silences both, which makes
+    a configured ``server.url`` the only way left to reach a server -- so that
+    combination is rejected here rather than at the first failed connect.
+    """
+    discovery = config.discovery.model_copy(
+        update=(
+            {"enabled": False}
+            if selection == "off"
+            else {"enabled": True, "transport": selection}
+        )
+    )
+    if config.server.url is None and not discovery.enabled:
+        raise ConfigError(
+            "--multicast-transport off leaves no way to find a server: "
+            "set server.url in the configuration, or choose a transport"
+        )
+    return config.model_copy(
+        update={
+            "discovery": discovery,
+            "advertise": config.advertise.model_copy(update={"transport": selection}),
+        }
+    )
+
+
+def find_servers(config: ClientConfig, own_sfdi: int | None) -> list[DiscoveredServer]:
+    """Query the local network for IEEE 2030.5 servers (IEEE 2030.5 §6.9.2).
+
+    Blocking, and called from a thread by the runner. The sockets underneath
+    are plain blocking sockets on purpose: multicast behavior is the part that
+    differs most between platforms, and keeping it out of the event loop keeps
+    those differences away from the protocol client.
+    """
+    transports = transports_for(config.discovery.transport)
+    return discover_for_client(
+        transports,
+        sfdi=own_sfdi if config.discovery.subtype is None else None,
+        timeout=config.discovery.timeout_seconds,
+        interface=config.discovery.interface,
+    )
+
+
+def _describe(server: DiscoveredServer) -> str:
+    """One line naming a discovered server, for an operator reading a log."""
+    edition = " [IEEE 2030.5-2018 schema]" if server.is_2018 else ""
+    return f"{server.dcap_url} ({server.instance} via {server.transport}){edition}"
+
+
+async def _discover_server_url(
+    config: ClientConfig, own_sfdi: int, stop: asyncio.Event
+) -> str | None:
+    """Locate a server, retrying on the connection backoff until one answers.
+
+    Returns None only when asked to stop, or when retrying is off and nothing
+    answered. Retrying matters more here than it looks: a client and its
+    server often boot together, and a client that gave up on the first silent
+    query would be restarted by its supervisor into exactly the same race.
+    """
+    delay = config.connection.initial_delay_seconds
+    attempts = 0
+    while not stop.is_set():
+        attempts += 1
+        servers = await asyncio.to_thread(find_servers, config, own_sfdi)
+        if servers:
+            for server in servers:
+                logger.info("discovered %s", _describe(server))
+            if len(servers) > 1:
+                # Not an error: §7.6 c) leaves choosing among discovered
+                # servers to the client, and a network may legitimately carry
+                # several. Saying which one was taken is what keeps that
+                # choice visible rather than arbitrary-looking.
+                logger.info(
+                    "%d servers answered; using the first, %s",
+                    len(servers),
+                    servers[0].instance,
+                )
+            return servers[0].base_url
+
+        if not config.discovery.retry_until_found:
+            return None
+        if config.connection.max_attempts and attempts >= config.connection.max_attempts:
+            logger.error("no IEEE 2030.5 server answered after %d attempts", attempts)
+            return None
+
+        logger.warning(
+            "no IEEE 2030.5 server answered on %s; retrying in %.0fs",
+            config.discovery.transport,
+            delay,
+        )
+        if await _sleep_or_stop(delay, stop):
+            return None
+        delay = min(delay * config.connection.backoff_factor, config.connection.max_delay_seconds)
+    return None
+
+
 def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
     """Construct a client from configuration, returning it and its own LFDI."""
+    # Resolved by discovery before this is reached whenever it was not
+    # configured, so an unset URL here is a wiring mistake rather than an
+    # operator one, and should not be reported as a connection failure.
+    if config.server.url is None:
+        raise ValueError("server.url was not resolved before the client was built")
+
     tls = TlsConfig(
         client_cert=config.tls.client_cert,
         client_key=config.tls.client_key,
@@ -253,6 +381,60 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
         client.http.set_schema_validator(str(config.forwarders.schema_dir))
     holder["client"] = client
     return client, own_lfdi
+
+
+def build_advertiser(config: ClientConfig, own_lfdi: str) -> MulticastAdvertiser | None:
+    """Build the local-network advertiser, or None when nothing is announced.
+
+    Returns None both when the operator turned announcement off and when there
+    is no local service to name. A DNS-SD service record has to carry a port,
+    and pointing one at a port nothing listens on advertises a connection that
+    will always be refused -- worse than staying quiet, because it is a fault
+    the finder has to diagnose rather than an absence they can see.
+    """
+    transports = transports_for(config.advertise.transport)
+    if not transports:
+        return None
+
+    port = _advertised_port(config)
+    if port is None:
+        logger.info(
+            "not announcing this client: advertise.transport is %r but nothing local "
+            "is being served. Enable the management API or subscriptions, or set "
+            "advertise.port to name the service to advertise.",
+            config.advertise.transport,
+        )
+        return None
+
+    advertisement = build_advertisement(
+        lfdi=own_lfdi,
+        sfdi=compute_sfdi(own_lfdi),
+        port=port,
+        service=config.advertise.service,
+        instance=config.advertise.instance,
+        version=get_package_version(),
+        extra_txt=config.advertise.txt,
+    )
+    return MulticastAdvertiser(
+        advertisement, transports, interface=config.advertise.interface
+    )
+
+
+def _advertised_port(config: ClientConfig) -> int | None:
+    """Which local port the announcement should name.
+
+    An explicit setting wins. Otherwise the management API, which is the
+    interface someone looking for this client on the network is looking for;
+    the notification server only as a fallback, because it exists to be given
+    to one server rather than found by anyone.
+    """
+    if config.advertise.port is not None:
+        return config.advertise.port
+    if config.api.enabled:
+        return config.api.port
+    if config.subscription.enabled:
+        return config.subscription.notification_port
+    return None
 
 
 def build_forwarder(config: ClientConfig, own_lfdi: str) -> ForwarderManager | None:
@@ -472,16 +654,45 @@ def _install_signal_handlers(stop: asyncio.Event) -> None:
 
 async def run(config: ClientConfig) -> int:
     """Run until stopped, returning the process exit code."""
-    client, own_lfdi = build_client(config)
-    logger.info("%s", get_version_string())
-    logger.info("client LFDI: %s", own_lfdi)
-    logger.info("server: %s", config.server.url)
-    logger.info("devices: %d configured", len(config.devices))
-
     stop = asyncio.Event()
     reconnect = asyncio.Event()
     connection = ConnectionState()
+    # Installed before discovery, not after, so Ctrl-C during a retrying
+    # discovery stops the process rather than being ignored until it finds
+    # something -- which, on a network with no server, is never.
     _install_signal_handlers(stop)
+
+    logger.info("%s", get_version_string())
+
+    if config.server.url is None:
+        # The certificate is read here rather than at the top because the SFDI
+        # derived from it is only needed to ask for this client's own
+        # EndDevice. build_client reads it on every other path.
+        connection.phase = "discovering"
+        logger.info(
+            "no server configured; locating one by DNS-SD query over %s "
+            "(IEEE 2030.5 §6.9.2)",
+            config.discovery.transport,
+        )
+        own_sfdi = compute_sfdi(compute_lfdi(config.tls.client_cert.read_text()))
+        url = await _discover_server_url(config, own_sfdi, stop)
+        if url is None:
+            if stop.is_set():
+                return EXIT_OK
+            logger.error(
+                "no IEEE 2030.5 server was found on the local network. Set server.url "
+                "if the server is not on this network, which is the usual case for a "
+                "utility server and what CSIP expects."
+            )
+            return EXIT_CONNECT_FAILED
+        config = config.model_copy(
+            update={"server": config.server.model_copy(update={"url": url})}
+        )
+
+    client, own_lfdi = build_client(config)
+    logger.info("client LFDI: %s", own_lfdi)
+    logger.info("server: %s", config.server.url)
+    logger.info("devices: %d configured", len(config.devices))
 
     # The try starts before the connect attempt, not after it. A client that
     # never reached the server still opened an HTTP session, and returning
@@ -490,6 +701,13 @@ async def run(config: ClientConfig) -> int:
     api_task: asyncio.Task[None] | None = None
     api_service: ClientAPIService | None = None
     telemetry: TelemetryCoordinator | None = None
+    # Started before the connect attempt, and on purpose: announcing does not
+    # depend on the utility server being reachable, and a client that only
+    # became findable once it had connected would be invisible in exactly the
+    # situation someone goes looking for it on the network.
+    advertiser = build_advertiser(config, own_lfdi)
+    if advertiser is not None:
+        advertiser.start()
     # Started before the connect attempt, so the exchanges of a connection that
     # never succeeds are forwarded too -- those are the ones worth having.
     forwarder = client.http.forwarder
@@ -614,6 +832,11 @@ async def run(config: ClientConfig) -> int:
         # the transport drains rather than after it has stopped accepting.
         if forwarder is not None:
             await forwarder.stop()
+        if advertiser is not None:
+            # In a thread: stop() sends the goodbye records and joins, and
+            # blocking the event loop for that would delay nothing else, since
+            # everything above it has already been shut down.
+            await asyncio.to_thread(advertiser.stop)
         logger.info("stopped")
 
 
@@ -805,6 +1028,62 @@ async def _serve_api(
     return asyncio.create_task(server.serve(), name="management-api"), service
 
 
+def _report_discovery(config: ClientConfig) -> int:
+    """Print the servers a DNS-SD query finds, and exit.
+
+    A diagnostic, so it says what it asked as well as what answered: on a
+    network with no server, "nothing answered" and "the query never left the
+    host" look identical, and an operator needs to tell them apart.
+    """
+    try:
+        own_sfdi = compute_sfdi(compute_lfdi(config.tls.client_cert.read_text()))
+    except (OSError, ValueError) as exc:
+        print(f"error: could not read the client certificate: {exc}", file=sys.stderr)
+        return EXIT_CONFIG_ERROR
+
+    transports = transports_for(config.discovery.transport)
+    if not transports:
+        print("discovery is off; nothing to query", file=sys.stderr)
+        return EXIT_CONFIG_ERROR
+
+    for transport in transports:
+        print(
+            f"querying _smartenergy._tcp.{transport.domain.decode()} over "
+            f"{transport.name} ({', '.join(transport.groups)}), "
+            f"{config.discovery.timeout_seconds:.0f}s"
+        )
+    print(f"asking first for this client's own EndDevice, SFDI {own_sfdi}")
+    print()
+
+    servers = find_servers(config, own_sfdi)
+    if not servers:
+        print("no IEEE 2030.5 server answered.")
+        print()
+        print(
+            "That is the expected result unless a server is on this same network "
+            "segment: multicast DNS does not cross a router, so a utility server "
+            "reached over the internet will never answer. Configure server.url for "
+            "that case, which is also what CSIP specifies."
+        )
+        return EXIT_OK
+
+    print(f"{len(servers)} server(s):")
+    for server in servers:
+        print()
+        print(f"  {server.instance}")
+        print(f"    DeviceCapability : {server.dcap_url}")
+        print(f"    transport        : {server.transport}")
+        print(f"    schema level     : {server.level} "
+              f"({'IEEE 2030.5-2018' if server.is_2018 else 'IEEE 2030.5-2023'})")
+        if server.function_set_path:
+            print(f"    function set     : {server.function_set_path}")
+        described = ("txtvers", "dcap", "level", "path")
+        extra = {k: v for k, v in server.txt.items() if k not in described}
+        if extra:
+            print(f"    other TXT keys   : {extra}")
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns the process exit code."""
     args = parse_args(argv)
@@ -820,6 +1099,12 @@ def main(argv: list[str] | None = None) -> int:
         config = config.model_copy(
             update={"logging": config.logging.model_copy(update={"level": args.log_level})}
         )
+    if args.multicast_transport:
+        try:
+            config = _apply_transport_override(config, args.multicast_transport)
+        except ConfigError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_CONFIG_ERROR
 
     try:
         setup_logging(config.logging)
@@ -839,11 +1124,21 @@ def main(argv: list[str] | None = None) -> int:
             # and should report as one rather than as a traceback.
             print(f"error: could not read the client certificate: {exc}", file=sys.stderr)
             return EXIT_CONFIG_ERROR
+        server = config.server.url or (
+            f"(discovered at startup over {config.discovery.transport})"
+        )
         print(f"configuration OK: {args.config}")
-        print(f"  server      : {config.server.url}")
+        print(f"  server      : {server}")
         print(f"  client LFDI : {lfdi}")
+        print(f"  client SFDI : {compute_sfdi(lfdi)}")
         print(f"  devices     : {len(config.devices)}")
+        finding = f"on, {config.discovery.transport}" if config.discovery.enabled else "off"
+        print(f"  discovery   : {finding}")
+        print(f"  announcing  : {config.advertise.transport}")
         return EXIT_OK
+
+    if args.discover:
+        return _report_discovery(config)
 
     try:
         return asyncio.run(run(config))
