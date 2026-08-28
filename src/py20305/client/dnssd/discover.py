@@ -103,6 +103,14 @@ _MAX_DATAGRAM = 9000
 #: which §7.4 gives different meanings and which deserve different messages.
 _INVALID_PORT = -1
 
+#: How many instances one reply may pull into the second round. A single
+#: datagram can name hundreds of instances -- compression makes that cheap to
+#: write -- and each one costs a query multicast to the whole group, so an
+#: uncapped second round turns one packet from an unauthenticated source into
+#: a burst aimed at the link. A real segment carries a handful of servers, and
+#: §7.6 c) has the client choose one of them in any case.
+_MAX_INSTANCES = 16
+
 
 @dataclass(frozen=True)
 class DiscoveredServer:
@@ -129,8 +137,9 @@ class DiscoveredServer:
     @property
     def dcap_path(self) -> str:
         """Path of the DeviceCapability resource, from the TXT ``dcap`` key."""
-        # Guaranteed present and non-empty by server_from_records, which
-        # discards the record otherwise; the fallback keeps this total.
+        # Guaranteed present, non-empty and rooted at "/" by
+        # server_from_records, which discards the record otherwise; the
+        # fallback keeps this total.
         return self.txt.get("dcap") or "/dcap"
 
     @property
@@ -247,6 +256,20 @@ def server_from_records(
         if not txt.get(key):
             logger.debug("%s: ignoring, TXT key %r is absent or empty", name, key)
             return None
+
+    # The dcap value is remote text that becomes part of a URL this client
+    # then requests, so it has to be a path and not something that can replace
+    # the host: "http://elsewhere/x" appended to a base URL is a different
+    # server. §7.4 gives dcap as "the path of the DeviceCapability resource",
+    # and a path starts with a slash. A leading "//" is refused with it,
+    # because that is a protocol-relative URL and names an authority the
+    # moment anything resolves it rather than concatenating it.
+    dcap = txt["dcap"]
+    if dcap is None or not dcap.startswith("/") or dcap.startswith("//"):
+        logger.warning(
+            "%s: ignoring, the dcap TXT key %r is not a path rooted at '/'", name, dcap
+        )
+        return None
 
     port = _https_port(txt)
     if port is None:
@@ -557,6 +580,15 @@ def discover(
     instances = _instances(_decode_all(replies, {ident}), service)
     if not instances:
         return []
+    if len(instances) > _MAX_INSTANCES:
+        logger.warning(
+            "%s named %d instances; considering the first %d. A segment with that many "
+            "IEEE 2030.5 servers on it is unusual enough to be worth looking at.",
+            transport.name,
+            len(instances),
+            _MAX_INSTANCES,
+        )
+        instances = instances[:_MAX_INSTANCES]
 
     servers: dict[tuple[bytes, ...], DiscoveredServer] = {}
     unresolved: list[tuple[bytes, ...]] = []

@@ -13,11 +13,14 @@ connection to a server that offered TLS.
 
 from __future__ import annotations
 
+import socket
 import struct
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from py20305.client.dnssd import advertise as advertise_module
 from py20305.client.dnssd.advertise import (
     ServiceAdvertisement,
     _Binding,
@@ -832,3 +835,96 @@ class TestMulticastTtl:
         """RFC 6762 §11 fixes it at 255; a responder may discard anything else."""
         assert MDNS.hop_limit == 255
         assert XMDNS.hop_limit == 255
+
+
+class TestDcapPath:
+    """The dcap key becomes part of a URL, so it has to be a path."""
+
+    def test_a_non_default_path_survives_discovery(self) -> None:
+        txt = {"txtvers": "1", "dcap": "/smartenergy/dcap", "https": "8443", "level": "-S2"}
+        server = discovered(server_records(txt=txt))[0]
+        assert server.dcap_path == "/smartenergy/dcap"
+        assert server.dcap_url == "https://192.168.1.40:8443/smartenergy/dcap"
+
+    @pytest.mark.parametrize(
+        "dcap",
+        ["http://elsewhere/dcap", "https://elsewhere/dcap", "dcap", "//elsewhere/dcap"],
+    )
+    def test_a_dcap_that_is_not_a_rooted_path_is_discarded(self, dcap: str) -> None:
+        """Anything but a leading slash lets remote text replace the host."""
+        txt = {"txtvers": "1", "dcap": dcap, "https": "8443", "level": "-S2"}
+        assert discovered(server_records(txt=txt)) == []
+
+
+class TestSecondRoundFanOut:
+    def test_a_reply_naming_many_instances_is_capped(self) -> None:
+        """One packet must not turn into an unbounded burst on the group."""
+        instances = 200
+        records = [
+            Record(
+                (*SERVICE, b"local"),
+                TYPE_PTR,
+                4500,
+                encode_name((f"srv-{n}".encode(), *SERVICE, b"local")),
+                unique=False,
+            )
+            for n in range(instances)
+        ]
+        rounds: list[int] = []
+
+        class CountingSource:
+            def exchange(self, transport, queries, timeout, interface):  # noqa: ANN001, ANN201
+                rounds.append(len(queries))
+                if len(rounds) > 1:
+                    return []
+                ident = int.from_bytes(queries[0][0:2], "big")
+                return [(response_with_ident(records, ident), "192.168.1.40")]
+
+        discover(MDNS, timeout=0.02, source=CountingSource())
+        assert rounds[0] == 1
+        assert rounds[1] <= 16, (
+            f"{instances} named instances produced {rounds[1]} second-round queries"
+        )
+
+
+class TestGroupMembership:
+    """The join takes the configured interface, not just the send side.
+
+    Joining on the default interface while sending on the chosen one produces
+    a responder that announces where it was told to and listens somewhere
+    else, which presents as a responder that answers nothing.
+    """
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.options: list[tuple[int, int, object]] = []
+
+        def bind(self, address: object) -> None:  # noqa: ARG002
+            return None
+
+        def setsockopt(self, level: int, option: int, value: object) -> None:
+            self.options.append((level, option, value))
+
+    def _membership(self, group: str, transport, interface: str | None):  # noqa: ANN001, ANN202
+        sock = self.FakeSocket()
+        version = 6 if ":" in group else 4
+        assert advertise_module._bind_and_join(sock, group, transport, version, interface)
+        option = socket.IPV6_JOIN_GROUP if version == 6 else socket.IP_ADD_MEMBERSHIP
+        return next(value for _, opt, value in sock.options if opt == option)
+
+    def test_ipv4_joins_on_the_configured_address(self) -> None:
+        membership = self._membership("224.0.0.251", MDNS, "10.1.2.189")
+        assert membership == socket.inet_aton("224.0.0.251") + socket.inet_aton("10.1.2.189")
+
+    def test_ipv4_without_an_interface_joins_on_any(self) -> None:
+        membership = self._membership("224.0.0.251", MDNS, None)
+        assert membership == socket.inet_aton("224.0.0.251") + socket.inet_aton("0.0.0.0")
+
+    def test_ipv6_joins_on_the_configured_interface_index(self) -> None:
+        index, name = next(iter(socket.if_nameindex()))
+        membership = self._membership("ff02::fb", MDNS, name)
+        assert membership[16:] == index.to_bytes(4, sys.byteorder)
+
+    def test_ipv6_without_an_interface_joins_on_index_zero(self) -> None:
+        membership = self._membership("ff02::fb", MDNS, None)
+        assert membership[16:] == (0).to_bytes(4, sys.byteorder)

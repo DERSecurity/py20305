@@ -40,7 +40,30 @@ below says so explicitly.
 - A discovered server's schema extensibility level is reported, and 5.7 ties it
   to an edition: `S1` is IEEE 2030.5-2018 and `S2` is IEEE 2030.5-2023. That
   makes it the server's own statement about which edition it implements, which
-  is a better answer than asking an operator to know it.
+  is a better answer than asking an operator to know it -- so the client acts
+  on it, and a discovered `-S1` sets `server_2018_compat` where the
+  configuration has not. An explicit setting still wins either way, because an
+  operator who answered the question should not be overruled by a record
+  arriving off a multicast group.
+- The DeviceCapability path travels with the discovered URL. 7.4 gives the TXT
+  `dcap` key as the path of that resource, so a server advertising
+  `dcap=/smartenergy/dcap` is contacted there rather than at the configured
+  `server.dcap_path` -- without which a server not using `/dcap` is discovered,
+  logged correctly and then asked for a resource it does not serve. The value
+  must be a path rooted at `/`; an absolute URL, a bare word or a
+  protocol-relative `//host/x` is discarded, since it arrives unauthenticated
+  and becomes part of a URL this client then requests.
+- A single reply can name more instances than a segment plausibly holds, and
+  each name costs a follow-up query multicast to the whole group. The client
+  considers the first sixteen and logs what it dropped, so one packet from an
+  unauthenticated source cannot turn into a burst on the link.
+- `--discover` honors the switches that silence discovery. `discovery.enabled:
+  false` and `--multicast-transport off` now stop the diagnostic from querying,
+  rather than only stopping the client from querying at startup.
+- Announcement joins its multicast group on the configured `interface`, not
+  only sending on it. Joining on the default interface while sending on the
+  chosen one gives a responder that announces where it was told to and listens
+  somewhere else, which presents as one that answers nothing.
 - The client can announce itself on the local network, so an inventory tool, a
   commissioning laptop or a passive monitor on the same segment can find it
   without probing. Off by default. This is **not** part of IEEE 2030.5 and is

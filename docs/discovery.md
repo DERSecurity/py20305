@@ -50,7 +50,14 @@ asking first for this client's own EndDevice, SFDI 000001111114
 ```
 
 This queries and exits. It never connects, so it is safe to run against a
-production configuration.
+production configuration. It also honors the switches that silence discovery:
+with `discovery.enabled: false`, or under `--multicast-transport off`, it says
+so and sends nothing rather than querying on behalf of an operator who asked
+for quiet.
+
+A reply may name more instances than a segment plausibly holds, and each one
+named costs a follow-up query multicast to the whole group. The client
+considers the first sixteen and says so in the log when it drops the rest.
 
 ### What it asks for
 
@@ -78,7 +85,23 @@ of the §7.5 Table 17 strings such as `derp` or `mup`.
 The TXT record carries a `level` key, and §5.7 ties its value to an edition:
 `S1` is IEEE 2030.5-2018 and `S2` is IEEE 2030.5-2023. A discovered server
 therefore tells you which schema it implements, and `--discover` prints it.
-Set `server.server_2018_compat` to match.
+
+The client applies that answer itself: a discovered `-S1` sets
+`server_2018_compat` when the configuration has not set it. Setting it
+explicitly, either way, wins -- an operator who answered the question is not
+overruled by a record on the network.
+
+### Where DeviceCapability lives
+
+The TXT `dcap` key is the path of the server's DeviceCapability resource, and
+the client requests the discovered path rather than `server.dcap_path`. A
+server advertising `dcap=/smartenergy/dcap` is contacted there.
+
+The value has to be a path rooted at `/`, and a record whose `dcap` is
+anything else -- an absolute URL, a bare word, a protocol-relative `//host/x`
+-- is discarded. It arrives from an unauthenticated multicast group and
+becomes part of a URL this client then requests, so a value that could name a
+different host is not one to accept.
 
 ### mDNS or xmDNS
 
@@ -191,6 +214,12 @@ take an `interface` setting: an address for IPv4, an interface name for IPv6.
 discovery:
   interface: 192.168.1.10
 ```
+
+Announcement uses it for both directions: multicast leaves on that interface
+and the responder joins the group there too. Joining on one and sending on
+another gives a responder that announces where it was told to and hears
+queries somewhere else, which looks from outside like a responder that never
+answers.
 
 Announcement publishes only an address a receiver can actually connect to, so a
 host with no routable IPv6 address announces over IPv4 alone rather than

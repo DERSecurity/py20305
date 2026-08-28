@@ -205,9 +205,9 @@ def _describe(server: DiscoveredServer) -> str:
     return f"{server.dcap_url} ({server.instance} via {server.transport}){edition}"
 
 
-async def _discover_server_url(
+async def _discover_server(
     config: ClientConfig, own_sfdi: int, stop: asyncio.Event
-) -> str | None:
+) -> DiscoveredServer | None:
     """Locate a server, retrying on the connection backoff until one answers.
 
     Returns None only when asked to stop, or when the connection policy says to
@@ -239,7 +239,7 @@ async def _discover_server_url(
                     len(servers),
                     servers[0].instance,
                 )
-            return servers[0].base_url
+            return servers[0]
 
         exhausted = bool(config.connection.max_attempts) and (
             attempts >= config.connection.max_attempts
@@ -740,8 +740,8 @@ async def _run_client(
             config.discovery.transport,
         )
         own_sfdi = compute_sfdi(compute_lfdi(config.tls.client_cert.read_text()))
-        url = await _discover_server_url(config, own_sfdi, stop)
-        if url is None:
+        server = await _discover_server(config, own_sfdi, stop)
+        if server is None:
             if stop.is_set():
                 return EXIT_OK
             logger.error(
@@ -750,8 +750,22 @@ async def _run_client(
                 "utility server and what CSIP expects."
             )
             return EXIT_CONNECT_FAILED
+        # The path travels with the URL. The advertisement's `dcap` key is
+        # where the server says its DeviceCapability lives, and a server that
+        # does not use /dcap would otherwise be found, logged correctly, and
+        # then asked for a resource it does not serve.
+        discovered: dict[str, object] = {
+            "url": server.base_url,
+            "dcap_path": server.dcap_path,
+        }
+        # §5.7 ties the advertised extensibility level to an edition, so a
+        # server saying -S1 has answered the question `server_2018_compat`
+        # asks. An operator who set it has answered it themselves, and their
+        # answer wins.
+        if "server_2018_compat" not in config.server.model_fields_set:
+            discovered["server_2018_compat"] = server.is_2018
         config = config.model_copy(
-            update={"server": config.server.model_copy(update={"url": url})}
+            update={"server": config.server.model_copy(update=discovered)}
         )
 
     client, own_lfdi = build_client(config)
@@ -1094,10 +1108,19 @@ def _report_discovery(config: ClientConfig) -> int:
         print(f"error: could not read the client certificate: {exc}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
 
-    transports = transports_for(config.discovery.transport)
-    if not transports:
-        print("discovery is off; nothing to query", file=sys.stderr)
+    # `enabled` is the switch, not `transport`: `--multicast-transport off`
+    # and `discovery.enabled: false` both clear the former and leave the
+    # latter at its default, so reading the transport here would query on
+    # behalf of an operator who asked for silence.
+    if not config.discovery.enabled:
+        print(
+            "discovery is off (discovery.enabled is false, or "
+            "--multicast-transport off was given); nothing to query",
+            file=sys.stderr,
+        )
         return EXIT_CONFIG_ERROR
+
+    transports = transports_for(config.discovery.transport)
 
     for transport in transports:
         print(

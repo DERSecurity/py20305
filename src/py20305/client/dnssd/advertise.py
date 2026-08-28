@@ -22,6 +22,7 @@ import ipaddress
 import logging
 import select
 import socket
+import sys
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -291,15 +292,15 @@ class _GroupSocket:
 def _open_group_socket(
     group: str, transport: MulticastTransport, interface: str | None
 ) -> _GroupSocket | None:
-    """Bind to the mDNS port and join a group, falling back to send-only.
+    """Bind to the mDNS port and join a group. None if this group is unusable.
 
     The well-known port is shared. A host running its own responder already
     holds 5353, and the address-reuse options are what let both bind it -- that
     is how every mDNS implementation on a general-purpose host coexists with
-    the others. Where the platform refuses anyway, an ephemeral port still
-    reaches the group, so this client is announced even though it cannot answer
-    a later query. Announcing and then going quiet is worse than either, so the
-    fallback is taken rather than the whole transport abandoned.
+    the others. Where the platform refuses anyway there is nothing usable left
+    to fall back to: RFC 6762 §6 requires a response to be sent *from* 5353,
+    so a socket on any other port announces into silence. :func:`_bind_and_join`
+    reports the group unavailable instead, and the caller skips it.
     """
     version = ipaddress.ip_address(group).version
     family = socket.AF_INET6 if version == 6 else socket.AF_INET
@@ -324,7 +325,7 @@ def _open_group_socket(
         sock.close()
         return None
 
-    if not _bind_and_join(sock, group, transport, version):
+    if not _bind_and_join(sock, group, transport, version, interface):
         sock.close()
         return None
     return _GroupSocket(sock, group, transport.port)
@@ -357,9 +358,18 @@ def _set_multicast_options(
 
 
 def _bind_and_join(
-    sock: socket.socket, group: str, transport: MulticastTransport, version: int
+    sock: socket.socket,
+    group: str,
+    transport: MulticastTransport,
+    version: int,
+    interface: str | None,
 ) -> bool:
     """Bind the well-known port and join the group. False if this group is unusable.
+
+    The join takes ``interface`` as well, because a membership and a send are
+    separate settings: joining on the default interface while announcing on the
+    configured one gives a responder that publishes where it was told to and
+    listens somewhere else.
 
     There is no ephemeral-port fallback, because there is no such thing as a
     half-working responder here. RFC 6762 §6 requires an mDNS response to be
@@ -383,14 +393,24 @@ def _bind_and_join(
         )
         return False
 
+    # The membership takes the configured interface too, not just the send
+    # side. On a multi-homed host the two are separate settings, and joining on
+    # the default interface while sending on the chosen one produces a
+    # responder that announces where it was told to and hears queries
+    # somewhere else -- which looks like a responder that answers nothing.
     try:
         if version == 6:
-            membership = ipaddress.ip_address(group).packed + (0).to_bytes(4, "little")
+            index = socket.if_nametoindex(interface) if interface is not None else 0
+            # ipv6_mreq carries the interface index in host byte order. That
+            # was invisible while the index was always zero, and is not once
+            # a configured interface can make it something else.
+            membership = ipaddress.ip_address(group).packed + index.to_bytes(4, sys.byteorder)
             sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, membership)
         else:
-            membership = socket.inet_aton(group) + socket.inet_aton("0.0.0.0")
+            local = socket.inet_aton(interface if interface is not None else "0.0.0.0")
+            membership = socket.inet_aton(group) + local
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         logger.warning(
             "cannot announce on %s: bound UDP %d but could not join the group (%s)",
             group,
