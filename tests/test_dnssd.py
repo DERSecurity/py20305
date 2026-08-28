@@ -14,12 +14,15 @@ connection to a server that offered TLS.
 from __future__ import annotations
 
 import struct
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from py20305.client.dnssd.advertise import (
     ServiceAdvertisement,
+    _Binding,
     build_advertisement,
+    local_address_for,
     sfdi_label,
     validate_service,
 )
@@ -36,6 +39,7 @@ from py20305.client.dnssd.wire import (
     MDNS,
     TYPE_A,
     TYPE_AAAA,
+    TYPE_ANY,
     TYPE_PTR,
     TYPE_SRV,
     TYPE_TXT,
@@ -44,6 +48,7 @@ from py20305.client.dnssd.wire import (
     Question,
     Record,
     decode_message,
+    decode_ptr,
     decode_questions,
     decode_srv,
     decode_txt,
@@ -583,3 +588,247 @@ class TestAdvertisement:
         assert decode_txt(record_rdata(message, txt))["sfdi"] == "000000011111"
         srv = next(r for r in message.records if r.rtype == TYPE_SRV)
         assert decode_srv(message, srv)[0] == 8443
+
+
+# --------------------------------------------------------------------------
+# Name compression
+# --------------------------------------------------------------------------
+
+
+def compressed_response(ident: int, instance: bytes = b"127-edev-000001111114") -> bytes:
+    """A response whose SRV target is a compression pointer.
+
+    Hand-built rather than assembled from ``encode_name``, which never emits a
+    pointer. Real responders compress routinely, so without a fixture like this
+    every test in this file exercises an input shape the wire never carries.
+    """
+    instance_name = (instance, *SERVICE, b"local")
+    header = struct.pack("!HHHHHH", ident, 0x8400, 0, 3, 0, 0)
+    body = bytearray()
+
+    encoded_instance = encode_name(instance_name)
+    # PTR: the service name, answered with the instance name.
+    body += encode_name((*SERVICE, b"local"))
+    body += struct.pack("!HHIH", TYPE_PTR, 1, 4500, len(encoded_instance)) + encoded_instance
+
+    # SRV: target is a pointer back to the "local" label inside the PTR's
+    # rdata, which is where a real responder would point it.
+    local_offset = 12 + len(encode_name((*SERVICE, b"local"))) + 10 + len(encoded_instance) - 7
+    srv_rdata = struct.pack("!HHH", 0, 0, 80) + struct.pack("!H", 0xC000 | local_offset)
+    body += encoded_instance
+    body += struct.pack("!HHIH", TYPE_SRV, 0x8001, 4500, len(srv_rdata)) + srv_rdata
+
+    txt_rdata = encode_txt({"txtvers": "1", "dcap": "/dcap", "https": "8443", "level": "-S2"})
+    body += encoded_instance
+    body += struct.pack("!HHIH", TYPE_TXT, 0x8001, 4500, len(txt_rdata)) + txt_rdata
+    return header + bytes(body)
+
+
+class TestNameCompression:
+    """Responders compress names; the fixtures elsewhere in this file do not."""
+
+    def test_a_compressed_srv_target_decodes(self) -> None:
+        message = decode_message(compressed_response(0x1234))
+        srv = next(r for r in message.records if r.rtype == TYPE_SRV)
+        port, target = decode_srv(message, srv)
+        assert port == 80
+        assert target == (b"local",)
+
+    def test_a_server_advertised_with_compression_is_found(self) -> None:
+        """End to end: the one input shape the other tests never produce."""
+
+        class Compressed:
+            def exchange(self, transport, queries, timeout, interface):  # noqa: ANN001, ANN201
+                ident = int.from_bytes(queries[0][0:2], "big")
+                return [(compressed_response(ident), "192.168.1.40")]
+
+        servers = discover(MDNS, timeout=0.01, source=Compressed())
+        assert len(servers) == 1
+        # No address record, so the responder's own source address is used.
+        assert servers[0].dcap_url == "https://192.168.1.40:8443/dcap"
+
+    def test_the_second_round_asks_one_question_per_instance(self) -> None:
+        """Both records must come back in one message, or their compression
+        pointers would be read against a buffer they were not written for."""
+        sent: list[bytes] = []
+
+        class PtrOnlyThenFull:
+            """First round answers with a bare PTR; second round answers fully."""
+
+            def exchange(self, transport, queries, timeout, interface):  # noqa: ANN001, ANN201
+                sent.extend(queries)
+                ident = int.from_bytes(queries[0][0:2], "big")
+                if len(sent) == 1:
+                    ptr_only = [
+                        r for r in server_records() if r.rtype == TYPE_PTR
+                    ]
+                    return [(response_with_ident(ptr_only, ident), "192.168.1.40")]
+                return [(compressed_response(ident), "192.168.1.40")]
+
+        servers = discover(MDNS, timeout=0.02, source=PtrOnlyThenFull())
+        assert len(servers) == 1
+        # Two queries total: the PTR, then one ANY for the named instance.
+        assert len(sent) == 2
+        qtype = int.from_bytes(sent[1][-4:-2], "big")
+        assert qtype == TYPE_ANY, "the follow-up must be a single ANY question"
+
+
+class TestResponseRateLimits:
+    """Two limits with different reasons; both are pure given a clock reading."""
+
+    def binding(self) -> _Binding:
+        return _Binding(
+            socket=None,  # type: ignore[arg-type]
+            transport=MDNS,
+            addresses=("192.168.1.5",),
+            records=(),
+        )
+
+    def test_multicast_is_capped_at_one_per_second(self) -> None:
+        """RFC 6762 §6 states this as a MUST NOT."""
+        binding = self.binding()
+        assert binding.may_respond(unicast=False, now=100.0)
+        assert not binding.may_respond(unicast=False, now=100.5)
+        assert binding.may_respond(unicast=False, now=101.0)
+
+    def test_unicast_answers_are_bounded_but_not_to_one(self) -> None:
+        """A real querier needs one exchange; a spoofed source should not get many."""
+        binding = self.binding()
+        allowed = sum(binding.may_respond(unicast=True, now=100.0) for _ in range(50))
+        assert allowed == 10
+        # The window resets rather than blocking forever.
+        assert binding.may_respond(unicast=True, now=101.5)
+
+    def test_the_two_budgets_are_independent(self) -> None:
+        """Answering one host must not silence the group, or the reverse."""
+        binding = self.binding()
+        assert binding.may_respond(unicast=False, now=100.0)
+        assert binding.may_respond(unicast=True, now=100.1)
+        assert not binding.may_respond(unicast=False, now=100.2)
+
+
+class TestPublishedAddress:
+    """What goes into an A/AAAA record has to be something a receiver can dial."""
+
+    def _address(self, resolved: str) -> str | None:
+        """local_address_for, with the routing lookup stubbed."""
+        sock = MagicMock()
+        sock.__enter__ = lambda s: s
+        sock.__exit__ = lambda s, *a: None
+        sock.getsockname.return_value = (resolved, 0, 0, 0)
+        with patch("socket.socket", return_value=sock):
+            return local_address_for("ff02::fb")
+
+    def test_a_link_local_address_is_not_published(self) -> None:
+        """The discovery half refuses to use one, and §7.1 forbids it for xmDNS."""
+        assert self._address("fe80::f8ec:421d:aa42:dd7b%14") is None
+
+    def test_a_global_address_is_published(self) -> None:
+        assert self._address("2601:8c0:600:61b2::5") == "2601:8c0:600:61b2::5"
+
+    def test_a_unique_local_address_is_published(self) -> None:
+        """§7.1 names ULAs (RFC 4193) as acceptable alongside global addresses."""
+        assert self._address("fd00:1234::5") == "fd00:1234::5"
+
+    def test_the_scope_suffix_is_stripped(self) -> None:
+        assert self._address("2601:8c0::5%14") == "2601:8c0::5"
+
+
+class TestLegacyUnicastResponses:
+    """RFC 6762 §6.7: a querier on a port other than 5353 is an ordinary resolver."""
+
+    def question(self) -> Question:
+        return Question(name=(b"_py20305", b"_tcp", b"local"), qtype=TYPE_PTR, unicast=True)
+
+    def records(self) -> list[Record]:
+        return build_advertisement(
+            lfdi="a" * 40, sfdi=11111, port=8443
+        ).records(MDNS, ["192.168.1.5"])
+
+    def test_a_multicast_response_uses_id_zero(self) -> None:
+        """§18.1: an unsolicited multicast response carries no transaction id."""
+        assert decode_message(encode_response(self.records())).ident == 0
+
+    def test_a_legacy_response_echoes_the_query_id(self) -> None:
+        """Without it the querier cannot match the reply to its request."""
+        payload = encode_response(self.records(), ident=0xBEEF, questions=[self.question()])
+        assert decode_message(payload).ident == 0xBEEF
+
+    def test_a_legacy_response_echoes_the_question(self) -> None:
+        payload = encode_response(self.records(), ident=1, questions=[self.question()])
+        assert int.from_bytes(payload[4:6], "big") == 1, "one question echoed"
+
+    def test_a_legacy_response_caps_the_ttl(self) -> None:
+        """§6.7: the querier never sees the goodbye that would correct it."""
+        payload = encode_response(self.records(), ident=1, questions=[self.question()])
+        assert all(r.ttl <= 10 for r in decode_message(payload).records)
+        assert any(r.ttl > 10 for r in decode_message(encode_response(self.records())).records)
+
+    def test_this_package_can_read_its_own_legacy_response(self) -> None:
+        """The two halves have to interoperate over the path discovery uses."""
+        ident = 0x4242
+        payload = encode_response(self.records(), ident=ident, questions=[self.question()])
+        message = decode_message(payload)
+        assert message.ident == ident, "discovery drops replies whose id it did not send"
+
+
+class TestRdataBounds:
+    """A name may not run past the record that holds it (short RDLENGTH)."""
+
+    def truncated_ptr(self) -> bytes:
+        """A PTR whose RDLENGTH is shorter than the name it actually holds."""
+        header = struct.pack("!HHHHHH", 0x1234, 0x8400, 0, 1, 0, 0)
+        name = encode_name((*SERVICE, b"local"))
+        target = encode_name((b"evil", *SERVICE, b"local"))
+        # Claim four bytes of rdata while writing the whole name, so a decoder
+        # that trusts the name over the length reads into the next record.
+        return header + name + struct.pack("!HHIH", TYPE_PTR, 1, 4500, 4) + target
+
+    def test_a_name_past_the_record_end_is_rejected(self) -> None:
+        message = decode_message(self.truncated_ptr())
+        with pytest.raises(DnsDecodeError, match="past the end of the record"):
+            decode_ptr(message, message.records[0])
+
+    def test_a_well_formed_ptr_still_decodes(self) -> None:
+        message = decode_message(encode_response(server_records()))
+        ptr = next(r for r in message.records if r.rtype == TYPE_PTR)
+        assert decode_ptr(message, ptr)[0] == b"127-edev-000001111114"
+
+
+class TestSecondRoundCompleteness:
+    def test_an_instance_with_srv_but_no_txt_is_retried(self) -> None:
+        """Either half missing leaves the instance unusable, so both must retry."""
+        rounds: list[int] = []
+
+        class SrvOnlyThenFull:
+            def exchange(self, transport, queries, timeout, interface):  # noqa: ANN001, ANN201
+                rounds.append(len(queries))
+                ident = int.from_bytes(queries[0][0:2], "big")
+                if len(rounds) == 1:
+                    partial = [
+                        r for r in server_records() if r.rtype in (TYPE_PTR, TYPE_SRV)
+                    ]
+                    return [(response_with_ident(partial, ident), "192.168.1.40")]
+                return [(response_with_ident(server_records(), ident), "192.168.1.40")]
+
+        servers = discover(MDNS, timeout=0.02, source=SrvOnlyThenFull())
+        assert len(rounds) == 2, "a PTR+SRV answer with no TXT must trigger the second round"
+        assert len(servers) == 1
+
+
+class TestFallbackHost:
+    def test_a_link_local_source_address_is_not_used_as_the_host(self) -> None:
+        """It would build https://[fe80::1]:8443, which cannot be connected to."""
+        source = FakeSource(server_records(addresses=()), source_ip="fe80::1")
+        assert discover(MDNS, timeout=0.01, source=source) == []
+
+    def test_a_routable_source_address_is_used(self) -> None:
+        source = FakeSource(server_records(addresses=()), source_ip="192.168.1.40")
+        assert discover(MDNS, timeout=0.01, source=source)[0].host == "192.168.1.40"
+
+
+class TestMulticastTtl:
+    def test_mdns_uses_the_mandated_ttl(self) -> None:
+        """RFC 6762 §11 fixes it at 255; a responder may discard anything else."""
+        assert MDNS.hop_limit == 255
+        assert XMDNS.hop_limit == 255

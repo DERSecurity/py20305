@@ -27,7 +27,7 @@ from pydantic import (
     model_validator,
 )
 
-from py20305.client.dnssd import DEFAULT_SERVICE, validate_service, validate_subtype
+from py20305.client.dnssd.wire import DEFAULT_SERVICE, validate_service, validate_subtype
 from py20305.connectors.config import DeviceConfig
 from py20305.forwarders.config import ForwarderConfig
 
@@ -126,6 +126,11 @@ class DiscoveryConfig(_Strict):
     is configured, though, because §7.6 a) lists "use known URI(s) to
     DeviceCapability resource(s) of interest" as an equally valid way to find
     a server, and an operator who named one has already answered the question.
+
+    Retrying a query that found nothing is governed by the `connection` block,
+    the same as retrying a connection that failed. A client that starts before
+    its server is on the network and a client whose server is briefly down are
+    the same situation to whoever set that policy.
     """
 
     enabled: bool = Field(
@@ -165,15 +170,6 @@ class DiscoveryConfig(_Strict):
             "utility uplink and a device LAN may not be the intended one."
         ),
     )
-    retry_until_found: bool = Field(
-        default=True,
-        description=(
-            "Keep querying, on the connection backoff, until a server answers. A "
-            "client that started before the server is on the network would otherwise "
-            "exit, and be restarted into the same race by its supervisor."
-        ),
-    )
-
     @field_validator("subtype")
     @classmethod
     def _subtype_is_one_label(cls, v: str | None) -> str | None:

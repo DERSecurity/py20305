@@ -38,6 +38,12 @@ CACHE_FLUSH = 0x8000
 #: Guards a malformed or hostile name; see :func:`read_name`.
 MAX_LABELS = 128
 
+#: Default service name for announcing this client. Deliberately not the
+#: IANA-registered ``smartenergy`` of §7.3 -- this client is not an IEEE 2030.5
+#: server, and claiming that name would make conformant clients try to read a
+#: DeviceCapability resource it does not serve.
+DEFAULT_SERVICE = "_py20305._tcp"
+
 
 class DnsDecodeError(ValueError):
     """A DNS message could not be decoded.
@@ -59,10 +65,12 @@ class MulticastTransport:
         groups: Multicast groups to use. mDNS has an IPv4 and an IPv6 group and
             either may be the one that works on a given host; xmDNS is defined
             only over IPv6.
-        hop_limit: IPv6 multicast hop limit. Link-local mDNS never leaves the
-            link, so 1 is correct there. Site-local xmDNS is meant to cross
-            routers within the site (§7.1: its reachability "MAY span multiple
-            sub-networks"), which needs more than one hop to be of any use.
+        hop_limit: IP TTL / IPv6 hop limit for outgoing packets. RFC 6762
+            §11 requires 255 for mDNS, and not as a routing decision: the
+            scope is already fixed by the group address, and the fixed value
+            exists so a receiver can tell a packet that really came from the
+            local link from one that did not. A responder is permitted to
+            discard traffic carrying anything else.
         port: UDP port. The Extended Multicast DNS draft reuses the mDNS port
             rather than registering one of its own.
     """
@@ -79,7 +87,7 @@ MDNS = MulticastTransport(
     name="mdns",
     domain=b"local",
     groups=("224.0.0.251", "ff02::fb"),
-    hop_limit=1,
+    hop_limit=255,
 )
 
 #: The Extended Multicast DNS draft: site-local ``FF05::FB``, ``.site``.
@@ -89,7 +97,7 @@ XMDNS = MulticastTransport(
     name="xmdns",
     domain=b"site",
     groups=("ff05::fb",),
-    hop_limit=5,
+    hop_limit=255,
 )
 
 TRANSPORTS: Mapping[str, MulticastTransport] = {"mdns": MDNS, "xmdns": XMDNS}
@@ -202,29 +210,56 @@ def encode_address(address: str) -> bytes:
     return ipaddress.ip_address(address).packed
 
 
-def encode_response(records: Sequence[Record]) -> bytes:
+#: RFC 6762 §6.7 caps the TTL of a legacy unicast response at ten seconds. That
+#: querier will never receive the goodbye that would otherwise correct it, so
+#: its copy is deliberately short-lived.
+LEGACY_MAX_TTL = 10
+
+
+def encode_response(
+    records: Sequence[Record],
+    *,
+    ident: int = 0,
+    questions: Sequence[Question] = (),
+) -> bytes:
     """Encode an authoritative response carrying these records.
 
-    No questions are echoed. RFC 6762 §6 has a multicast response carry the
-    answers alone, and this is what an announcement (§8.3) and a goodbye
-    (§10.1) are: unsolicited responses.
+    With no ``ident`` and no ``questions`` this is the multicast form: RFC 6762
+    §6 has a multicast response carry the answers alone under transaction id
+    zero (§18.1), which is what an announcement (§8.3) and a goodbye (§10.1)
+    are.
+
+    Passing both produces the legacy unicast form of §6.7, for a querier whose
+    source port was not 5353. That querier is an ordinary DNS resolver as far as
+    it knows: it matches the reply to its request by transaction id and expects
+    its question echoed. Answering it with id zero and no question leaves the
+    reply unmatchable, including by this package's own discovery side, which
+    drops replies carrying an id it did not send.
     """
+    legacy = bool(questions)
     header = b"".join(
         (
-            (0).to_bytes(2, "big"),  # id: zero in a multicast response (§18.1)
+            ident.to_bytes(2, "big"),
             (0x8400).to_bytes(2, "big"),  # QR=1, AA=1
-            (0).to_bytes(2, "big"),  # no questions
+            len(questions).to_bytes(2, "big"),
             len(records).to_bytes(2, "big"),
             (0).to_bytes(2, "big") * 2,  # no authority or additional
         )
     )
     body = bytearray()
+    for question in questions:
+        body += encode_name(question.name)
+        body += question.qtype.to_bytes(2, "big")
+        # Echoed without the QU bit, which is a property of the request.
+        body += CLASS_IN.to_bytes(2, "big")
     for record in records:
-        rclass = CLASS_IN | (CACHE_FLUSH if record.unique else 0)
+        # The cache-flush bit means nothing to a legacy querier, which is not
+        # running an mDNS cache to flush.
+        rclass = CLASS_IN if legacy else CLASS_IN | (CACHE_FLUSH if record.unique else 0)
         body += encode_name(record.name)
         body += record.rtype.to_bytes(2, "big")
         body += rclass.to_bytes(2, "big")
-        body += record.ttl.to_bytes(4, "big")
+        body += (min(record.ttl, LEGACY_MAX_TTL) if legacy else record.ttl).to_bytes(4, "big")
         body += len(record.rdata).to_bytes(2, "big")
         body += record.rdata
     return header + bytes(body)
@@ -353,6 +388,48 @@ def format_name(labels: Sequence[bytes]) -> str:
     )
 
 
+def validate_service(service: str) -> tuple[bytes, bytes]:
+    """Split a ``_name._proto`` service into its two labels.
+
+    Rejecting the malformed forms here means a failure names the setting the
+    operator got wrong, rather than surfacing later as a name nothing answers.
+    """
+    parts = service.split(".")
+    if len(parts) != 2:
+        raise ValueError(f"service {service!r} must have the form _name._tcp (two labels)")
+    name, proto = parts
+    if proto not in ("_tcp", "_udp"):
+        raise ValueError(f"service {service!r} must end in _tcp or _udp, got {proto!r}")
+    for label in (name, proto):
+        if not label.startswith("_") or len(label) < 2:
+            raise ValueError(f"service label {label!r} must begin with an underscore")
+        if len(label.encode("utf-8")) > 63:
+            raise ValueError(f"service label {label!r} is longer than one DNS label allows")
+    return name.encode("utf-8"), proto.encode("utf-8")
+
+
+def validate_subtype(subtype: str) -> str:
+    """Check a subtype string against §7.5, returning it unchanged.
+
+    §7.5 says subtype strings "SHALL NOT begin with an underscore", and one has
+    to survive as a single DNS label. Membership of Table 17 is deliberately
+    not enforced: a server may advertise a subtype the table does not list, and
+    ``edev-<SFDI>`` -- the per-device form §7.5 defines for finding the server
+    that holds your own EndDevice -- is not in the table either.
+    """
+    if not subtype:
+        raise ValueError("a discovery subtype must not be empty")
+    if subtype.startswith("_"):
+        raise ValueError(
+            f"discovery subtype {subtype!r} must not begin with an underscore (IEEE 2030.5 §7.5)"
+        )
+    if "." in subtype or "\x00" in subtype:
+        raise ValueError(f"discovery subtype {subtype!r} must be a single DNS label")
+    if len(subtype.encode("utf-8")) > 63:
+        raise ValueError(f"discovery subtype {subtype!r} is longer than one DNS label allows")
+    return subtype
+
+
 def fold(name: Sequence[bytes]) -> tuple[bytes, ...]:
     """Case-fold a name for comparison. DNS labels are case-insensitive."""
     return tuple(label.lower() for label in name)
@@ -462,10 +539,27 @@ def record_rdata(message: DnsMessage, record: ResourceRecord) -> bytes:
     return message.raw[record.rdata_offset : record.rdata_offset + record.rdata_length]
 
 
+def _read_rdata_name(
+    message: DnsMessage, record: ResourceRecord, offset: int
+) -> tuple[bytes, ...]:
+    """Read a name from inside a record, refusing to read past its end.
+
+    ``read_name`` works against the whole message, because a compression
+    pointer legitimately reaches backwards outside the record. What must not
+    happen is the uncompressed part of a name running past this record's
+    rdata: a short RDLENGTH would let the name consume the record that follows
+    it, and the result would be accepted as a valid target. Checking the end
+    offset ``read_name`` already computes is what bounds it.
+    """
+    name, end = read_name(message.raw, offset)
+    if end > record.rdata_offset + record.rdata_length:
+        raise DnsDecodeError("a name runs past the end of the record that holds it")
+    return name
+
+
 def decode_ptr(message: DnsMessage, record: ResourceRecord) -> tuple[bytes, ...]:
     """Decode a PTR record into the name it points at."""
-    target, _ = read_name(message.raw, record.rdata_offset)
-    return target
+    return _read_rdata_name(message, record, record.rdata_offset)
 
 
 def decode_srv(message: DnsMessage, record: ResourceRecord) -> tuple[int, tuple[bytes, ...]]:
@@ -475,8 +569,7 @@ def decode_srv(message: DnsMessage, record: ResourceRecord) -> tuple[int, tuple[
     port = int.from_bytes(
         message.raw[record.rdata_offset + 4 : record.rdata_offset + 6], "big"
     )
-    target, _ = read_name(message.raw, record.rdata_offset + 6)
-    return port, target
+    return port, _read_rdata_name(message, record, record.rdata_offset + 6)
 
 
 def decode_address(message: DnsMessage, record: ResourceRecord) -> str:

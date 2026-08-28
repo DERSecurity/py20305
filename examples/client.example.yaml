@@ -51,6 +51,9 @@ server:
 #
 #   timeout_seconds: 3.0
 #
+#   # Retrying a query that found nothing follows the `connection` block
+#   # below, the same as retrying a connection that failed.
+#
 #   # Ask about one function set instead, using a 7.5 Table 17 subtype string.
 #   # Unset asks for this client's own EndDevice first, then for any server.
 #   # subtype: derp

@@ -115,6 +115,13 @@ It publishes a PTR, an SRV/TXT pair and address records under
 RFC 6762 §8.3, answers later queries for those names, and sends a goodbye
 record on shutdown so a listener does not keep a stopped client in its cache.
 
+Responses are rate limited. Multicast answers are capped at one per second per
+interface, which RFC 6762 §6 states as a MUST NOT, and unicast answers are
+capped at ten per second. The second limit is not in the standard: a UDP source
+address is trivially spoofed, and without a ceiling a responder is a small
+amplifier pointed at whoever the attacker names. One exchange is all a genuine
+querier needs.
+
 The TXT record carries `txtvers=1`, the client's `lfdi` and `sfdi`, and the
 package version.
 
@@ -147,6 +154,20 @@ The service record needs a port, so announcement names one of these, in order:
 With none of them, the client logs why and stays quiet. A service record
 pointing at a port nothing listens on is worse than no record at all.
 
+A port is inferred only when its listener is bound to an address something
+else can reach. `api.host` defaults to `127.0.0.1`, so an API left on its
+default is not advertised: the SRV record carries the LAN address, and pairing
+it with a loopback-only port publishes an endpoint that refuses every
+connection. Bind the API to `0.0.0.0`, or set `advertise.port` explicitly --
+which is taken on trust, for the case where a proxy fronts a loopback
+listener.
+
+Announcement needs UDP port 5353. If something else on the host already holds
+it, which on a desktop usually means a system mDNS responder, the client
+reports the transport unavailable rather than announcing from another port:
+RFC 6762 has receivers ignore responses that do not come from 5353, so the
+packets would be discarded while the log claimed success.
+
 ## The command-line switch
 
 `--multicast-transport` overrides both halves at once, which is useful for a
@@ -170,3 +191,9 @@ take an `interface` setting: an address for IPv4, an interface name for IPv6.
 discovery:
   interface: 192.168.1.10
 ```
+
+Announcement publishes only an address a receiver can actually connect to, so a
+host with no routable IPv6 address announces over IPv4 alone rather than
+publishing a link-local `fe80::` address nothing off-host can dial. §7.1
+requires the same of xmDNS, which "SHALL use global addresses or Unique Local
+Addresses (IETF RFC 4193)".

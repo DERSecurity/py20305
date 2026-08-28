@@ -185,11 +185,15 @@ def find_servers(config: ClientConfig, own_sfdi: int | None) -> list[DiscoveredS
     are plain blocking sockets on purpose: multicast behavior is the part that
     differs most between platforms, and keeping it out of the event loop keeps
     those differences away from the protocol client.
+
+    A configured subtype takes precedence over the SFDI sequence rather than
+    suppressing it: the subtype goes into the PTR name, so an operator who
+    named one asked a specific question and should get an answer to it.
     """
-    transports = transports_for(config.discovery.transport)
     return discover_for_client(
-        transports,
-        sfdi=own_sfdi if config.discovery.subtype is None else None,
+        transports_for(config.discovery.transport),
+        sfdi=own_sfdi,
+        subtype=config.discovery.subtype,
         timeout=config.discovery.timeout_seconds,
         interface=config.discovery.interface,
     )
@@ -206,10 +210,16 @@ async def _discover_server_url(
 ) -> str | None:
     """Locate a server, retrying on the connection backoff until one answers.
 
-    Returns None only when asked to stop, or when retrying is off and nothing
-    answered. Retrying matters more here than it looks: a client and its
+    Returns None only when asked to stop, or when the connection policy says to
+    stop retrying. Retrying matters more here than it looks: a client and its
     server often boot together, and a client that gave up on the first silent
     query would be restarted by its supervisor into exactly the same race.
+
+    The policy comes from the `connection` block rather than from one of its
+    own, because "the server is not there yet" is the same situation whether it
+    is a query going unanswered or a connection being refused, and an operator
+    who set `retry_forever: false` to let a supervisor own restarts meant it
+    for both.
     """
     delay = config.connection.initial_delay_seconds
     attempts = 0
@@ -231,10 +241,11 @@ async def _discover_server_url(
                 )
             return servers[0].base_url
 
-        if not config.discovery.retry_until_found:
-            return None
-        if config.connection.max_attempts and attempts >= config.connection.max_attempts:
-            logger.error("no IEEE 2030.5 server answered after %d attempts", attempts)
+        exhausted = bool(config.connection.max_attempts) and (
+            attempts >= config.connection.max_attempts
+        )
+        if exhausted or not config.connection.retry_forever:
+            logger.error("no IEEE 2030.5 server answered after %d attempt(s)", attempts)
             return None
 
         logger.warning(
@@ -383,14 +394,18 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
     return client, own_lfdi
 
 
-def build_advertiser(config: ClientConfig, own_lfdi: str) -> MulticastAdvertiser | None:
+def build_advertiser(config: ClientConfig) -> MulticastAdvertiser | None:
     """Build the local-network advertiser, or None when nothing is announced.
 
     Returns None both when the operator turned announcement off and when there
-    is no local service to name. A DNS-SD service record has to carry a port,
-    and pointing one at a port nothing listens on advertises a connection that
-    will always be refused -- worse than staying quiet, because it is a fault
-    the finder has to diagnose rather than an absence they can see.
+    is no reachable local service to name. A DNS-SD service record has to carry
+    a port, and pointing one at a port nothing answers on advertises a
+    connection that will always be refused -- worse than staying quiet, because
+    it is a fault the finder has to diagnose rather than an absence they can
+    see.
+
+    The certificate is read only once both of those have passed, so a client
+    that announces nothing -- the default -- never touches it here.
     """
     transports = transports_for(config.advertise.transport)
     if not transports:
@@ -398,14 +413,9 @@ def build_advertiser(config: ClientConfig, own_lfdi: str) -> MulticastAdvertiser
 
     port = _advertised_port(config)
     if port is None:
-        logger.info(
-            "not announcing this client: advertise.transport is %r but nothing local "
-            "is being served. Enable the management API or subscriptions, or set "
-            "advertise.port to name the service to advertise.",
-            config.advertise.transport,
-        )
         return None
 
+    own_lfdi = compute_lfdi(config.tls.client_cert.read_text())
     advertisement = build_advertisement(
         lfdi=own_lfdi,
         sfdi=compute_sfdi(own_lfdi),
@@ -420,20 +430,51 @@ def build_advertiser(config: ClientConfig, own_lfdi: str) -> MulticastAdvertiser
     )
 
 
+#: Bind addresses that accept traffic arriving on a network interface. Anything
+#: else -- and `api.host` defaults to 127.0.0.1 -- is reachable only from this
+#: host, so advertising it at the LAN address in the SRV record would publish a
+#: connection that always fails.
+_REACHABLE_BIND_ADDRESSES = {"0.0.0.0", "::", ""}
+
+
 def _advertised_port(config: ClientConfig) -> int | None:
     """Which local port the announcement should name.
 
-    An explicit setting wins. Otherwise the management API, which is the
-    interface someone looking for this client on the network is looking for;
-    the notification server only as a fallback, because it exists to be given
-    to one server rather than found by anyone.
+    An explicit setting wins, and is taken on trust: an operator naming a port
+    knows something about their deployment that this cannot see, such as a
+    reverse proxy in front of a loopback listener.
+
+    Inferring one is different, because a listener bound to loopback is
+    unreachable at the address the SRV record carries. Announcing it would
+    publish an endpoint that refuses every connection, which is worse than not
+    announcing: the finder has to diagnose it, rather than simply not finding
+    anything.
     """
     if config.advertise.port is not None:
         return config.advertise.port
-    if config.api.enabled:
+    if config.api.enabled and config.api.host in _REACHABLE_BIND_ADDRESSES:
         return config.api.port
-    if config.subscription.enabled:
+    if (
+        config.subscription.enabled
+        and config.subscription.notification_host in _REACHABLE_BIND_ADDRESSES
+    ):
         return config.subscription.notification_port
+    if not (config.api.enabled or config.subscription.enabled):
+        logger.info(
+            "not announcing this client: advertise.transport is %r but nothing local "
+            "is being served. Enable the management API or subscriptions, or set "
+            "advertise.port to name the service to advertise.",
+            config.advertise.transport,
+        )
+    else:
+        logger.info(
+            "not announcing this client: the local services it could advertise are "
+            "bound to an address only this host can reach (api.host=%r, "
+            "subscription.notification_host=%r). Set advertise.port to name the "
+            "reachable address a proxy exposes, or bind them to 0.0.0.0.",
+            config.api.host,
+            config.subscription.notification_host,
+        )
     return None
 
 
@@ -664,6 +705,30 @@ async def run(config: ClientConfig) -> int:
 
     logger.info("%s", get_version_string())
 
+    # Started before discovery, not after it. Announcing does not depend on
+    # finding a server, and a client that only became visible once it had
+    # found one would be invisible during exactly the local outage where
+    # someone goes looking for it. It is also why this is torn down in the
+    # `finally` below rather than alongside the client.
+    advertiser = build_advertiser(config)
+    if advertiser is not None:
+        advertiser.start()
+
+    try:
+        return await _run_client(config, stop, reconnect, connection)
+    finally:
+        if advertiser is not None:
+            # In a thread: stop() sends the goodbye records and joins.
+            await asyncio.to_thread(advertiser.stop)
+
+
+async def _run_client(
+    config: ClientConfig,
+    stop: asyncio.Event,
+    reconnect: asyncio.Event,
+    connection: ConnectionState,
+) -> int:
+    """Connect and run, once the client is already announcing itself."""
     if config.server.url is None:
         # The certificate is read here rather than at the top because the SFDI
         # derived from it is only needed to ask for this client's own
@@ -701,13 +766,6 @@ async def run(config: ClientConfig) -> int:
     api_task: asyncio.Task[None] | None = None
     api_service: ClientAPIService | None = None
     telemetry: TelemetryCoordinator | None = None
-    # Started before the connect attempt, and on purpose: announcing does not
-    # depend on the utility server being reachable, and a client that only
-    # became findable once it had connected would be invisible in exactly the
-    # situation someone goes looking for it on the network.
-    advertiser = build_advertiser(config, own_lfdi)
-    if advertiser is not None:
-        advertiser.start()
     # Started before the connect attempt, so the exchanges of a connection that
     # never succeeds are forwarded too -- those are the ones worth having.
     forwarder = client.http.forwarder
@@ -832,11 +890,6 @@ async def run(config: ClientConfig) -> int:
         # the transport drains rather than after it has stopped accepting.
         if forwarder is not None:
             await forwarder.stop()
-        if advertiser is not None:
-            # In a thread: stop() sends the goodbye records and joins, and
-            # blocking the event loop for that would delay nothing else, since
-            # everything above it has already been shut down.
-            await asyncio.to_thread(advertiser.stop)
         logger.info("stopped")
 
 

@@ -26,8 +26,10 @@ import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from py20305.client.dnssd.wire import (
+    DEFAULT_SERVICE,
     TYPE_A,
     TYPE_AAAA,
     TYPE_ANY,
@@ -46,13 +48,10 @@ from py20305.client.dnssd.wire import (
     encode_txt,
     fold,
     format_name,
+    validate_service,
 )
 
 logger = logging.getLogger(__name__)
-
-#: Default service name. Deliberately not the IANA-registered ``smartenergy``
-#: of §7.3 -- see the module docstring.
-DEFAULT_SERVICE = "_py20305._tcp"
 
 #: RFC 6763 §6.1 recommends 75 minutes for the records describing a service and
 #: 120 seconds for address records, on the reasoning that the address is the
@@ -83,26 +82,6 @@ def sfdi_label(sfdi: int) -> str:
     if len(text) > 12:
         raise ValueError(f"SFDI {sfdi} does not fit in 12 digits")
     return text.zfill(12)
-
-
-def validate_service(service: str) -> tuple[bytes, bytes]:
-    """Split a ``_name._proto`` service into its two labels.
-
-    Rejecting the malformed forms here means a failure names the setting the
-    operator got wrong, rather than surfacing later as a name nothing answers.
-    """
-    parts = service.split(".")
-    if len(parts) != 2:
-        raise ValueError(f"service {service!r} must have the form _name._tcp (two labels)")
-    name, proto = parts
-    if proto not in ("_tcp", "_udp"):
-        raise ValueError(f"service {service!r} must end in _tcp or _udp, got {proto!r}")
-    for label in (name, proto):
-        if not label.startswith("_") or len(label) < 2:
-            raise ValueError(f"service label {label!r} must begin with an underscore")
-        if len(label.encode("utf-8")) > 63:
-            raise ValueError(f"service label {label!r} is longer than one DNS label allows")
-    return name.encode("utf-8"), proto.encode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -278,9 +257,14 @@ def local_address_for(group: str, interface: str | None = None) -> str | None:
         return None
 
     # A scope suffix is meaningful only on this host, so it cannot go into a
-    # record another host will read.
+    # record another host will read -- and stripped of it, a link-local address
+    # is not connectable, which is the same reason the discovery side refuses
+    # to use one. §7.1 settles it for xmDNS regardless: IEEE 2030.5 "SHALL use
+    # global addresses or Unique Local Addresses (IETF RFC 4193) in the source
+    # address of xmDNS requests and responses".
     address = address.split("%", 1)[0]
-    if ipaddress.ip_address(address).is_unspecified:
+    parsed = ipaddress.ip_address(address)
+    if parsed.is_unspecified or parsed.is_link_local:
         return None
     return address
 
@@ -288,16 +272,12 @@ def local_address_for(group: str, interface: str | None = None) -> str | None:
 class _GroupSocket:
     """One socket bound for a multicast group."""
 
-    def __init__(self, sock: socket.socket, group: str, port: int, can_receive: bool) -> None:
+    def __init__(self, sock: socket.socket, group: str, port: int) -> None:
         self.sock = sock
         self.group = group
         self.port = port
-        #: False when the well-known port was already taken and this socket
-        #: fell back to an ephemeral one: it can still announce, but nothing
-        #: will send it a query to answer.
-        self.can_receive = can_receive
 
-    def send(self, payload: bytes, to: tuple[str, int] | None = None) -> None:
+    def send(self, payload: bytes, to: tuple[Any, ...] | None = None) -> None:
         try:
             self.sock.sendto(payload, to or (self.group, self.port))
         except OSError as exc:
@@ -344,8 +324,10 @@ def _open_group_socket(
         sock.close()
         return None
 
-    can_receive = _bind_and_join(sock, group, transport, version)
-    return _GroupSocket(sock, group, transport.port, can_receive)
+    if not _bind_and_join(sock, group, transport, version):
+        sock.close()
+        return None
+    return _GroupSocket(sock, group, transport.port)
 
 
 def _set_multicast_options(
@@ -377,22 +359,28 @@ def _set_multicast_options(
 def _bind_and_join(
     sock: socket.socket, group: str, transport: MulticastTransport, version: int
 ) -> bool:
-    """Bind the well-known port and join the group. False if send-only."""
+    """Bind the well-known port and join the group. False if this group is unusable.
+
+    There is no ephemeral-port fallback, because there is no such thing as a
+    half-working responder here. RFC 6762 §6 requires an mDNS response to be
+    sent *from* UDP 5353 and has receivers ignore responses from any other
+    source port, so announcing from an ephemeral port produces packets a
+    conformant listener discards -- while the log claims the client is
+    advertised. Reporting the group as unavailable is the honest outcome, and
+    it points at the real cause: something else on this host already holds the
+    port, and it is probably the right thing to be answering.
+    """
     try:
         sock.bind(("" if version == 4 else "::", transport.port))
     except OSError as exc:
-        logger.info(
-            "could not bind UDP %d for %s (%s); announcing from an ephemeral port, "
-            "so this client is advertised but cannot answer a later query",
-            transport.port,
+        logger.warning(
+            "cannot announce on %s: UDP %d is already held on this host (%s). "
+            "A responder already running here (avahi-daemon, mDNSResponder, "
+            "Bonjour) owns the port; announce through it, or stop it first.",
             group,
+            transport.port,
             exc,
         )
-        try:
-            sock.bind(("" if version == 4 else "::", 0))
-        except OSError as bind_exc:
-            logger.warning("could not bind any port for %s: %s", group, bind_exc)
-            return False
         return False
 
     try:
@@ -403,15 +391,27 @@ def _bind_and_join(
             membership = socket.inet_aton(group) + socket.inet_aton("0.0.0.0")
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
     except OSError as exc:
-        logger.info(
-            "bound UDP %d but could not join %s (%s); this client is announced "
-            "but will not see queries",
-            transport.port,
+        logger.warning(
+            "cannot announce on %s: bound UDP %d but could not join the group (%s)",
             group,
+            transport.port,
             exc,
         )
         return False
     return True
+
+
+#: RFC 6762 §6: a responder "MUST NOT ... multicast a record on a given
+#: interface until at least one second has elapsed since the last time that
+#: record was multicast on that interface".
+_MULTICAST_MIN_INTERVAL = 1.0
+
+#: Unicast answers are not covered by that rule, but they are the shape a
+#: reflection attack takes: a spoofed source address turns this responder into
+#: a small amplifier pointed at someone else. A modest ceiling costs a real
+#: querier nothing, since one exchange is all discovery needs.
+_UNICAST_BURST = 10
+_UNICAST_WINDOW = 1.0
 
 
 @dataclass
@@ -423,6 +423,33 @@ class _Binding:
     addresses: tuple[str, ...]
     records: tuple[Record, ...]
     advertised_name: tuple[bytes, ...] = field(default_factory=tuple)
+    _last_multicast: float = float("-inf")
+    _unicast_window_start: float = float("-inf")
+    _unicast_sent: int = 0
+
+    def may_respond(self, unicast: bool, now: float) -> bool:
+        """Whether a response may go out now, and record that it did.
+
+        Two limits with different reasons. The multicast one is the standard's
+        (§6) and protects the link from a responder answering every repeated
+        query. The unicast one is ours and bounds how useful this process is to
+        someone spoofing a source address.
+        """
+        if unicast:
+            if now - self._unicast_window_start >= _UNICAST_WINDOW:
+                self._unicast_window_start = now
+                self._unicast_sent = 0
+            if self._unicast_sent >= _UNICAST_BURST:
+                logger.debug("dropping a unicast answer: over the per-second ceiling")
+                return False
+            self._unicast_sent += 1
+            return True
+
+        if now - self._last_multicast < _MULTICAST_MIN_INTERVAL:
+            logger.debug("suppressing a multicast answer sent less than a second ago")
+            return False
+        self._last_multicast = now
+        return True
 
 
 class MulticastAdvertiser:
@@ -542,12 +569,16 @@ class MulticastAdvertiser:
         """Announce, then answer queries until stopped."""
         announcements = 0
         next_announcement = time.monotonic()
-        sockets = {b.socket.sock: b for b in self._bindings if b.socket.can_receive}
+        sockets = {b.socket.sock: b for b in self._bindings}
 
         while not self._stop.is_set():
             now = time.monotonic()
             if announcements < _ANNOUNCE_COUNT and now >= next_announcement:
                 for binding in self._bindings:
+                    # Marks the multicast budget, so an announcement and an
+                    # answer to a query arriving right after it do not put the
+                    # same records on the group twice inside a second.
+                    binding.may_respond(unicast=False, now=now)
                     binding.socket.send(encode_response(binding.records))
                 announcements += 1
                 next_announcement = now + _ANNOUNCE_INTERVAL
@@ -557,13 +588,6 @@ class MulticastAdvertiser:
                 if announcements < _ANNOUNCE_COUNT
                 else 1.0
             )
-            if not sockets:
-                # Send-only: nothing will arrive, so wait out the remaining
-                # announcements and then idle until stopped, rather than
-                # spinning a select over an empty set.
-                self._stop.wait(timeout=waiting)
-                continue
-
             try:
                 ready, _, _ = select.select(list(sockets), [], [], waiting)
             except OSError as exc:
@@ -590,11 +614,27 @@ class MulticastAdvertiser:
         if not answers:
             return
 
-        # RFC 6762 §5.4: a question with the QU bit wants the answer sent to
-        # itself. Answering by unicast where asked keeps this client off the
-        # group for traffic only one host cares about.
-        unicast = any(question.unicast for question in questions)
-        binding.socket.send(encode_response(answers), source[:2] if unicast else None)
+        # RFC 6762 §6.7: a query whose source port is not 5353 comes from an
+        # ordinary DNS resolver doing a one-shot lookup. It matches the reply
+        # to its request by transaction id and expects its question echoed, so
+        # it needs the legacy encoding rather than the multicast one. §5.4's QU
+        # bit is the other reason to answer one host directly.
+        legacy = len(source) > 1 and source[1] != binding.socket.port
+        unicast = legacy or any(question.unicast for question in questions)
+        if not binding.may_respond(unicast, time.monotonic()):
+            return
+
+        if legacy:
+            response = encode_response(
+                answers, ident=int.from_bytes(payload[0:2], "big"), questions=questions
+            )
+        else:
+            response = encode_response(answers)
+        # The whole source tuple, not the first two elements. recvfrom on an
+        # AF_INET6 socket returns (host, port, flowinfo, scopeid), and sending
+        # to a link-local peer without the scope fails with EINVAL -- which
+        # this would swallow, leaving the querier to time out instead.
+        binding.socket.send(response, source if unicast else None)
 
     def _answers_for(self, binding: _Binding, questions: Sequence[Question]) -> list[Record]:
         """The records answering these questions, in announcement order.

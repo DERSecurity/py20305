@@ -75,6 +75,84 @@ below says so explicitly.
   announcer does try for 5353, since it has to receive queries to answer them,
   and falls back to announcing from an ephemeral port when the port is taken,
   which leaves the client advertised but unable to answer a later query.
+- The second discovery round asks one QTYPE ANY question per instance rather
+  than a separate SRV and TXT question. Beyond saving a round trip, this is what
+  keeps compressed names readable: a compression pointer is an offset from the
+  start of the message that wrote it, so SRV and TXT records collected from two
+  different datagrams cannot be read as though they shared one buffer. Asking
+  one question that returns both records means every name resolves against the
+  bytes it was written against.
+- Announcement publishes only an address a receiver can connect to. A
+  link-local IPv6 address is not one: the scope identifier that would make it
+  usable is meaningful only on the host that holds it and cannot travel in a
+  record. A host with no routable IPv6 address now announces over IPv4 alone
+  rather than publishing an `fe80::` address nothing off-host can dial, which
+  is also what §7.1 requires of xmDNS, where IEEE 2030.5 "SHALL use global
+  addresses or Unique Local Addresses (IETF RFC 4193)".
+- Responses are rate limited. Multicast answers are capped at one per second
+  per interface, which RFC 6762 §6 states as a MUST NOT. Unicast answers are
+  capped at ten per second, which the standard does not ask for: a UDP source
+  address is trivially spoofed, and an unbounded responder is a small amplifier
+  aimed at whoever an attacker names. One exchange is all a genuine querier
+  needs.
+- A unicast answer keeps the full source address. `recvfrom` on an IPv6 socket
+  returns a scope identifier alongside the host and port, and sending to a
+  link-local peer without it fails, which would have left the querier waiting
+  out its timeout with no indication why.
+- Retrying a discovery query that found nothing follows the existing
+  `connection` block rather than a switch of its own. "The server is not there
+  yet" is the same situation whether a query goes unanswered or a connection is
+  refused, and an operator who set `retry_forever: false` so a supervisor owns
+  restarts meant that for both.
+- Multicast traffic goes out with the TTL and hop limit RFC 6762 §11 requires,
+  255 on both address families. That is not a routing decision -- the scope is
+  already fixed by the group address -- but a value a receiver checks to tell a
+  packet that genuinely came from the local link from one that did not, and a
+  responder is permitted to discard anything else.
+- A unicast answer to a querier whose source port is not 5353 uses the legacy
+  encoding of RFC 6762 §6.7: the query's transaction id, its question echoed
+  back, and TTLs capped at ten seconds. That querier is an ordinary DNS
+  resolver as far as it knows, so it matches the reply to its request by id.
+  Answering with id zero left the reply unmatchable, including by this
+  package's own discovery side, which drops replies carrying an id it did not
+  send -- so the two halves could not have talked to each other.
+- A name inside a record may not run past that record. `read_name` works
+  against the whole message, because a compression pointer legitimately reaches
+  backwards outside the record, but the uncompressed part of a name is now
+  bounded by RDLENGTH. Without that check a short RDLENGTH let a name consume
+  the record following it, and the result was accepted as a valid target.
+- Announcement no longer falls back to an ephemeral source port when UDP 5353
+  is already held. RFC 6762 §6 requires an mDNS response to be sent *from*
+  5353 and has receivers ignore responses from any other source port, so the
+  fallback produced packets a conformant listener discards while the log
+  claimed the client was advertised. The transport is now reported unavailable,
+  naming the likely cause: a responder already running on the host owns the
+  port.
+- A port is inferred for announcement only when its listener is bound to an
+  address something else can reach. `api.host` defaults to `127.0.0.1`, so the
+  previous behavior published the API's port alongside the LAN address in the
+  SRV record, advertising an endpoint that refuses every connection. An
+  explicit `advertise.port` is still taken on trust, since an operator naming
+  one may have a proxy in front of a loopback listener.
+- A configured `discovery.subtype` reaches the query. It was being used only to
+  suppress the SFDI lookup, after which a generic `_smartenergy._tcp` query ran
+  -- so an operator asking about one function set silently got every server
+  instead. The subtype goes into the PTR name, so it has to be part of the
+  question rather than a filter applied to the answer.
+- The second discovery round now runs when either the SRV or the TXT record is
+  missing, rather than only when SRV is. A PTR answered with an SRV and no TXT
+  is just as unusable as one with neither, and treating it as a rejection lost
+  the server silently.
+- A link-local source address is no longer accepted as a server's host. A
+  responder on IPv6 commonly answers from one, and the scope identifier that
+  would make it dialable does not survive the source tuple, so accepting it
+  produced a URL like `https://[fe80::1]:8443` that fails at connect. This is
+  the same rule already applied to a link-local AAAA record, now applied to the
+  fallback as well.
+- Announcement starts before discovery rather than after it. A client with no
+  configured URL retries its query until a server answers, so building the
+  advertiser afterwards left it invisible during exactly the local outage where
+  someone would go looking for it.
 - The DNS decoder only follows a compression pointer that points strictly
   backwards. A forward or self-referential pointer is the shape every
   "malformed DNS packet hangs the parser" bug takes, and bounding the iteration

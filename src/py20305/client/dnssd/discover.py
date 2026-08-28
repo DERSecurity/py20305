@@ -47,6 +47,7 @@ from typing import Protocol
 from py20305.client.dnssd.wire import (
     TYPE_A,
     TYPE_AAAA,
+    TYPE_ANY,
     TYPE_PTR,
     TYPE_SRV,
     TYPE_TXT,
@@ -63,6 +64,7 @@ from py20305.client.dnssd.wire import (
     fold,
     format_name,
     record_rdata,
+    validate_subtype,
 )
 
 logger = logging.getLogger(__name__)
@@ -203,21 +205,6 @@ def edev_subtype(sfdi: int) -> str:
     return f"edev-{digits.zfill(12)}"
 
 
-def validate_subtype(subtype: str) -> str:
-    """Check a subtype string against §7.5, returning it unchanged."""
-    if not subtype:
-        raise ValueError("a discovery subtype must not be empty")
-    if subtype.startswith("_"):
-        raise ValueError(
-            f"discovery subtype {subtype!r} must not begin with an underscore (IEEE 2030.5 §7.5)"
-        )
-    if any(char in subtype for char in ".\0"):
-        raise ValueError(f"discovery subtype {subtype!r} must be a single DNS label")
-    if len(subtype.encode("utf-8")) > 63:
-        raise ValueError(f"discovery subtype {subtype!r} is longer than one DNS label allows")
-    return subtype
-
-
 def server_from_records(
     message: DnsMessage,
     instance: tuple[bytes, ...],
@@ -277,9 +264,13 @@ def server_from_records(
         logger.warning("%s: ignoring, the https TXT key is not a port number", name)
         return None
 
-    host = _address_for(message, target) or fallback_host
+    host = _address_for(message, target) or _usable_host(fallback_host)
     if host is None:
-        logger.debug("%s: no address for %s and no source address", name, format_name(target))
+        logger.debug(
+            "%s: no usable address for %s and no usable source address",
+            name,
+            format_name(target),
+        )
         return None
 
     return DiscoveredServer(
@@ -339,6 +330,25 @@ def _address_for(message: DnsMessage, target: tuple[bytes, ...]) -> str | None:
 
     found.sort(key=lambda address: 0 if ipaddress.ip_address(address).version == 6 else 1)
     return found[0] if found else None
+
+
+def _usable_host(address: str | None) -> str | None:
+    """The responder's own address, unless it is one we could not connect to.
+
+    A responder on IPv6 commonly answers from a link-local address, and the
+    scope identifier that would make it dialable is stripped from the source
+    tuple by the time it reaches here. Accepting it would build a URL like
+    ``https://[fe80::1]:8443`` that fails at connect -- which is the same
+    reason :func:`_address_for` rejects a link-local AAAA record, so applying
+    it to the fallback keeps the two consistent.
+    """
+    if address is None:
+        return None
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return address  # A name rather than a literal; not ours to judge.
+    return None if parsed.is_link_local or parsed.is_unspecified else address
 
 
 class PacketSource(Protocol):
@@ -437,10 +447,17 @@ class SocketPacketSource:
                         socket.IPV6_MULTICAST_IF,
                         socket.if_nametoindex(interface),
                     )
-            elif interface is not None:
-                sock.setsockopt(
-                    socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface)
-                )
+            else:
+                # RFC 6762 §11 fixes the TTL at 255 for mDNS, and a responder
+                # may discard anything else. The IPv6 branch above sets the
+                # equivalent; leaving IPv4 on the OS default (usually 1) would
+                # make queries from this half look non-conformant while the
+                # announcements from the other half did not.
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, transport.hop_limit)
+                if interface is not None:
+                    sock.setsockopt(
+                        socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface)
+                    )
         except (OSError, ValueError) as exc:
             # A configured interface that does not exist is the operator's
             # mistake and is worth a warning; without one this is the host
@@ -547,10 +564,17 @@ def discover(
         server = server_from_records(message, instance, transport, fallback_host=host)
         if server is not None:
             servers.setdefault(instance, server)
-        elif _first(message, instance, TYPE_SRV) is None:
+        elif (
+            _first(message, instance, TYPE_SRV) is None
+            or _first(message, instance, TYPE_TXT) is None
+        ):
             # Incomplete rather than rejected: the responder named an instance
-            # without describing it, so ask it directly. A record rejected by
-            # §7.4 is not retried, because asking again returns the same thing.
+            # without fully describing it, so ask it directly. Either half
+            # missing is a reason to ask -- a PTR with an SRV and no TXT is
+            # just as unusable as one with neither, and treating it as a
+            # rejection would silently lose the server. A record that *was*
+            # complete and failed §7.4 is not retried, because asking again
+            # returns the same thing.
             unresolved.append(instance)
 
     if unresolved:
@@ -596,6 +620,7 @@ def discover_for_client(
     transports: Sequence[MulticastTransport],
     *,
     sfdi: int | None = None,
+    subtype: str | None = None,
     timeout: float = 3.0,
     interface: str | None = None,
     source: PacketSource | None = None,
@@ -609,12 +634,24 @@ def discover_for_client(
     this device's registration is the one it should be talking to, and a
     generic query would return it alongside servers that know nothing about
     this device.
+
+    ``subtype`` replaces that sequence with a single §7.5 subtype query, for a
+    caller that wants one function set rather than a server to register with.
+    It is not a filter applied afterwards: the subtype goes into the PTR name,
+    so passing it and then falling back to a generic query would answer a
+    different question from the one that was asked.
     """
-    if sfdi is not None:
-        subtype = edev_subtype(sfdi)
-        logger.info("looking for a server holding this client's EndDevice (%s)", subtype)
-        targeted = discover_all(
+    if subtype is not None:
+        logger.info("looking for a server advertising the %r function set", subtype)
+        return discover_all(
             transports, timeout=timeout, subtype=subtype, interface=interface, source=source
+        )
+
+    if sfdi is not None:
+        own = edev_subtype(sfdi)
+        logger.info("looking for a server holding this client's EndDevice (%s)", own)
+        targeted = discover_all(
+            transports, timeout=timeout, subtype=own, interface=interface, source=source
         )
         if targeted:
             return targeted
@@ -630,21 +667,28 @@ def _resolve_instances(
     timeout: float,
     interface: str | None,
 ) -> dict[tuple[bytes, ...], DiscoveredServer]:
-    """Ask directly for the SRV and TXT records of instances left incomplete."""
+    """Ask directly about instances the first round named but did not describe.
+
+    One QTYPE ANY question per instance rather than a separate SRV and TXT
+    question, so a responder returns both records in the same message. That
+    matters for more than round trips: a name inside rdata may be a
+    compression pointer, and a pointer is an offset from the start of the
+    message that wrote it. Records collected from two different datagrams
+    cannot be read as though they shared one buffer, so asking one question
+    that yields both records is what keeps every name resolvable against the
+    bytes it was written against.
+    """
     if timeout <= 0:
         return {}
 
     idents: set[int] = set()
     queries: list[bytes] = []
     for instance in instances:
-        for qtype in (TYPE_SRV, TYPE_TXT):
-            ident = _new_ident()
-            idents.add(ident)
-            queries.append(encode_query(instance, qtype, ident, unicast=True))
+        ident = _new_ident()
+        idents.add(ident)
+        queries.append(encode_query(instance, TYPE_ANY, ident, unicast=True))
 
     messages = _decode_all(source.exchange(transport, queries, timeout, interface), idents)
-    if not messages:
-        return {}
 
     resolved: dict[tuple[bytes, ...], DiscoveredServer] = {}
     for instance in instances:
@@ -656,48 +700,9 @@ def _resolve_instances(
             ),
             None,
         )
-        if server is None:
-            # SRV and TXT were asked for separately and a responder may answer
-            # each in its own datagram, so neither message alone describes the
-            # instance. Merging is the only way those two halves meet.
-            server = server_from_records(
-                _merge(messages), instance, transport, fallback_host=messages[0][1]
-            )
         if server is not None:
             resolved[instance] = server
     return resolved
-
-
-def _merge(messages: Sequence[tuple[DnsMessage, str]]) -> DnsMessage:
-    """Concatenate messages so records split across them can be read together.
-
-    A record is decodable because of where its rdata sits in ``raw``, so
-    merging shifts each record's offset by where its message landed in the
-    concatenation rather than re-encoding anything. Names inside rdata stay
-    readable because a compression pointer is relative to the start of its own
-    message and each message's bytes stay contiguous, so a pointer resolves
-    within the message that wrote it.
-    """
-    if len(messages) == 1:
-        return messages[0][0]
-
-    raw = bytearray()
-    records: list[ResourceRecord] = []
-    for message, _ in messages:
-        base = len(raw)
-        raw += message.raw
-        records.extend(
-            ResourceRecord(
-                name=record.name,
-                rtype=record.rtype,
-                rclass=record.rclass,
-                ttl=record.ttl,
-                rdata_offset=record.rdata_offset + base,
-                rdata_length=record.rdata_length,
-            )
-            for record in message.records
-        )
-    return DnsMessage(ident=0, records=tuple(records), raw=bytes(raw))
 
 
 def _instances(
