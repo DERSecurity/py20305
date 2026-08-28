@@ -69,6 +69,7 @@ nav:
       - Forwarding traffic: forwarding.md
       - Running in a container: docker.md
       - Testing: testing.md
+  - Conformance: conformance/index.md
   - Reference:
       - Client: reference/client.md
       - Events: reference/events.md
