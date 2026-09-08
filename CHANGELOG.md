@@ -5,7 +5,7 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
-## [Unreleased]
+## [0.6.0] — 2026-09-08
 
 - An event that disappears from a server's DERControlList is now cancelled
   rather than left running to its end. IEEE 2030.5-2023 §10.2.2.3 rule p) is
