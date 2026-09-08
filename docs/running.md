@@ -90,6 +90,29 @@ Rediscovery re-reads every path. A server that moves its resources, or that
 brings the MirrorUsagePoint function set online only after the client
 connected, is picked up without a restart.
 
+## How an event ends
+
+An event runs to the end of its interval unless the server ends it sooner. Two
+signals do that, and the client honors both:
+
+- `EventStatus.currentStatus` set to 2 on an event still in the list.
+- The event removed from the DERControlList before its Effective Scheduled
+  Period is over. IEEE 2030.5-2023 §10.2.2.3 rule p) makes removal a
+  cancellation, and notes that this differs from earlier revisions: a server
+  built against IEEE 2030.5-2018 signals cancellation only by setting the
+  status.
+
+Either signal reverts the device to the DefaultDERControl and POSTs "The event
+has been cancelled" when the event's `responseRequired` asks for it. Cancelling
+an event that is already running applies the wind-down randomization §10.2.3.3
+requires, so the revert can land later than the cancellation that caused it.
+
+Removal is acted on only when the list was fetched completely. A DERControl
+fetch that fails or does not parse leaves the client holding no list rather than
+an empty one. The distinction matters: an empty list is a server that removed
+every event, and treating a failed fetch as one would revert every device on a
+single transient error.
+
 ## Stopping
 
 `SIGINT` or `SIGTERM` asks it to stop; it finishes what it is doing and closes

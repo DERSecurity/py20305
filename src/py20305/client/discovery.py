@@ -263,6 +263,7 @@ async def _discover_program(client: Sep2Client, derp: Any, derp_href: str) -> De
                 derp_state.der_controls.extend(derc_page.dercontrol)
                 if hasattr(derc_page, "subscribable") and derc_page.subscribable:
                     derp_state.derc_list_subscribable = True
+            derp_state.der_controls_complete = True
         except Sep2PayloadError as exc:
             logger.warning("Skipping DERControl list for program %s: %s", derp_href, exc)
         except Exception:
@@ -829,6 +830,7 @@ async def refresh_der_controls(client: Sep2Client, state: DiscoveredState) -> No
         derp_state.der_controls.clear()
         for derc_page in derc_pages:
             derp_state.der_controls.extend(derc_page.dercontrol)
+        derp_state.der_controls_complete = True
 
     logger.debug("Refreshed DER controls for %d programs", len(state.der_programs))
 
@@ -902,6 +904,7 @@ async def refresh_der_controls_for_program(
         derp_state.der_controls.clear()
         for derc_page in derc_pages:
             derp_state.der_controls.extend(derc_page.dercontrol)
+        derp_state.der_controls_complete = True
 
     logger.debug("Targeted refresh complete for program %s", program_href)
     return True
