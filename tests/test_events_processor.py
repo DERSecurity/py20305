@@ -407,6 +407,53 @@ class TestDisappearedEventCancellation:
         await proc.shutdown()
 
     @pytest.mark.asyncio
+    async def test_event_past_its_end_is_not_cancelled(self, shutdown: asyncio.Event):
+        """Rule p) covers removal *before* the end of the Effective Scheduled
+        Period. A server may drop an event once it is over, and an event whose
+        period has ended is completing, not cancelled.
+
+        The record can still be ACTIVE at that point: ``_on_completion`` blocks
+        on ``_state_ready`` for the duration of a rediscovery, and a rediscovery
+        ends by refreshing the list and calling ``process_controls``. Cancelling
+        there would report status 6 for an event that ran its course and would
+        suppress the status 3 the blocked completion still owes.
+        """
+        now = int(time.time())
+        derc = _make_derc(0x01, start=now - 10, duration=3600)
+        state = _setup_state(der_controls=[derc], dderc=_make_dderc())
+        posted: list[int] = []
+
+        async def track_post(path: str, resource: object) -> str | None:
+            status = getattr(resource, "status", None)
+            if status is not None:
+                posted.append(status)
+            return None
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=track_post)
+        http.server_2018_compat = False
+        proc = EventProcessor(http, state, AsyncMock(), shutdown)
+
+        await proc.process_controls("/derp/1")
+        rec = proc._store.get(derc.m_rid.value)
+        assert rec.state == EventState.ACTIVE
+
+        # The event's effective period has now passed, but its completion has
+        # not run yet. Kept inside prune_expired's grace window so the record
+        # is still there to assert on.
+        rec.start = now - 100
+        rec.duration = 70
+        state.der_programs["/derp/1"].der_controls = []
+        state.der_programs["/derp/1"].der_controls_complete = True
+        posted.clear()
+
+        await proc.process_controls("/derp/1")
+
+        assert proc._store.get(derc.m_rid.value).state == EventState.ACTIVE
+        assert ResponseCode.CANCELLED.value not in posted
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
     async def test_removal_only_cancels_the_absent_events_own_program(
         self, shutdown: asyncio.Event
     ):

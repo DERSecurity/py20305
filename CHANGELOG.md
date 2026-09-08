@@ -19,7 +19,11 @@ below says so explicitly.
   went on holding a control the utility believed it had withdrawn. The
   cancellation takes the path a status change already took, so the wind-down
   randomization of §10.2.3.3, the revert to the DefaultDERControl, and the
-  "The event has been cancelled" response are unchanged.
+  "The event has been cancelled" response are unchanged. An event the server
+  drops once it is already over still completes normally: the rule is scoped to
+  removal before the end of the Effective Scheduled Period, and reporting
+  status 6 for an event that ran its course would be wrong twice over, since
+  the status 3 it owes would never be sent.
 - Reconciliation runs only against a DERControl list that was fetched in full.
   A fetch that fails or does not parse leaves the client with no list, and a
   list of no events is what a server sends when it has withdrawn all of them —

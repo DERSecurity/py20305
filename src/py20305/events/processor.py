@@ -373,6 +373,17 @@ class EventProcessor:
             for record in self._store.all_active_states():
                 if record.program_href != program_href or record.mrid in served:
                     continue
+                # "before the end of their Effective Scheduled Period" is part
+                # of the rule, not a detail: a server may drop an event once it
+                # is over, and such an event completed rather than being
+                # cancelled. The record can still be ACTIVE here because
+                # _on_completion blocks on _state_ready for the length of a
+                # rediscovery, and a rediscovery ends by refreshing the list and
+                # calling this method -- cancelling would report status 6 for an
+                # event that ran its course and suppress the status 3 the
+                # blocked completion still owes.
+                if now >= record.end:
+                    continue
                 logger.info(
                     "Event %s removed from program %s while %s -- cancelling (rule p)",
                     record.mrid.hex()[:8],
