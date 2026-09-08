@@ -7,6 +7,30 @@ below says so explicitly.
 
 ## [Unreleased]
 
+- An event that disappears from a server's DERControlList is now cancelled
+  rather than left running to its end. IEEE 2030.5-2023 §10.2.2.3 rule p) is
+  explicit that "Clients SHALL consider Events removed from the server before
+  the end of their Effective Scheduled Period as cancelled", and equally
+  explicit that this is a change from earlier revisions, where setting
+  `EventStatus.currentStatus` to 2 was the only way a server could call an
+  event off. Both signals now end an event, which matters because head-end
+  systems differ on which one they send: an operator cancelling an active event
+  by editing it out of the list had no way to stop the device, and the client
+  went on holding a control the utility believed it had withdrawn. The
+  cancellation takes the path a status change already took, so the wind-down
+  randomization of §10.2.3.3, the revert to the DefaultDERControl, and the
+  "The event has been cancelled" response are unchanged. An event the server
+  drops once it is already over still completes normally: the rule is scoped to
+  removal before the end of the Effective Scheduled Period, and reporting
+  status 6 for an event that ran its course would be wrong twice over, since
+  the status 3 it owes would never be sent.
+- Reconciliation runs only against a DERControl list that was fetched in full.
+  A fetch that fails or does not parse leaves the client with no list, and a
+  list of no events is what a server sends when it has withdrawn all of them —
+  so acting on the two alike would revert every device on one transient error.
+  `DerProgramState.der_controls_complete` marks a list as served rather than
+  merely empty, and only a marked list can cancel anything.
+
 - The client can now locate an IEEE 2030.5 server on the local network instead
   of being told where one is. IEEE 2030.5 6.9.2 puts this on the client --
   "Clients SHALL locate local services by performing DNS service discovery

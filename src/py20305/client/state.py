@@ -88,6 +88,13 @@ class DerProgramState:
     discovered_from_fsa_href: str | None = None
     derc_list_subscribable: bool = False
     dderc_subscribable: bool = False
+    #: True once ``der_controls`` holds a complete list as served. A failed or
+    #: unparseable DERControl fetch leaves the list empty (or, after a
+    #: ``state.clear()`` rediscovery, newly empty), which is indistinguishable
+    #: from a server that removed every control. IEEE 2030.5-2023 §10.2.2.3
+    #: rule p) turns removal into cancellation, so the event processor
+    #: reconciles against this list only when the flag says it is trustworthy.
+    der_controls_complete: bool = False
 
 
 @dataclass

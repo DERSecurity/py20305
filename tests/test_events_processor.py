@@ -307,6 +307,196 @@ class TestProcessControlsCancellation:
         await proc.shutdown()
 
 
+class TestDisappearedEventCancellation:
+    """IEEE 2030.5-2023 §10.2.2.3 rule p): an event removed from the server
+    before the end of its Effective Scheduled Period is cancelled.
+
+    Note the 2023 edition flags this as a change from earlier revisions -- a
+    2018-era server signals cancellation only by setting currentStatus to 2.
+    """
+
+    @pytest.mark.asyncio
+    async def test_active_event_removed_from_list_is_cancelled(self, shutdown: asyncio.Event):
+        """The head-end drops an active event from the list instead of
+        setting currentStatus=2. The event must stop, not run to its end.
+        """
+        now = int(time.time())
+        derc = _make_derc(0x01, start=now - 10, duration=3600)
+        state = _setup_state(der_controls=[derc], dderc=_make_dderc())
+        posted: list[int] = []
+
+        async def track_post(path: str, resource: object) -> str | None:
+            status = getattr(resource, "status", None)
+            if status is not None:
+                posted.append(status)
+            return None
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=track_post)
+        http.server_2018_compat = False
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, shutdown)
+
+        await proc.process_controls("/derp/1")
+        assert proc._store.get(derc.m_rid.value).state == EventState.ACTIVE
+
+        # The server now serves a list that no longer contains the event.
+        state.der_programs["/derp/1"].der_controls = []
+        state.der_programs["/derp/1"].der_controls_complete = True
+        posted.clear()
+
+        await proc.process_controls("/derp/1")
+
+        rec = proc._store.get(derc.m_rid.value)
+        assert rec is not None
+        assert rec.state == EventState.CANCELLED
+        assert ResponseCode.CANCELLED.value in posted
+        dispatcher.apply_default_control.assert_awaited()
+
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_scheduled_event_removed_from_list_is_cancelled(self, shutdown: asyncio.Event):
+        now = int(time.time())
+        derc = _make_derc(0x01, start=now + 600, duration=3600)
+        state = _setup_state(der_controls=[derc], dderc=_make_dderc())
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        proc = EventProcessor(http, state, NullDispatcher(), shutdown)
+
+        await proc.process_controls("/derp/1")
+        assert proc._store.get(derc.m_rid.value).state == EventState.SCHEDULED
+
+        state.der_programs["/derp/1"].der_controls = []
+        state.der_programs["/derp/1"].der_controls_complete = True
+
+        await proc.process_controls("/derp/1")
+
+        assert proc._store.get(derc.m_rid.value).state == EventState.CANCELLED
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_incomplete_fetch_does_not_cancel(self, shutdown: asyncio.Event):
+        """A failed or unparseable DERControl fetch leaves the list empty.
+
+        Reconciling against it would cancel every live event on one transient
+        error, so an incomplete snapshot must be ignored.
+        """
+        now = int(time.time())
+        derc = _make_derc(0x01, start=now - 10, duration=3600)
+        state = _setup_state(der_controls=[derc], dderc=_make_dderc())
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, shutdown)
+
+        await proc.process_controls("/derp/1")
+        assert proc._store.get(derc.m_rid.value).state == EventState.ACTIVE
+
+        # discover() clears state and its DERControl fetch then failed: the list
+        # is empty and was never marked complete.
+        state.der_programs["/derp/1"].der_controls = []
+        state.der_programs["/derp/1"].der_controls_complete = False
+        dispatcher.reset_mock()
+
+        await proc.process_controls("/derp/1")
+
+        assert proc._store.get(derc.m_rid.value).state == EventState.ACTIVE
+        dispatcher.apply_default_control.assert_not_awaited()
+
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_event_past_its_end_is_not_cancelled(self, shutdown: asyncio.Event):
+        """Rule p) covers removal *before* the end of the Effective Scheduled
+        Period. A server may drop an event once it is over, and an event whose
+        period has ended is completing, not cancelled.
+
+        The record can still be ACTIVE at that point: ``_on_completion`` blocks
+        on ``_state_ready`` for the duration of a rediscovery, and a rediscovery
+        ends by refreshing the list and calling ``process_controls``. Cancelling
+        there would report status 6 for an event that ran its course and would
+        suppress the status 3 the blocked completion still owes.
+        """
+        now = int(time.time())
+        derc = _make_derc(0x01, start=now - 10, duration=3600)
+        state = _setup_state(der_controls=[derc], dderc=_make_dderc())
+        posted: list[int] = []
+
+        async def track_post(path: str, resource: object) -> str | None:
+            status = getattr(resource, "status", None)
+            if status is not None:
+                posted.append(status)
+            return None
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=track_post)
+        http.server_2018_compat = False
+        proc = EventProcessor(http, state, AsyncMock(), shutdown)
+
+        await proc.process_controls("/derp/1")
+        rec = proc._store.get(derc.m_rid.value)
+        assert rec.state == EventState.ACTIVE
+
+        # The event's effective period has now passed, but its completion has
+        # not run yet. Kept inside prune_expired's grace window so the record
+        # is still there to assert on.
+        rec.start = now - 100
+        rec.duration = 70
+        state.der_programs["/derp/1"].der_controls = []
+        state.der_programs["/derp/1"].der_controls_complete = True
+        posted.clear()
+
+        await proc.process_controls("/derp/1")
+
+        assert proc._store.get(derc.m_rid.value).state == EventState.ACTIVE
+        assert ResponseCode.CANCELLED.value not in posted
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_removal_only_cancels_the_absent_events_own_program(
+        self, shutdown: asyncio.Event
+    ):
+        """One program's empty list must not cancel a sibling program's events."""
+        now = int(time.time())
+        derc1 = _make_derc(0x01, start=now - 10, duration=3600)
+        derc2 = _make_derc(0x02, start=now - 10, duration=3600)
+
+        state = DiscoveredState()
+        for href, controls in (("/derp/1", [derc1]), ("/derp/2", [derc2])):
+            state.der_programs[href] = DerProgramState(
+                program=_make_program(href, 0),
+                href=href,
+                primacy=0,
+                default_dercontrol=_make_dderc(),
+                der_controls=controls,
+            )
+        state.end_devices["/edev/1"] = EndDeviceState(
+            device=_make_edev("/edev/1"), href="/edev/1", lfdi=b"\xaa" * 20
+        )
+        state.device_mapping.add("/derp/1", "/edev/1")
+        state.end_devices["/edev/2"] = EndDeviceState(
+            device=_make_edev("/edev/2"), href="/edev/2", lfdi=b"\xbb" * 20
+        )
+        state.device_mapping.add("/derp/2", "/edev/2")
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        proc = EventProcessor(http, state, AsyncMock(), shutdown)
+
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+
+        state.der_programs["/derp/1"].der_controls = []
+        state.der_programs["/derp/1"].der_controls_complete = True
+
+        await proc.process_controls("/derp/1")
+
+        assert proc._store.get(derc1.m_rid.value).state == EventState.CANCELLED
+        assert proc._store.get(derc2.m_rid.value).state == EventState.ACTIVE
+        await proc.shutdown()
+
+
 class TestProcessControlsSupersession:
     @pytest.mark.asyncio
     async def test_lower_primacy_supersedes(self, shutdown: asyncio.Event):

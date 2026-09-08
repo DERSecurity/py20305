@@ -359,6 +359,41 @@ class EventProcessor:
             if self._closed:
                 return
 
+        # IEEE 2030.5-2023 §10.2.2.3 rule p): clients SHALL consider events
+        # removed from the server before the end of their Effective Scheduled
+        # Period as cancelled. The 2023 edition notes this differs from earlier
+        # revisions, where currentStatus=2 was the only cancellation signal.
+        #
+        # Gated on der_controls_complete: a failed or unparseable DERControl
+        # fetch leaves the list empty, and that is indistinguishable from a
+        # server that removed every control. Reconciling against an incomplete
+        # snapshot would cancel every live event on one transient error.
+        if derp_state.der_controls_complete:
+            served = {derc.m_rid.value for derc in derp_state.der_controls}
+            for record in self._store.all_active_states():
+                if record.program_href != program_href or record.mrid in served:
+                    continue
+                # "before the end of their Effective Scheduled Period" is part
+                # of the rule, not a detail: a server may drop an event once it
+                # is over, and such an event completed rather than being
+                # cancelled. The record can still be ACTIVE here because
+                # _on_completion blocks on _state_ready for the length of a
+                # rediscovery, and a rediscovery ends by refreshing the list and
+                # calling this method -- cancelling would report status 6 for an
+                # event that ran its course and suppress the status 3 the
+                # blocked completion still owes.
+                if now >= record.end:
+                    continue
+                logger.info(
+                    "Event %s removed from program %s while %s -- cancelling (rule p)",
+                    record.mrid.hex()[:8],
+                    program_href,
+                    record.state.value,
+                )
+                await self._handle_cancellation(record)
+                if self._closed:
+                    return
+
         # Run supersession across all non-terminal events
         await self._run_supersession()
         if self._closed:
