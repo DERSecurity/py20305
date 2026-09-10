@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://sunspec.org/"><img src="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/sunspec.png" alt="SunSpec Alliance" height="44"></a>
+  <a href="https://sunspec.org/"><img src="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/sunspec.png" alt="SunSpec Alliance" height="60"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://dersec.io/"><picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/dersec-white.png">
