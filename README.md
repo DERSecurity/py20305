@@ -6,12 +6,10 @@
 </p>
 
 <p align="center">
-  <a href="https://lfenergy.org/"><picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/lf-energy-white.png">
-    <img src="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/lf-energy-color.png" alt="LF Energy" height="32">
+  <a href="https://sunspec.org/"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/sunspec-white.png">
+    <img src="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/sunspec.png" alt="SunSpec Alliance" height="60">
   </picture></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://sunspec.org/"><img src="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/sunspec.png" alt="SunSpec Alliance" height="44"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://dersec.io/"><picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/DERSecurity/py20305/main/docs/assets/dersec-white.png">
@@ -22,7 +20,7 @@
 # py20305
 
 **The IEEE 2030.5 / CSIP client of [Project Satori](https://dersec.io/satori)** —
-an LF Energy open-source project led by the SunSpec Alliance, DER Security,
+an open-source project led by the SunSpec Alliance, DER Security,
 and industry consortium members.
 
 [![CI](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml/badge.svg)](https://github.com/DERSecurity/py20305/actions/workflows/ci.yml)
