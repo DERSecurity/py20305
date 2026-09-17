@@ -57,12 +57,18 @@ def build_der_image(
     volts: int = 2405,
     hertz: int = 6001,
     w_max: int = 10000,
+    rate_settings: bool = True,
 ) -> bytes:
     """A plausible inverter: measurements in 701, ratings in 702, controls in 704.
 
     Scale factors are part of the wire contract, so they are deliberately
     non-zero where the standard commonly uses them: hertz carry -2
     (``6001`` -> 60.01 Hz), volts -1 (``2405`` -> 240.5 V).
+
+    ``rate_settings`` controls whether model 702 implements the charge /
+    discharge rate settings that the watts-typed active-power limits write.
+    Neither carries an IEEE 1547 standards tag, so a device may omit them;
+    pass ``False`` to model one that does and exercise the fallback route.
     """
     common = ss.Model(1)
     common.points["ID"].value = 1
@@ -89,6 +95,14 @@ def build_der_image(
     # fetch_configuration reads the adjusted setting.
     m702.points["WMaxRtg"].value = w_max
     m702.points["WMax"].value = w_max
+    if rate_settings:
+        # Targets of opModMaxLimWAbsorb (charge) and opModMaxLimWInject
+        # (discharge). Seeded at the rating so they read back as implemented;
+        # a control then adjusts them downward.
+        m702.points["WChaRteMaxRtg"].value = w_max
+        m702.points["WDisChaRteMaxRtg"].value = w_max
+        m702.points["WChaRteMax"].value = w_max
+        m702.points["WDisChaRteMax"].value = w_max
 
     m704 = ss.Model(704)
     m704.points["ID"].value = 704

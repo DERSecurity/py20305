@@ -41,6 +41,7 @@ Read points (fetch_nameplate, fetch_configuration):
     VarMaxInjRtg    Max reactive power injection rating (Var)
     VarMaxAbsRtg    Max reactive power absorption rating (Var)
     WChaRteMaxRtg   Max charge rate rating (W)
+    WDisChaRteMaxRtg  Max discharge rate rating (W)
     VAChaRteMaxRtg  Max charge rate rating (VA)
     VNomRtg         Nominal voltage rating (V)
     VMaxRtg         Max voltage rating (V)
@@ -59,7 +60,8 @@ Read points (fetch_nameplate, fetch_configuration):
     VAMax           Max apparent power (VA)
     VarMaxInj       Max reactive power injection (Var)
     VarMaxAbs       Max reactive power absorption (Var)
-    WChaRteMax      Max charge rate (W)
+    WChaRteMax      Max charge rate (W) -- written by opModMaxLimWAbsorb
+    WDisChaRteMax   Max discharge rate (W) -- written by opModMaxLimWInject
     VAChaRteMax     Max charge rate (VA)
     VNom            Nominal voltage (V)
     VMax            Max voltage (V)
