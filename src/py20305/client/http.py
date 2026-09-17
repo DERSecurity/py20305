@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from py20305.client.comm_loss_simulation import CommLossSimulation, GatedSession
 from py20305.client.connector import Ieee2030TCPConnector, SocketPair
 from py20305.client.errors import (
     Sep2ConnectionError,
@@ -171,6 +172,10 @@ class Sep2Client:
         self._tls_config = tls
         self._ssl: ssl.SSLContext | bool = create_ssl_context(tls) if tls else False
         self._session: aiohttp.ClientSession | None = None
+        # Cached wrapper over `_session`, rebuilt whenever the session is. Held
+        # so repeated `_get_session()` calls return the same object: callers
+        # (and tests) compare sessions by identity to detect a rebuild.
+        self._gated_session: GatedSession | None = None
         self._forwarder = forwarder
         self._traffic_recorder = traffic_recorder
         self._csip_aus_mode = False
@@ -196,6 +201,10 @@ class Sep2Client:
         # _last_contact_epoch now) for the connectivity probe and status surface.
         self._last_validated_epoch: int | None = None
         self._consecutive_failures = 0
+        # Operator-triggered outage simulation, plus the in-flight request count
+        # it needs to drain on activation. Inert unless armed; the gate lives in
+        # the session wrapper so the failure lands inside each caller's own try.
+        self._comm_loss_simulation = CommLossSimulation()
         # Carried as a default header on every request (see `_default_headers`).
         # Off by default; operator opts in via `TlsSettings.send_lfdi_header`
         # for proxy-fronted deployments that strip the client cert before the
@@ -431,7 +440,14 @@ class Sep2Client:
             headers[self._lfdi_header_name] = self._client_lfdi
         return headers
 
-    def _get_session(self) -> aiohttp.ClientSession:
+    def _get_session(self) -> GatedSession:
+        """Return the session every request path uses, wrapped for simulation.
+
+        The wrapper is returned whether or not a simulation is armed: it counts
+        in-flight requests continuously, which is what lets an activation wait
+        for requests already talking to the server rather than reporting the
+        link down while one could still refresh ``last_contact_epoch``.
+        """
         if self._session is None or self._session.closed:
             # This connector runs the IEEE 2030.5 PKI-profile chain audit at
             # handshake time, gating every request method uniformly (not just
@@ -444,7 +460,10 @@ class Sep2Client:
                 headers=self._default_headers(),
                 connector=connector,
             )
-        return self._session
+            self._gated_session = None
+        if self._gated_session is None or self._gated_session.session is not self._session:
+            self._gated_session = GatedSession(self._session, self._comm_loss_simulation)
+        return self._gated_session
 
     def _forward_message(
         self,
@@ -567,6 +586,39 @@ class Sep2Client:
     def consecutive_failures(self) -> int:
         """Number of consecutive unreachable attempts since the last contact."""
         return self._consecutive_failures
+
+    @property
+    def comm_loss_simulation(self) -> CommLossSimulation:
+        """Arm state for the operator-triggered outage simulation.
+
+        Mechanism only: this client fails requests when armed and says nothing
+        about whether a simulation ought to be permitted. Whether the capability
+        is enabled at all, and how long a window may run, are decisions for the
+        application driving it -- see ``CsipClient.simulate_comm_loss``.
+        """
+        return self._comm_loss_simulation
+
+    async def arm_comm_loss_simulation(self, *, expires_at: float, drain_timeout: float) -> bool:
+        """Fail outbound requests from now on; wait for in-flight ones to finish.
+
+        Returns whether the drain completed. A False return means requests were
+        still talking to the server when the timeout elapsed, so the caller must
+        assume ``last_contact_epoch`` could still advance and decide what to do;
+        the gate itself is armed either way, before the wait, so nothing new
+        gets out while draining.
+        """
+        self._comm_loss_simulation.arm(expires_at=expires_at)
+        return await self._comm_loss_simulation.wait_until_idle(drain_timeout)
+
+    def disarm_comm_loss_simulation(self) -> None:
+        """Let outbound requests reach the server again.
+
+        Connectivity health is deliberately not touched here. It recovers the
+        ordinary way, on the next request that actually reaches the server, so
+        the restored state is something the link demonstrated rather than
+        something the simulation asserted.
+        """
+        self._comm_loss_simulation.disarm()
 
     def _record_contact(self, *, reachable: bool) -> None:
         """Update connectivity health from a request outcome.
