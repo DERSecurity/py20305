@@ -42,6 +42,35 @@ import aiohttp
 #: captured log must never mistake it for a genuine outage.
 SIMULATED_FAILURE_MESSAGE = "simulated loss of communications (operator-triggered)"
 
+
+class SimulatedTransportError(aiohttp.ClientOSError):
+    """The transport failure this gate injects.
+
+    Subclasses ``ClientOSError`` so it is caught as both an
+    ``aiohttp.ClientError`` and an ``OSError``, exactly like the real connection
+    failure it stands in for -- no handler in the client needs to know it
+    exists. Its own identity exists so *attribution* can be exact: a request
+    that was already in flight when the gate closed can still fail for real, and
+    only the failures raised from here were caused by the simulation.
+    """
+
+
+def is_simulated_failure(error: BaseException | None) -> bool:
+    """Whether ``error`` was raised by the gate, directly or as a cause.
+
+    Retry wraps exhausted transport failures into ``Sep2ConnectionError``, so
+    the injected error usually arrives as a ``__cause__`` rather than the
+    exception itself.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, SimulatedTransportError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
 #: Phases reported to the management API. ``recovering`` and the two terminal
 #: phases exist because clearing the gate is not the same event as leaving
 #: comms-loss mode -- recovery re-polls schedules and can still fail.
@@ -103,6 +132,22 @@ class CommLossSimulation:
         self._active = False
         self._expires = None
         self._phase = PHASE_RECOVERING
+        self._detail = None
+
+    def abort(self) -> None:
+        """Undo an activation that failed part-way, as though it never happened.
+
+        Distinct from :meth:`disarm`, which is the end-of-window transition and
+        moves the phase towards ``recovered``. A simulation that failed while
+        arming never isolated anything, so reporting it as recovering would
+        claim a phase it did not earn -- and nothing would ever advance it,
+        since the operator has no reason to clear a simulation that never
+        started.
+        """
+        self._active = False
+        self._started = None
+        self._expires = None
+        self._phase = PHASE_INACTIVE
         self._detail = None
 
     def note_recovered(self) -> None:
@@ -175,7 +220,7 @@ class _GatedRequestContext:
 
     async def __aenter__(self) -> Any:
         if self._simulation.active:
-            raise aiohttp.ClientOSError(SIMULATED_FAILURE_MESSAGE)
+            raise SimulatedTransportError(SIMULATED_FAILURE_MESSAGE)
         self._simulation.note_request_started()
         self._counted = True
         try:
@@ -244,4 +289,19 @@ class GatedSession:
     def request(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
         return _GatedRequestContext(
             self._simulation, lambda: self._session.request(*args, **kwargs)
+        )
+
+    # The client uses only the five verbs above today. These three are wrapped
+    # anyway: reaching the network through an unwrapped verb would be both
+    # ungated and untracked, and a future caller has no reason to suspect that
+    # the wrapper covers some verbs and not others.
+    def head(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
+        return _GatedRequestContext(self._simulation, lambda: self._session.head(*args, **kwargs))
+
+    def patch(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
+        return _GatedRequestContext(self._simulation, lambda: self._session.patch(*args, **kwargs))
+
+    def options(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
+        return _GatedRequestContext(
+            self._simulation, lambda: self._session.options(*args, **kwargs)
         )

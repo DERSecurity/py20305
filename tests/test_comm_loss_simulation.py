@@ -16,7 +16,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiohttp import web
 
-from py20305.client.comm_loss_simulation import SIMULATED_FAILURE_MESSAGE, CommLossSimulation
+from py20305.client.comm_loss_simulation import (
+    SIMULATED_FAILURE_MESSAGE,
+    CommLossSimulation,
+    SimulatedTransportError,
+)
 from py20305.client.csip_client import CsipClient
 from py20305.client.errors import Sep2ConnectionError, Sep2ProtocolError
 from py20305.client.http import Sep2Client
@@ -415,7 +419,9 @@ class TestSimulationCoordination:
         """A forgotten simulation must not strand a live site."""
         client = self._client()
 
-        with patch.object(client, "clear_comm_loss_simulation", new_callable=AsyncMock) as clear:
+        with patch.object(
+            client, "_clear_comm_loss_simulation_locked", new_callable=AsyncMock
+        ) as clear:
             await client.simulate_comm_loss(0.05)
             assert client._http.comm_loss_simulation.active is True
             await asyncio.sleep(0.15)
@@ -450,7 +456,9 @@ class TestSimulationDiagnostics:
         client._http.comm_loss_simulation.arm(expires_at=_FAR_FUTURE)
         # Arming alone does not mark an outage: attribution follows the failures
         # that actually produced the silence. See TestSimulationAttribution.
-        client._http._record_contact(reachable=False)
+        client._http._record_contact(
+            reachable=False, error=SimulatedTransportError(SIMULATED_FAILURE_MESSAGE)
+        )
 
         with patch("py20305.diagnostics.report") as report:
             await self._enter(client)

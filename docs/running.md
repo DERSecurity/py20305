@@ -156,9 +156,19 @@ A few things worth knowing before you point this at a live site:
   ordinary comms-loss rule, not an artifact of the simulation: the resume-after
   boundary holds the DER at the planning limit until an event starting after it
   arrives.
-- **Records caused by the simulation are marked.** Diagnostics it produces carry
-  a `simulated` flag, so a log captured from the device cannot be mistaken for a
-  genuine outage — and a record without the flag is genuine.
+- **The loss-of-communications record is marked.** When the injected failure is
+  what produced the silence, that diagnostic carries a `simulated` flag, so it
+  cannot be mistaken for a genuine outage. Attribution follows the failures
+  themselves, not merely whether a window was open: a link already down when you
+  arm a simulation still reports a genuine outage. The flag is on that entry
+  specifically — other diagnostics raised while a window is open are not marked,
+  deliberately, so that a real fault occurring during a test stays legible as
+  one.
+- **The redirect probe is not gated.** `run_redirect_probe` opens its own
+  connection for its first leg, so that step still reaches the network during a
+  window and will appear to succeed while the second leg fails. It does not feed
+  connectivity health, so the detector is unaffected — but the mixed result is
+  confusing if you run the probe mid-simulation.
 
 The client applies no policy of its own here: it will isolate itself whenever
 asked, for as long as asked. Deciding whether simulation should be available at

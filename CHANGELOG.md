@@ -33,11 +33,14 @@ below says so explicitly.
   scheduled probe, because recovery checks for and may re-POST the client's own
   EndDevice before it reaches the rediscovery lock, and two overlapping runs
   would send a live head-end two registrations for the same device.
-- Diagnostics produced by a simulated outage carry a `simulated` marker, applied
-  only to records the injected failure actually caused. A real fault occurring
-  while a window is open stays unmarked, so a log captured from a deployed
-  device reads either way round: marked records are test artifacts, and unmarked
-  ones are genuine.
+- The loss-of-communications diagnostic carries a `simulated` marker when the
+  injected failure is what produced the silence. Attribution follows the
+  failures themselves rather than whether a window happened to be open, so a
+  link already down when a simulation is armed, or a request that was in flight
+  and fails on its own, is still reported as the genuine outage it is. The
+  marker is on that entry specifically, not on every diagnostic emitted during a
+  window: a real fault occurring while a simulation runs must stay legible as a
+  real fault rather than being filed as a test artifact.
 
 ## [0.6.1] — 2026-09-10
 
