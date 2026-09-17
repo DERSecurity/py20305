@@ -77,6 +77,9 @@ class NotificationServer:
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # Set while an operator-triggered comms-loss simulation is running:
+        # notifications are still accepted on the wire but are not acted on.
+        self._suspended = False
 
     @property
     def on_notification(self) -> NotificationCallback | None:
@@ -86,6 +89,35 @@ class NotificationServer:
     @on_notification.setter
     def on_notification(self, callback: NotificationCallback | None) -> None:
         self._on_notification = callback
+
+    @property
+    def suspended(self) -> bool:
+        """Whether accepted notifications are being dropped instead of handled."""
+        return self._suspended
+
+    async def suspend(self, *, drain_timeout: float = 5.0) -> bool:
+        """Stop acting on notifications, and wait for any already running.
+
+        Returns whether the in-flight handlers finished in time. The wait is the
+        point: this server answers 201 and hands the notification to a
+        background task, so one accepted moments earlier is still running and
+        can apply a control *after* the caller believes the link is down -- a
+        fresh setpoint landing on a DER the operator thinks is isolated.
+
+        A False return means handlers were still running when the timeout
+        elapsed. New notifications are dropped either way, from the moment this
+        is called.
+        """
+        self._suspended = True
+        if not self._background_tasks:
+            return True
+        pending = tuple(self._background_tasks)
+        _, still_running = await asyncio.wait(pending, timeout=drain_timeout)
+        return not still_running
+
+    def resume(self) -> None:
+        """Act on notifications again."""
+        self._suspended = False
 
     @property
     def port(self) -> int:
@@ -287,6 +319,20 @@ class NotificationServer:
                 details={"remote": remote, "reason": "xsi:type mismatch"},
             )
             return web.Response(status=400, text="xsi:type mismatch")
+
+        if self._suspended:
+            # A real outage would stop these arriving at all. The listener stays
+            # up (the operator is driving the test through this device), so the
+            # notification is accepted and dropped rather than refused: answering
+            # with an error would tell the head-end its delivery failed, and some
+            # servers respond by dropping the subscription -- a side effect on
+            # the customer's server that a local simulation has no business
+            # causing. Recovery re-polls schedules, so nothing is lost by it.
+            logger.info(
+                "Notification for %s dropped: comms-loss simulation active",
+                notification.subscribed_resource or "<unknown>",
+            )
+            return web.Response(status=201, text="Created")
 
         if self._on_notification is not None:
             task = asyncio.create_task(self._safe_notify(notification))
