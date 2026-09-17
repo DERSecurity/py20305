@@ -911,3 +911,112 @@ class TestNotificationDiagnostics:
         assert len(callback_warnings) == 1
         # And dedup hits incremented count beyond 1.
         assert callback_warnings[0].get("count", 1) >= 2
+
+
+class TestNotificationSuspension:
+    """Suspension during an operator-triggered comms-loss simulation.
+
+    A real outage stops these arriving at all. The listener stays up here (the
+    operator is driving the test through this device), so suspension is what
+    stops the aggregator acting on fresh controls while it is nominally offline.
+    """
+
+    @pytest.fixture
+    async def server_and_client(self):
+        callback = AsyncMock()
+        server = NotificationServer(
+            host="127.0.0.1", port=0, tls=None, on_notification=callback
+        )
+        app = web.Application()
+        app.router.add_post("/notify", server._handle_notify)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        yield server, client, callback
+        await client.close()
+
+    async def _post(self, client):
+        return await client.post(
+            "/notify",
+            data=NOTIFICATION_STATUS_0,
+            headers={"Content-Type": "application/sep+xml"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_suspended_server_accepts_but_does_not_act(self, server_and_client):
+        """Accepted on the wire, dropped before the callback.
+
+        Answering with an error instead would tell the head-end its delivery
+        failed, and some servers respond by dropping the subscription -- a side
+        effect on the customer's server that a local simulation must not cause.
+        """
+        server, client, callback = server_and_client
+        assert await server.suspend() is True
+
+        resp = await self._post(client)
+
+        assert resp.status == 201
+        await asyncio.sleep(0)
+        callback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resume_restores_handling(self, server_and_client):
+        server, client, callback = server_and_client
+        await server.suspend()
+        await self._post(client)
+        await asyncio.sleep(0)
+        callback.assert_not_called()
+
+        server.resume()
+        await self._post(client)
+        await asyncio.sleep(0)
+
+        callback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_suspend_waits_for_a_handler_already_running(self, server_and_client):
+        """The race this drain exists for.
+
+        The server answers 201 and hands the notification to a background task,
+        so one accepted moments before suspension is still running and would
+        otherwise apply a control after the caller believes the link is down --
+        a fresh setpoint landing on a DER the operator thinks is isolated.
+        """
+        server, client, callback = server_and_client
+        applied = []
+
+        async def slow_handler(notification):
+            await asyncio.sleep(0.2)
+            applied.append(notification)
+
+        callback.side_effect = slow_handler
+
+        await self._post(client)
+        # Let the background task start, but not finish.
+        await asyncio.sleep(0.01)
+        assert applied == []
+
+        drained = await server.suspend(drain_timeout=5.0)
+
+        assert drained is True
+        # The in-flight handler ran to completion before suspend returned, so
+        # no control can land after this point.
+        assert len(applied) == 1
+
+    @pytest.mark.asyncio
+    async def test_suspend_reports_a_handler_that_outlives_the_drain(self, server_and_client):
+        """A drain that times out says so rather than claiming a clean window."""
+        server, client, callback = server_and_client
+
+        async def very_slow_handler(notification):
+            await asyncio.sleep(5)
+
+        callback.side_effect = very_slow_handler
+
+        await self._post(client)
+        await asyncio.sleep(0.01)
+
+        drained = await server.suspend(drain_timeout=0.01)
+
+        assert drained is False
+        # Suspended regardless: new notifications stop from the moment of the call.
+        assert server.suspended is True

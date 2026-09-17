@@ -113,6 +113,67 @@ an empty one. The distinction matters: an empty list is a server that removed
 every event, and treating a failed fetch as one would revert every device on a
 single transient error.
 
+## Simulating a loss of communications
+
+`comms_loss_seconds` puts the client into loss-of-communications mode after that
+long without reaching the server: it opts out of the rest of any active event,
+manages the DER at the planning limit, and keeps opting out until contact
+returns. Verifying that behavior normally means taking the server away, which is
+not something you can do to a production head-end.
+
+`CsipClient.simulate_comm_loss(duration_seconds)` produces the silence instead.
+Outbound requests fail as though the network were gone, and notifications are
+accepted but not acted on, so the ordinary detector sees exactly what a real
+outage looks like and reacts the same way. Nothing is faked downstream of that:
+the detector, the diagnostics, the retry ladder and the recovery path all run
+for real.
+
+```python
+status = await client.simulate_comm_loss(1200)   # 20 minutes
+...
+status = await client.clear_comm_loss_simulation()
+```
+
+A few things worth knowing before you point this at a live site:
+
+- **The window always closes.** It expires on its own, and a restart clears it.
+  There is no way to leave a site isolated by forgetting about it.
+- **Activation waits for work already in progress.** A request already talking
+  to the server, or a notification handler already running, is allowed to
+  finish first — otherwise one of them completes just after you were told the
+  link was down, and refreshes the contact clock or applies a setpoint. The
+  returned status reports whether both drains finished; if one did not, the
+  isolation was not clean and the window is still open.
+- **Clearing drives recovery immediately.** Left to the schedule, the client
+  would not leave comms-loss mode until the connectivity heartbeat and then a
+  probe tick had both come round, which on default settings is over two minutes
+  of looking like nothing happened.
+- **`phase` tells you how recovery went.** Clearing the gate and leaving
+  comms-loss mode are different events, and recovery re-polls schedules against
+  the real server, so it can fail. Watch for `recovered` rather than assuming
+  it.
+- **The device does not rejoin the event it was opted out of.** That is the
+  ordinary comms-loss rule, not an artifact of the simulation: the resume-after
+  boundary holds the DER at the planning limit until an event starting after it
+  arrives.
+- **The loss-of-communications record is marked.** When the injected failure is
+  what produced the silence, that diagnostic carries a `simulated` flag, so it
+  cannot be mistaken for a genuine outage. Attribution follows the failures
+  themselves, not merely whether a window was open: a link already down when you
+  arm a simulation still reports a genuine outage. The flag is on that entry
+  specifically — other diagnostics raised while a window is open are not marked,
+  deliberately, so that a real fault occurring during a test stays legible as
+  one.
+- **The redirect probe is not gated.** `run_redirect_probe` opens its own
+  connection for its first leg, so that step still reaches the network during a
+  window and will appear to succeed while the second leg fails. It does not feed
+  connectivity health, so the detector is unaffected — but the mixed result is
+  confusing if you run the probe mid-simulation.
+
+The client applies no policy of its own here: it will isolate itself whenever
+asked, for as long as asked. Deciding whether simulation should be available at
+all, and bounding how long a window may run, belongs to whatever is driving it.
+
 ## Stopping
 
 `SIGINT` or `SIGTERM` asks it to stop; it finishes what it is doing and closes

@@ -5,6 +5,43 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
+## [0.7.0] — 2026-09-17
+
+- A client can now be told to simulate a loss of communications with its
+  head-end, so loss-of-communications behavior can be verified against a
+  production server without taking that server out of service.
+  `CsipClient.simulate_comm_loss(duration_seconds)` fails outbound requests as
+  though the network were gone and stops acting on notifications;
+  `clear_comm_loss_simulation()` restores the link and drives recovery.
+  Everything downstream of the silence is the ordinary machinery: the detector,
+  the diagnostics, the retry ladder and the recovery path all run for real,
+  because the simulation supplies only the input they already react to. The
+  window always closes — it expires on its own, and a restart clears it — and
+  the client applies no policy beyond that, leaving whether simulation is
+  permitted at all, and for how long, to whatever drives it.
+- Activation waits for work already in progress before reporting the link down.
+  A request already talking to the server, or a notification handler already
+  running, would otherwise finish just afterwards and refresh the contact clock
+  or apply a setpoint to a device the operator believes is isolated. The
+  returned status says whether both drains completed, so an isolation that was
+  not clean is visible rather than assumed.
+- Clearing a simulation drives recovery rather than waiting for the schedule.
+  The detector only leaves loss-of-communications mode once a request actually
+  reaches the server, which waits on the connectivity heartbeat and then a probe
+  tick — on default settings, more than two minutes in which a restored link
+  looks like a failed one. That recovery runs under the same per-key lock as the
+  scheduled probe, because recovery checks for and may re-POST the client's own
+  EndDevice before it reaches the rediscovery lock, and two overlapping runs
+  would send a live head-end two registrations for the same device.
+- The loss-of-communications diagnostic carries a `simulated` marker when the
+  injected failure is what produced the silence. Attribution follows the
+  failures themselves rather than whether a window happened to be open, so a
+  link already down when a simulation is armed, or a request that was in flight
+  and fails on its own, is still reported as the genuine outage it is. The
+  marker is on that entry specifically, not on every diagnostic emitted during a
+  window: a real fault occurring while a simulation runs must stay legible as a
+  real fault rather than being filed as a test artifact.
+
 ## [0.6.1] — 2026-09-10
 
 No functional changes. The README has been updated.

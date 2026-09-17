@@ -16,6 +16,11 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from py20305.client.comm_loss_simulation import (
+    CommLossSimulation,
+    GatedSession,
+    is_simulated_failure,
+)
 from py20305.client.connector import Ieee2030TCPConnector, SocketPair
 from py20305.client.errors import (
     Sep2ConnectionError,
@@ -171,6 +176,10 @@ class Sep2Client:
         self._tls_config = tls
         self._ssl: ssl.SSLContext | bool = create_ssl_context(tls) if tls else False
         self._session: aiohttp.ClientSession | None = None
+        # Cached wrapper over `_session`, rebuilt whenever the session is. Held
+        # so repeated `_get_session()` calls return the same object: callers
+        # (and tests) compare sessions by identity to detect a rebuild.
+        self._gated_session: GatedSession | None = None
         self._forwarder = forwarder
         self._traffic_recorder = traffic_recorder
         self._csip_aus_mode = False
@@ -196,6 +205,16 @@ class Sep2Client:
         # _last_contact_epoch now) for the connectivity probe and status surface.
         self._last_validated_epoch: int | None = None
         self._consecutive_failures = 0
+        # Operator-triggered outage simulation, plus the in-flight request count
+        # it needs to drain on activation. Inert unless armed; the gate lives in
+        # the session wrapper so the failure lands inside each caller's own try.
+        self._comm_loss_simulation = CommLossSimulation()
+        # Whether the *current* run of silence was caused by the simulation.
+        # None between silences. Tracked per failure rather than read off the
+        # arm state at the end, because "a simulation is running now" does not
+        # mean "a simulation caused this": a link already down when the operator
+        # armed one would otherwise have its genuine outage labelled simulated.
+        self._silence_simulated: bool | None = None
         # Carried as a default header on every request (see `_default_headers`).
         # Off by default; operator opts in via `TlsSettings.send_lfdi_header`
         # for proxy-fronted deployments that strip the client cert before the
@@ -431,7 +450,14 @@ class Sep2Client:
             headers[self._lfdi_header_name] = self._client_lfdi
         return headers
 
-    def _get_session(self) -> aiohttp.ClientSession:
+    def _get_session(self) -> GatedSession:
+        """Return the session every request path uses, wrapped for simulation.
+
+        The wrapper is returned whether or not a simulation is armed: it counts
+        in-flight requests continuously, which is what lets an activation wait
+        for requests already talking to the server rather than reporting the
+        link down while one could still refresh ``last_contact_epoch``.
+        """
         if self._session is None or self._session.closed:
             # This connector runs the IEEE 2030.5 PKI-profile chain audit at
             # handshake time, gating every request method uniformly (not just
@@ -444,7 +470,10 @@ class Sep2Client:
                 headers=self._default_headers(),
                 connector=connector,
             )
-        return self._session
+            self._gated_session = None
+        if self._gated_session is None or self._gated_session.session is not self._session:
+            self._gated_session = GatedSession(self._session, self._comm_loss_simulation)
+        return self._gated_session
 
     def _forward_message(
         self,
@@ -568,7 +597,51 @@ class Sep2Client:
         """Number of consecutive unreachable attempts since the last contact."""
         return self._consecutive_failures
 
-    def _record_contact(self, *, reachable: bool) -> None:
+    @property
+    def silence_is_simulated(self) -> bool | None:
+        """Whether the current run of silence was caused by a simulation.
+
+        ``None`` when the server is being reached. ``True`` only when every
+        failure since the last contact happened behind an armed gate, so a link
+        that was already down when a window opened is still reported as the
+        genuine outage it is.
+        """
+        return self._silence_simulated
+
+    @property
+    def comm_loss_simulation(self) -> CommLossSimulation:
+        """Arm state for the operator-triggered outage simulation.
+
+        Mechanism only: this client fails requests when armed and says nothing
+        about whether a simulation ought to be permitted. Whether the capability
+        is enabled at all, and how long a window may run, are decisions for the
+        application driving it -- see ``CsipClient.simulate_comm_loss``.
+        """
+        return self._comm_loss_simulation
+
+    async def arm_comm_loss_simulation(self, *, expires_at: float, drain_timeout: float) -> bool:
+        """Fail outbound requests from now on; wait for in-flight ones to finish.
+
+        Returns whether the drain completed. A False return means requests were
+        still talking to the server when the timeout elapsed, so the caller must
+        assume ``last_contact_epoch`` could still advance and decide what to do;
+        the gate itself is armed either way, before the wait, so nothing new
+        gets out while draining.
+        """
+        self._comm_loss_simulation.arm(expires_at=expires_at)
+        return await self._comm_loss_simulation.wait_until_idle(drain_timeout)
+
+    def disarm_comm_loss_simulation(self) -> None:
+        """Let outbound requests reach the server again.
+
+        Connectivity health is deliberately not touched here. It recovers the
+        ordinary way, on the next request that actually reaches the server, so
+        the restored state is something the link demonstrated rather than
+        something the simulation asserted.
+        """
+        self._comm_loss_simulation.disarm()
+
+    def _record_contact(self, *, reachable: bool, error: BaseException | None = None) -> None:
         """Update connectivity health from a request outcome.
 
         ``server_alive`` means a reachable, IEEE-2030.5-cert-chain-valid peer, and
@@ -584,6 +657,17 @@ class Sep2Client:
         used to require is gone now that the audit runs at handshake.
         """
         if not reachable:
+            # Attribution follows the failure itself, not the arm state. A
+            # request already in flight when the gate closed is allowed to
+            # finish, and can fail for real while a window is open -- reading
+            # the arm state would file that genuine failure as injected.
+            injected = is_simulated_failure(error)
+            if self._silence_simulated is None:
+                self._silence_simulated = injected
+            elif not injected:
+                # A genuine failure anywhere in the run means the silence is not
+                # purely an artifact, even if a window was open for part of it.
+                self._silence_simulated = False
             self._server_alive = False
             self._consecutive_failures += 1
             return
@@ -591,6 +675,8 @@ class Sep2Client:
         self._consecutive_failures = 0
         self._server_alive = True
         self._last_validated_epoch = self._last_contact_epoch
+        # Contact ends the run of silence; the next one is attributed afresh.
+        self._silence_simulated = None
 
     async def _retry_observed(self, do_fn: Callable[[], Awaitable[T]]) -> T:
         """Run one logical request through retry, reporting its outcome.
@@ -647,7 +733,7 @@ class Sep2Client:
         except (Sep2ConnectionError, Sep2TlsError) as exc:
             # ``with_retry`` wraps exhausted transport failures (connect/timeout,
             # TLS handshake) into these -> server unreachable.
-            self._record_contact(reachable=False)
+            self._record_contact(reachable=False, error=exc)
             self._last_error = str(exc)
             raise
         except (Sep2ProtocolError, Sep2PayloadError, Sep2RateLimitError, Sep2RedirectError):
@@ -839,7 +925,7 @@ class Sep2Client:
                     "body": body,
                 }
         except (aiohttp.ClientError, OSError) as exc:
-            self._record_contact(reachable=False)
+            self._record_contact(reachable=False, error=exc)
             self._last_error = str(exc)
             return {"status_code": 0, "error": str(exc)}
 
@@ -927,7 +1013,7 @@ class Sep2Client:
                 }
         except (aiohttp.ClientError, OSError) as exc:
             self._record_traffic_response(verb, path, status=None, error=str(exc))
-            self._record_contact(reachable=False)
+            self._record_contact(reachable=False, error=exc)
             self._last_error = str(exc)
             return {"status_code": 0, "error": str(exc)}
 
@@ -1010,24 +1096,24 @@ class Sep2Client:
                 self._last_error = None
                 raise
             except CertChainError as exc:
-                self._record_contact(reachable=False)
+                self._record_contact(reachable=False, error=exc)
                 self._chain_validated = False
                 self._last_error = str(exc)
                 await self.close()
                 raise
             except ssl.SSLError as exc:
-                self._record_contact(reachable=False)
+                self._record_contact(reachable=False, error=exc)
                 self._chain_validated = False
                 self._last_error = str(exc)
                 raise
             except aiohttp.ClientError as exc:
-                self._record_contact(reachable=False)
+                self._record_contact(reachable=False, error=exc)
                 self._chain_validated = False
                 self._last_error = str(exc)
                 self._record_traffic_response("GET", path, error=str(exc))
                 raise OSError(str(exc)) from exc
             except OSError as exc:
-                self._record_contact(reachable=False)
+                self._record_contact(reachable=False, error=exc)
                 self._chain_validated = False
                 self._last_error = str(exc)
                 self._record_traffic_response("GET", path, error=str(exc))
@@ -1096,24 +1182,24 @@ class Sep2Client:
                 self._last_error = None
                 raise
             except CertChainError as exc:
-                self._record_contact(reachable=False)
+                self._record_contact(reachable=False, error=exc)
                 self._chain_validated = False
                 self._last_error = str(exc)
                 await self.close()
                 raise
             except ssl.SSLError as exc:
-                self._record_contact(reachable=False)
+                self._record_contact(reachable=False, error=exc)
                 self._chain_validated = False
                 self._last_error = str(exc)
                 raise
             except aiohttp.ClientError as exc:
-                self._record_contact(reachable=False)
+                self._record_contact(reachable=False, error=exc)
                 self._chain_validated = False
                 self._last_error = str(exc)
                 self._record_traffic_response("GET", path, error=str(exc))
                 raise OSError(str(exc)) from exc
             except OSError as exc:
-                self._record_contact(reachable=False)
+                self._record_contact(reachable=False, error=exc)
                 self._chain_validated = False
                 self._last_error = str(exc)
                 self._record_traffic_response("GET", path, error=str(exc))
