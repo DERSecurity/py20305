@@ -93,6 +93,34 @@ _LFDI_A = b"\xaa" * 20
 _LFDI_B = b"\xbb" * 20
 
 
+async def _post_concurrently(
+    http,
+    derc: Dercontrol1,
+    tracker: ResponseTracker,
+    *,
+    callers: int,
+    timeout: float = 5.0,
+) -> None:
+    """Run *callers* concurrent responses for one key, under a bound.
+
+    Every caller after the first parks on the winner's future, so a regression
+    that frees a claim without resolving that future leaves them suspended for
+    good. Unbounded, such a test does not fail -- it hangs, costing the whole
+    job's timeout and reporting no assertion at all, at whichever multi-caller
+    test runs first rather than at the one written to catch the defect. The
+    bound turns that back into a failure, at the test that names it.
+    """
+    await asyncio.wait_for(
+        asyncio.gather(
+            *[
+                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+                for _ in range(callers)
+            ]
+        ),
+        timeout=timeout,
+    )
+
+
 class TestResponseTracker:
     def test_not_sent_initially(self):
         t = ResponseTracker()
@@ -570,12 +598,7 @@ class TestConcurrentPostsCollapse:
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
-        await asyncio.gather(
-            *[
-                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
-                for _ in range(2)
-            ]
-        )
+        await _post_concurrently(http, derc, tracker, callers=2)
 
         assert posted == [ResponseCode.ACTIVE.value]
 
@@ -697,20 +720,22 @@ class TestTheLoserCoversAFailedWinner:
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
-        await asyncio.gather(
-            *[
-                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
-                for _ in range(2)
-            ]
-        )
+        await _post_concurrently(http, derc, tracker, callers=2)
 
         assert landed == [ResponseCode.ACTIVE.value], "the event's start must reach the server"
         assert len(attempts) == 2, "the second caller has to take over, not give up"
         assert tracker.already_sent(derc.m_rid.value, ResponseCode.ACTIVE, _LFDI_A)
 
     @pytest.mark.asyncio
-    async def test_a_successful_winner_still_silences_the_loser(self):
-        """The whole point of the reservation: one response, not two."""
+    async def test_the_winner_does_not_strand_its_losers_on_success(self):
+        """A winner that lands must silence its losers without stranding them.
+
+        Both ways of getting this wrong live on the one path: waking the losers
+        to post again is the duplicate the reservation exists to prevent, and
+        never waking them at all leaves them suspended on a future nobody will
+        resolve. The bound keeps the two distinguishable -- a duplicate fails
+        the assertion below, a strand fails the timeout.
+        """
         posted: list[int] = []
 
         async def post(path, body=None, *a, **kw):
@@ -723,14 +748,10 @@ class TestTheLoserCoversAFailedWinner:
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
-        await asyncio.gather(
-            *[
-                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
-                for _ in range(3)
-            ]
-        )
+        await _post_concurrently(http, derc, tracker, callers=3)
 
         assert posted == [ResponseCode.ACTIVE.value]
+        assert tracker._in_flight == {}
 
 
 class TestAClaimSurvivesNothing:
@@ -760,3 +781,123 @@ class TestAClaimSurvivesNothing:
         await post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1001)
 
         assert posted == [ResponseCode.ACTIVE.value]
+
+
+class TestTheHandoffUnderCancellation:
+    """Cancelling a POST that another caller is parked behind.
+
+    ``TestCancellationDoesNotLeakAClaim`` cancels a post with nobody waiting on
+    it and checks the key is claimable afterwards. These cover the case where a
+    waiter is already suspended on the winner's future when the cancellation
+    arrives, which is the sequence a shutdown produces: the fan-out is mid-flight
+    and one of its coroutines is waiting on another. The claim being freed is not
+    enough there -- the parked waiter has to be woken, or it waits on a future
+    nobody will ever resolve.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_winner_wakes_the_waiter_parked_behind_it(self):
+        started = asyncio.Event()
+        landed: list[int] = []
+
+        async def hang(path, body=None, *a, **kw):
+            started.set()
+            await asyncio.Event().wait()  # never returns; the caller cancels us
+
+        async def succeed(path, body=None, *a, **kw):
+            landed.append(body.status)
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=hang)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        winner = asyncio.ensure_future(
+            post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+        )
+        await started.wait()
+        waiter = asyncio.ensure_future(
+            post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+        )
+        await asyncio.sleep(0)  # let the waiter reach its await on the claim
+
+        http.post = AsyncMock(side_effect=succeed)
+        winner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await winner
+
+        # The timeout is the assertion: without the wake-up this never returns.
+        await asyncio.wait_for(waiter, timeout=2.0)
+        assert landed == [ResponseCode.ACTIVE.value]
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_waiter_leaves_the_winner_alone(self):
+        """Cancelling the waiter must not take the in-flight POST down with it."""
+        started = asyncio.Event()
+        finish = asyncio.Event()
+        landed: list[int] = []
+
+        async def slow(path, body=None, *a, **kw):
+            started.set()
+            await finish.wait()
+            landed.append(body.status)
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=slow)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        winner = asyncio.ensure_future(
+            post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+        )
+        await started.wait()
+        waiter = asyncio.ensure_future(
+            post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+        )
+        await asyncio.sleep(0)
+
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        finish.set()
+        await asyncio.wait_for(winner, timeout=2.0)
+        assert landed == [ResponseCode.ACTIVE.value]
+
+
+class TestOnlyOneWaiterTakesOver:
+    """A failed winner promotes one successor, not all of them.
+
+    ``TestTheLoserCoversAFailedWinner`` proves a single waiter takes over. With
+    several parked, the handshake has to hand the key to exactly one: waking them
+    all to post would reintroduce the duplicate the reservation exists to stop,
+    on the very path where the first attempt already failed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_four_waiters_produce_one_retry_between_them(self):
+        attempts: list[int] = []
+        landed: list[int] = []
+
+        async def post(path, body=None, *a, **kw):
+            attempts.append(body.status)
+            await asyncio.sleep(0)  # let the others reach the claim
+            if len(attempts) == 1:
+                raise Sep2ConnectionError("server went away")
+            landed.append(body.status)
+
+        http = AsyncMock()
+        http.post = AsyncMock(side_effect=post)
+        http.server_2018_compat = False
+        derc = _make_derc(reply_to="/rsps")
+        tracker = ResponseTracker()
+
+        # The helper carries the bound: a handshake that frees the claim
+        # without waking the parked waiters leaves them here for good.
+        await _post_concurrently(http, derc, tracker, callers=5)
+
+        assert len(attempts) == 2, f"one retry expected, got {len(attempts) - 1}"
+        assert landed == [ResponseCode.ACTIVE.value]
+        assert tracker._in_flight == {}, "a claim outliving the exchange is never pruned"
