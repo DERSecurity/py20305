@@ -93,6 +93,34 @@ _LFDI_A = b"\xaa" * 20
 _LFDI_B = b"\xbb" * 20
 
 
+async def _post_concurrently(
+    http,
+    derc: Dercontrol1,
+    tracker: ResponseTracker,
+    *,
+    callers: int,
+    timeout: float = 5.0,
+) -> None:
+    """Run *callers* concurrent responses for one key, under a bound.
+
+    Every caller after the first parks on the winner's future, so a regression
+    that frees a claim without resolving that future leaves them suspended for
+    good. Unbounded, such a test does not fail -- it hangs, costing the whole
+    job's timeout and reporting no assertion at all, at whichever multi-caller
+    test runs first rather than at the one written to catch the defect. The
+    bound turns that back into a failure, at the test that names it.
+    """
+    await asyncio.wait_for(
+        asyncio.gather(
+            *[
+                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
+                for _ in range(callers)
+            ]
+        ),
+        timeout=timeout,
+    )
+
+
 class TestResponseTracker:
     def test_not_sent_initially(self):
         t = ResponseTracker()
@@ -570,12 +598,7 @@ class TestConcurrentPostsCollapse:
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
-        await asyncio.gather(
-            *[
-                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
-                for _ in range(2)
-            ]
-        )
+        await _post_concurrently(http, derc, tracker, callers=2)
 
         assert posted == [ResponseCode.ACTIVE.value]
 
@@ -697,48 +720,21 @@ class TestTheLoserCoversAFailedWinner:
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
-        await asyncio.gather(
-            *[
-                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
-                for _ in range(2)
-            ]
-        )
+        await _post_concurrently(http, derc, tracker, callers=2)
 
         assert landed == [ResponseCode.ACTIVE.value], "the event's start must reach the server"
         assert len(attempts) == 2, "the second caller has to take over, not give up"
         assert tracker.already_sent(derc.m_rid.value, ResponseCode.ACTIVE, _LFDI_A)
 
     @pytest.mark.asyncio
-    async def test_a_successful_winner_still_silences_the_loser(self):
-        """The whole point of the reservation: one response, not two."""
-        posted: list[int] = []
-
-        async def post(path, body=None, *a, **kw):
-            await asyncio.sleep(0)
-            posted.append(body.status)
-
-        http = AsyncMock()
-        http.post = AsyncMock(side_effect=post)
-        http.server_2018_compat = False
-        derc = _make_derc(reply_to="/rsps")
-        tracker = ResponseTracker()
-
-        await asyncio.gather(
-            *[
-                post_der_response(http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000)
-                for _ in range(3)
-            ]
-        )
-
-        assert posted == [ResponseCode.ACTIVE.value]
-
-    @pytest.mark.asyncio
     async def test_the_winner_does_not_strand_its_losers_on_success(self):
-        """A winner that lands still has to wake whoever queued behind it.
+        """A winner that lands must silence its losers without stranding them.
 
-        Separated from the test above because the failure is different in kind:
-        that one reports a duplicate, this one never returns at all. Bounded so
-        the regression is a failure rather than a hung suite.
+        Both ways of getting this wrong live on the one path: waking the losers
+        to post again is the duplicate the reservation exists to prevent, and
+        never waking them at all leaves them suspended on a future nobody will
+        resolve. The bound keeps the two distinguishable -- a duplicate fails
+        the assertion below, a strand fails the timeout.
         """
         posted: list[int] = []
 
@@ -752,17 +748,7 @@ class TestTheLoserCoversAFailedWinner:
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
-        await asyncio.wait_for(
-            asyncio.gather(
-                *[
-                    post_der_response(
-                        http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000
-                    )
-                    for _ in range(3)
-                ]
-            ),
-            timeout=5.0,
-        )
+        await _post_concurrently(http, derc, tracker, callers=3)
 
         assert posted == [ResponseCode.ACTIVE.value]
         assert tracker._in_flight == {}
@@ -908,20 +894,9 @@ class TestOnlyOneWaiterTakesOver:
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
-        # Bounded: a handshake that frees the claim without waking the parked
-        # waiters would hang here rather than fail, and a hung test tells CI
-        # much less than a failed one.
-        await asyncio.wait_for(
-            asyncio.gather(
-                *[
-                    post_der_response(
-                        http, derc, ResponseCode.ACTIVE, _LFDI_A, tracker, now_ts=1000
-                    )
-                    for _ in range(5)
-                ]
-            ),
-            timeout=5.0,
-        )
+        # The helper carries the bound: a handshake that frees the claim
+        # without waking the parked waiters leaves them here for good.
+        await _post_concurrently(http, derc, tracker, callers=5)
 
         assert len(attempts) == 2, f"one retry expected, got {len(attempts) - 1}"
         assert landed == [ResponseCode.ACTIVE.value]
