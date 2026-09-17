@@ -58,6 +58,7 @@ def build_der_image(
     hertz: int = 6001,
     w_max: int = 10000,
     rate_settings: bool = True,
+    w_sf: int = 0,
 ) -> bytes:
     """A plausible inverter: measurements in 701, ratings in 702, controls in 704.
 
@@ -69,7 +70,15 @@ def build_der_image(
     discharge rate settings that the watts-typed active-power limits write.
     Neither carries an IEEE 1547 standards tag, so a device may omit them;
     pass ``False`` to model one that does and exercise the fallback route.
+
+    ``w_sf`` is model 702's active-power scale factor. It defaults to 0, where
+    raw registers and watts coincide and a scaling bug is invisible; pass a
+    non-zero value (raw = watts / 10**w_sf) to make the encoding observable.
     """
+    # Watt-valued points in 702 are stored raw and scaled by W_SF.
+    def w_raw(watts: int) -> int:
+        return round(watts / (10**w_sf))
+
     common = ss.Model(1)
     common.points["ID"].value = 1
     common.points["L"].value = common.len - 2
@@ -90,19 +99,19 @@ def build_der_image(
     m702 = ss.Model(702)
     m702.points["ID"].value = 702
     m702.points["L"].value = m702.len - 2
-    m702.points["W_SF"].value = 0
+    m702.points["W_SF"].value = w_sf
     # Both flavors: the scan gate requires the rating, and
     # fetch_configuration reads the adjusted setting.
-    m702.points["WMaxRtg"].value = w_max
-    m702.points["WMax"].value = w_max
+    m702.points["WMaxRtg"].value = w_raw(w_max)
+    m702.points["WMax"].value = w_raw(w_max)
     if rate_settings:
         # Targets of opModMaxLimWAbsorb (charge) and opModMaxLimWInject
         # (discharge). Seeded at the rating so they read back as implemented;
         # a control then adjusts them downward.
-        m702.points["WChaRteMaxRtg"].value = w_max
-        m702.points["WDisChaRteMaxRtg"].value = w_max
-        m702.points["WChaRteMax"].value = w_max
-        m702.points["WDisChaRteMax"].value = w_max
+        m702.points["WChaRteMaxRtg"].value = w_raw(w_max)
+        m702.points["WDisChaRteMaxRtg"].value = w_raw(w_max)
+        m702.points["WChaRteMax"].value = w_raw(w_max)
+        m702.points["WDisChaRteMax"].value = w_raw(w_max)
 
     m704 = ss.Model(704)
     m704.points["ID"].value = 704

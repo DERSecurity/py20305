@@ -192,6 +192,57 @@ async def test_watts_limits_leave_the_percent_register_alone(modbus):
     assert point_address(modbus.image, 704, "WMaxLimPct") not in written
 
 
+async def test_inject_encodes_against_the_scale_factor():
+    """The rate settings are raw uint16 scaled by model 702's W_SF, and the
+    default image uses W_SF=0, where watts and raw registers coincide and a
+    scaling bug is invisible. At W_SF=1 a 4000 W limit must reach the wire as
+    raw 400 -- not 4000 (unscaled) and not 40 (double-scaled)."""
+    handle = await _start_modbus(build_der_image(w_sf=1))
+    try:
+        connector = await _resolve(handle.registry())
+        await connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        addr = point_address(handle.image, 702, "WDisChaRteMax")
+        assert handle.server.registers[addr] == 400
+    finally:
+        await handle.server.close()
+
+
+async def test_inject_also_writes_wmax_on_the_wire(modbus):
+    """Some PV systems implement no charge/discharge rate points and honour only
+    WMax, so both registers carry the limit."""
+    connector = await _resolve(modbus.registry())
+    await connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+    written = _written_addresses(modbus.server)
+    wmax = point_address(modbus.image, 702, "WMax")
+    assert wmax in written, "WMax was never written"
+    assert modbus.server.registers[wmax] == 4000
+
+
+async def test_discharge_rate_is_read_back(modbus):
+    """A head-end must be able to read back the limit it set: WDisChaRteMax and
+    its rating were declared on the connector base and mapped into DERSettings /
+    DERCapability, but no SunSpec connector populated them."""
+    connector = await _resolve(modbus.registry())
+    await connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+    configuration = await connector.fetch_configuration()
+    assert configuration["WDisChaRteMax"] == {"value": 4000, "multiplier": 0}
+    nameplate = await connector.fetch_nameplate()
+    assert nameplate["WDisChaRteMaxRtg"] == {"value": 10000, "multiplier": 0}
+
+
+async def test_discharge_rate_omitted_when_unimplemented(modbus_without_rate_settings):
+    """An unimplemented point must be omitted, not reported as a zero limit."""
+    connector = await _resolve(modbus_without_rate_settings.registry())
+
+    configuration = await connector.fetch_configuration()
+    assert "WDisChaRteMax" not in configuration
+    nameplate = await connector.fetch_nameplate()
+    assert "WDisChaRteMaxRtg" not in nameplate
+
+
 async def test_inject_falls_back_to_the_percent_register(modbus_without_rate_settings):
     """A device lacking WDisChaRteMax still gets an inject limit, via the
     percent route: 4000 W against WMax=10000 becomes WMaxLimPct=40."""

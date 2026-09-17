@@ -220,31 +220,52 @@ def _require_percent(pct: object, label: str) -> float:
     return value
 
 
-def _require_uint16_watts(watts: object, w_sf: int, label: str) -> float:
-    """Return *watts* as a float, or raise if it will not encode into the register.
+def _require_watts(watts: object, label: str) -> float:
+    """Return *watts* as a finite, non-negative float, or raise.
 
-    The model 702 rate settings are ``uint16`` scaled by ``W_SF``, so the value
-    that actually reaches the wire is ``watts / 10**W_SF``. Same unbounded-input
-    problem as :func:`_require_percent`, with the scale factor added: nothing
-    upstream bounds the watts against *this* device's ``W_SF``, and an
-    out-of-range result dies inside pysunspec2's encoder (``'H' format requires
+    Route-independent validation, applied before the connector decides whether a
+    limit lands on a model 702 rate setting or on the percent fallback. Both
+    routes need a usable non-negative magnitude, and neither can be trusted to
+    notice a bad one on its own: the register path would hand it to pysunspec2's
+    encoder, and the fallback would divide it into a percent, where a negative
+    silently clamps to 0 and commands the full curtailment nobody asked for.
+
+    Negative is a refusal rather than a clamp because IEEE 2030.5 types these
+    controls as ``UnsignedActivePower``: a negative is not a limit the profile
+    can express, so there is nothing to honour.
+    """
+    value = _as_number(watts, label, "watts")
+    if value < 0:
+        raise ConnectorValueError(
+            f"{label} {watts} W is negative; IEEE 2030.5 types it as an "
+            f"UnsignedActivePower. Refusing to write."
+        )
+    return value
+
+
+def _require_uint16_watts(watts: float, w_sf: int, label: str) -> float:
+    """Return *watts*, or raise if it will not encode into the register.
+
+    Takes the device-specific upper bound that :func:`_require_watts` cannot:
+    the model 702 rate settings are ``uint16`` scaled by ``W_SF``, so the value
+    that actually reaches the wire is ``watts / 10**W_SF``. Nothing upstream
+    bounds the watts against *this* device's ``W_SF``, and an out-of-range
+    result dies inside pysunspec2's encoder (``'H' format requires
     0 <= number <= 65535``) partway through the write.
 
     Deliberately a refusal rather than a clamp. Clamping a derived percent to 100
     still expresses the operator's limit, because the percent is only a
-    representation of it; here an overflowing value is either a negative limit or
-    one this device cannot represent at all, so there is nothing faithful to
-    write.
+    representation of it; here an overflowing value is one this device cannot
+    represent at all, so there is nothing faithful to write.
     """
-    value = _as_number(watts, label, "watts")
-    raw = round(value / (10**w_sf))
+    raw = round(watts / (10**w_sf))
     if not _U16_MIN <= raw <= _U16_MAX:
         raise ConnectorValueError(
             f"{label} {watts} W does not fit the model 702 uint16 register at "
             f"W_SF={w_sf} (encodes to {raw}, outside [{_U16_MIN}, {_U16_MAX}]). "
             f"Refusing to write."
         )
-    return value
+    return watts
 
 
 class SunSpecModbusConnector:
@@ -895,8 +916,11 @@ class SunSpecModbusConnector:
         the matching model 702 rate setting: generation (``"inj"``) onto
         ``WDisChaRteMax``, absorption (``"abs"``) onto ``WChaRteMax``.
 
-        Neither register carries an IEEE 1547 standards tag in model 702, so a
-        device need not implement either; ``_apply_p_lim_w_without_register``
+        Inject additionally mirrors its value onto ``WMax`` -- see
+        ``_mirror_inject_onto_wmax`` for why.
+
+        Neither rate setting carries an IEEE 1547 standards tag in model 702, so
+        a device need not implement either; ``_apply_p_lim_w_without_register``
         handles that case.
 
         Clearing a control writes nothing to model 702. These are settings
@@ -920,24 +944,60 @@ class SunSpecModbusConnector:
             # own: an inject cap the fallback route installed on 704 WMaxLimPct
             # must still fall, or it would outlive the event that imposed it.
             self._p_lim_w_settings[slot] = None
-            if slot == "inj":
+            if slot == "inj" and self._p_lim_slots["inj"] != (False, None):
+                # Guarded: only the fallback route populates this slot. On the
+                # direct route model 704 belongs to opModMaxLimW alone, and
+                # re-entering the merge would rewrite that control's register
+                # for a teardown that has nothing to do with it.
                 self._apply_inject_pct_slot("inj", enabled, None)
-            elif not enabled:
+            elif slot == "abs" and not enabled:
                 # Re-arm the not-applied warning so a future enable is surfaced
                 # once more rather than silently swallowed.
                 self._p_lim_abs_warned = False
             return
 
+        # Validated before the route is chosen: the fallback divides this value
+        # into a percent, where a negative would silently clamp to full
+        # curtailment and a non-number would raise something untyped.
+        value = _require_watts(watts, control)
+
         model_702 = self._get_model(702)
         point = getattr(model_702, point_name)
         if point.value is None:  # register not implemented by this device
-            self._apply_p_lim_w_without_register(slot, watts, model_702)
+            self._apply_p_lim_w_without_register(slot, value, model_702)
             return
 
-        value = _require_uint16_watts(watts, model_702.W_SF.value, control)
+        _require_uint16_watts(value, model_702.W_SF.value, control)
         point.cvalue = value
+        if slot == "inj":
+            self._mirror_inject_onto_wmax(model_702, value)
         model_702.write()
         self._p_lim_w_settings[slot] = value
+
+    def _mirror_inject_onto_wmax(self, model_702: Any, watts: float) -> None:
+        """Write an inject limit to WMax as well as WDisChaRteMax.
+
+        Some PV systems do not implement the charge / discharge rate points at
+        all and honour only WMax, so an inject limit that went solely to
+        WDisChaRteMax would not be enforced on them. Writing both to the same
+        value costs one register in the same transaction and covers both kinds
+        of device; where both are honoured the two agree, so the extra write is
+        inert.
+
+        Clamped to the nameplate rating when it is known. A limit above WMaxRtg
+        is a valid request -- it simply does not bind -- but a WMax *above*
+        nameplate is meaningless, and a device that rejects it would fail the
+        whole model write and take WDisChaRteMax down with it.
+
+        Note the coupling this creates: WMax is the base that WMaxLimPct is a
+        percent of, so lowering it here also lowers what a subsequent
+        opModMaxLimW percent resolves to in watts. That is arguably the right
+        composition -- the two controls then agree on the device's ceiling --
+        but it is a side effect on a register no other control writes.
+        """
+        wmax_rtg = model_702.WMaxRtg.cvalue
+        target = min(watts, wmax_rtg) if wmax_rtg else watts
+        model_702.WMax.cvalue = target
 
     def _apply_p_lim_w_without_register(
         self, slot: str, watts: float, model_702: Any

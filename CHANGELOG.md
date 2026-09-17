@@ -24,6 +24,15 @@ below says so explicitly.
   absorb-direction active-power limit, so the control had nowhere to go and was
   recorded for diagnostics but never written; a device implementing
   `WChaRteMax` now gets the limit applied.
+- `opModMaxLimWInject` also writes `WMax`, in the same model write as
+  `WDisChaRteMax`. Some PV systems implement no charge/discharge rate points at
+  all and honour only `WMax`, so a limit sent solely to the rate setting would
+  not be enforced on them; where both are honoured the two agree and the extra
+  write is inert. The mirrored value is clamped to `WMaxRtg`, since a `WMax`
+  above nameplate is meaningless and a device that rejects it would fail the
+  whole model write. Note the coupling: `WMax` is the base that `WMaxLimPct` is
+  a percent of, so an inject limit now also lowers what a subsequent
+  `opModMaxLimW` percent resolves to in watts.
 - Neither model 702 rate setting carries an IEEE 1547 standards tag, so a device
   need not implement either. Where `WDisChaRteMax` is absent, inject falls back
   to the previous percent-of-`WMax` route, so no existing deployment loses
@@ -34,11 +43,14 @@ below says so explicitly.
   whatever the DefaultDERControl establishes on revert, so the post-event state
   is left to that control. The fallback route still drives `WMaxLimPctEna` low,
   since that lever is one the connector raised itself.
-- A watts limit that cannot be encoded into the `uint16` register at the
-  device's `W_SF` is now refused before any write and reported as Table 31
-  status 253, rather than failing inside the encoder partway through. Unlike the
-  percent route, which clamps a derived value above 100, an unencodable watts
-  value has nothing faithful to write.
+- A watts limit that is negative, non-numeric or cannot be encoded into the
+  `uint16` register at the device's `W_SF` is now refused before any write and
+  reported as Table 31 status 253, rather than failing inside the encoder
+  partway through. The negative and non-numeric checks run before the route is
+  chosen, so they also cover the fallback, where a negative would previously
+  have been divided into a percent and clamped to 0 — commanding a full
+  curtailment nobody asked for. Unlike the percent route, which clamps a derived
+  value above 100, an unencodable watts value has nothing faithful to write.
 - `WDisChaRteMax` and `WDisChaRteMaxRtg` are now read back in
   `fetch_configuration` and `fetch_nameplate`. Both were already declared on the
   connector base and mapped into DERSettings and DERCapability, but no SunSpec
