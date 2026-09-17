@@ -205,6 +205,12 @@ class Sep2Client:
         # it needs to drain on activation. Inert unless armed; the gate lives in
         # the session wrapper so the failure lands inside each caller's own try.
         self._comm_loss_simulation = CommLossSimulation()
+        # Whether the *current* run of silence was caused by the simulation.
+        # None between silences. Tracked per failure rather than read off the
+        # arm state at the end, because "a simulation is running now" does not
+        # mean "a simulation caused this": a link already down when the operator
+        # armed one would otherwise have its genuine outage labelled simulated.
+        self._silence_simulated: bool | None = None
         # Carried as a default header on every request (see `_default_headers`).
         # Off by default; operator opts in via `TlsSettings.send_lfdi_header`
         # for proxy-fronted deployments that strip the client cert before the
@@ -588,6 +594,17 @@ class Sep2Client:
         return self._consecutive_failures
 
     @property
+    def silence_is_simulated(self) -> bool | None:
+        """Whether the current run of silence was caused by a simulation.
+
+        ``None`` when the server is being reached. ``True`` only when every
+        failure since the last contact happened behind an armed gate, so a link
+        that was already down when a window opened is still reported as the
+        genuine outage it is.
+        """
+        return self._silence_simulated
+
+    @property
     def comm_loss_simulation(self) -> CommLossSimulation:
         """Arm state for the operator-triggered outage simulation.
 
@@ -636,6 +653,14 @@ class Sep2Client:
         used to require is gone now that the audit runs at handshake.
         """
         if not reachable:
+            if self._silence_simulated is None:
+                # First failure of a new silence: its cause is whatever is true
+                # right now.
+                self._silence_simulated = self._comm_loss_simulation.active
+            elif not self._comm_loss_simulation.active:
+                # A genuine failure anywhere in the run means the silence is not
+                # purely an artifact, even if a window was open for part of it.
+                self._silence_simulated = False
             self._server_alive = False
             self._consecutive_failures += 1
             return
@@ -643,6 +668,8 @@ class Sep2Client:
         self._consecutive_failures = 0
         self._server_alive = True
         self._last_validated_epoch = self._last_contact_epoch
+        # Contact ends the run of silence; the next one is attributed afresh.
+        self._silence_simulated = None
 
     async def _retry_observed(self, do_fn: Callable[[], Awaitable[T]]) -> T:
         """Run one logical request through retry, reporting its outcome.

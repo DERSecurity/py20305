@@ -448,6 +448,9 @@ class TestSimulationDiagnostics:
     async def test_entry_caused_by_a_simulation_is_marked(self):
         client = CsipClient("https://example.com", comms_loss_seconds=900)
         client._http.comm_loss_simulation.arm(expires_at=_FAR_FUTURE)
+        # Arming alone does not mark an outage: attribution follows the failures
+        # that actually produced the silence. See TestSimulationAttribution.
+        client._http._record_contact(reachable=False)
 
         with patch("py20305.diagnostics.report") as report:
             await self._enter(client)

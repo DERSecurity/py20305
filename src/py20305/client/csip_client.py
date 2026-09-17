@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 from types import TracebackType
@@ -618,12 +619,11 @@ class CsipClient:
         self._comms_loss.active = True
         from py20305.diagnostics import report
 
-        # Marked only when this entry was caused by the injected failure, never
-        # on everything raised while a window happens to be open: a real fault
-        # during a simulation would otherwise be relabelled a test artifact and
-        # hidden. Conversely, an unmarked record captured from a deployed
-        # aggregator is genuine.
-        simulated = self._http.comm_loss_simulation.active
+        # Attribution is causal, not "was a window open at the time": a link
+        # already down when the operator armed a simulation stays reported as
+        # the genuine outage it is, and a real fault during a window is never
+        # relabelled a test artifact and hidden.
+        simulated = self._http.silence_is_simulated is True
         details: dict[str, Any] = {
             "elapsed_seconds": elapsed,
             "threshold": self._comms_loss_seconds,
@@ -637,7 +637,11 @@ class CsipClient:
             "managing the DER at the planning limit (DefaultDERControl)."
             + (" Cause: operator-triggered simulation." if simulated else ""),
             source="client",
-            dedup_key="comms_loss:entered",
+            # Separate dedup identity per mode. The diagnostics store keeps the
+            # first entry's message and details for a repeated key, so sharing
+            # one key would let a simulated outage's `simulated: true` stick to
+            # every genuine outage that followed it, and the reverse.
+            dedup_key="comms_loss:entered:simulated" if simulated else "comms_loss:entered",
             details=details,
         )
         logger.warning("Entering loss-of-communications mode (silent for %ds)", elapsed)
@@ -729,19 +733,41 @@ class CsipClient:
         timed out does not abort the simulation -- the window is open either way
         -- but it tells the caller the isolation was not clean.
         """
-        expires_at = time.time() + duration_seconds
-        notifications_drained = True
-        if self._notification_server is not None:
-            notifications_drained = await self._notification_server.suspend(
-                drain_timeout=drain_timeout
+        if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+            # An infinite or nonsensical duration would defeat the one guarantee
+            # this method makes. Rejected before anything is suspended so a bad
+            # call cannot half-isolate the client.
+            raise ValueError(
+                f"duration_seconds must be finite and greater than zero, got {duration_seconds!r}"
             )
-        requests_drained = await self._http.arm_comm_loss_simulation(
-            expires_at=expires_at, drain_timeout=drain_timeout
-        )
 
+        # Before the first await: a previous window's timer must not be able to
+        # fire during the drains below and clear the window being set up here.
         self._cancel_comm_loss_simulation_expiry()
+        expires_at = time.time() + duration_seconds
+
+        notifications_drained = True
+        try:
+            if self._notification_server is not None:
+                notifications_drained = await self._notification_server.suspend(
+                    drain_timeout=drain_timeout
+                )
+            requests_drained = await self._http.arm_comm_loss_simulation(
+                expires_at=expires_at, drain_timeout=drain_timeout
+            )
+        except BaseException:
+            # Both gates close before their drains await, so a cancellation or
+            # failure part-way through would otherwise leave the client isolated
+            # with no timer to restore it -- the one outcome this must never
+            # produce. Roll back to a connected client and let the caller see
+            # the failure.
+            self._http.disarm_comm_loss_simulation()
+            if self._notification_server is not None:
+                self._notification_server.resume()
+            raise
+
         self._comm_loss_simulation_expiry = asyncio.create_task(
-            self._expire_comm_loss_simulation(duration_seconds),
+            self._expire_comm_loss_simulation(expires_at),
             name="comm-loss-simulation-expiry",
         )
 
@@ -819,15 +845,35 @@ class CsipClient:
             self._comm_loss_simulation_expiry.cancel()
             self._comm_loss_simulation_expiry = None
 
-    async def _expire_comm_loss_simulation(self, duration_seconds: float) -> None:
-        """Close the window on time, with no operator action."""
+    async def _stop_comm_loss_simulation_expiry(self) -> None:
+        """Cancel the expiry timer and wait for it to actually stop.
+
+        Shutdown uses this rather than the bare cancel: a task merely asked to
+        cancel has not run yet, and this one must be finished before the
+        resources its clear path would touch are torn down.
+        """
+        task = self._comm_loss_simulation_expiry
+        self._comm_loss_simulation_expiry = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def _expire_comm_loss_simulation(self, expires_at: float) -> None:
+        """Close the window on time, with no operator action.
+
+        Sleeps to the absolute deadline rather than for the requested duration.
+        The deadline is fixed when the caller asks, but this task only starts
+        once both drains have finished, so sleeping the full duration would hold
+        the window open past the ``expires`` time already reported.
+        """
         try:
-            await asyncio.sleep(duration_seconds)
+            await asyncio.sleep(max(0.0, expires_at - time.time()))
         except asyncio.CancelledError:
             return
         if not self._http.comm_loss_simulation.active:
             return
-        logger.info("Comms-loss simulation expired after %.0fs; restoring", duration_seconds)
+        logger.info("Comms-loss simulation reached its deadline; restoring")
         # Cleared through the same path an operator would use, so expiry and a
         # manual clear cannot diverge.
         self._comm_loss_simulation_expiry = None
@@ -1742,6 +1788,11 @@ class CsipClient:
     async def shutdown(self, timeout: float = 10.0) -> None:
         """Gracefully stop polling, event timers, and close the HTTP session."""
         self._shutdown_event.set()
+        # Before anything is torn down. An expiry firing later would call
+        # clear_comm_loss_simulation() against a stopped notification server and
+        # scheduler, and its recovery would reopen the HTTP session this method
+        # is about to close.
+        await self._stop_comm_loss_simulation_expiry()
         if self._renewal_task and not self._renewal_task.done():
             self._renewal_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
