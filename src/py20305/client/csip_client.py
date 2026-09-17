@@ -213,6 +213,10 @@ class CsipClient:
         self._comms_loss_seconds = comms_loss_seconds
         self._comms_loss_eval_seconds = comms_loss_eval_seconds
         self._comms_loss = CommsLossState()
+        #: Expiry timer for an operator-triggered outage simulation. A window is
+        #: never open-ended: a forgotten one would strand a live site at the
+        #: planning limit.
+        self._comm_loss_simulation_expiry: asyncio.Task[None] | None = None
         #: The client's own certificate LFDI, captured at connect() for in-band
         #: self-reregistration on comms-loss recovery. Cert-derived and stable.
         self._own_lfdi: str | None = None
@@ -687,6 +691,134 @@ class CsipClient:
                 else ""
             ),
         )
+
+    # ------------------------------------------------------------------
+    # Operator-triggered comms-loss simulation
+    # ------------------------------------------------------------------
+
+    async def simulate_comm_loss(
+        self, duration_seconds: float, *, drain_timeout: float = 5.0
+    ) -> dict[str, Any]:
+        """Cut this client off from the head-end for ``duration_seconds``.
+
+        Mechanism, not policy: whether a simulation is permitted at all, and how
+        long a window may reasonably run, are the caller's decisions. This
+        method does what it is told and guarantees only that the window closes.
+
+        Notifications are suspended before the transport gate closes, so a
+        control cannot slip in through the inbound path while the outbound one
+        is being shut. Both then drain: a request or handler already running
+        would otherwise finish after the window opened, refreshing
+        ``last_contact_epoch`` or applying a setpoint to a DER the operator
+        believes is isolated.
+
+        The returned status reports whether each drain completed. A drain that
+        timed out does not abort the simulation -- the window is open either way
+        -- but it tells the caller the isolation was not clean.
+        """
+        expires_at = time.time() + duration_seconds
+        notifications_drained = True
+        if self._notification_server is not None:
+            notifications_drained = await self._notification_server.suspend(
+                drain_timeout=drain_timeout
+            )
+        requests_drained = await self._http.arm_comm_loss_simulation(
+            expires_at=expires_at, drain_timeout=drain_timeout
+        )
+
+        self._cancel_comm_loss_simulation_expiry()
+        self._comm_loss_simulation_expiry = asyncio.create_task(
+            self._expire_comm_loss_simulation(duration_seconds),
+            name="comm-loss-simulation-expiry",
+        )
+
+        logger.warning(
+            "Comms-loss simulation started for %.0fs (operator-triggered); "
+            "upstream traffic suppressed",
+            duration_seconds,
+        )
+        status = self.comm_loss_simulation_status()
+        status["requests_drained"] = requests_drained
+        status["notifications_drained"] = notifications_drained
+        return status
+
+    async def clear_comm_loss_simulation(self) -> dict[str, Any]:
+        """End the simulation and drive recovery, without waiting for a probe.
+
+        Clearing the gate is not the same event as leaving comms-loss mode: the
+        detector only exits once a request actually reaches the server, which
+        waits on the connectivity heartbeat and then a probe tick -- some two
+        and a half minutes of apparent inactivity on default settings. So
+        recovery is driven here rather than left to the schedule.
+        """
+        self._cancel_comm_loss_simulation_expiry()
+        self._http.disarm_comm_loss_simulation()
+        if self._notification_server is not None:
+            self._notification_server.resume()
+
+        simulation = self._http.comm_loss_simulation
+        try:
+            await self.recover_from_comms_loss_now()
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            # Recovery re-polls schedules against a live head-end and can fail
+            # for reasons that have nothing to do with the simulation. The
+            # window is closed either way; the operator needs to see that
+            # recovery did not complete rather than a bare "recovered".
+            logger.warning("Comms-loss simulation cleared, but recovery failed: %s", exc)
+            simulation.note_recovery_failed(str(exc))
+            return self.comm_loss_simulation_status()
+
+        if self._comms_loss.active:
+            simulation.note_recovery_failed(
+                "still in loss-of-communications mode; rediscovery did not complete"
+            )
+        else:
+            simulation.note_recovered()
+        return self.comm_loss_simulation_status()
+
+    async def recover_from_comms_loss_now(self) -> None:
+        """Run comms-loss recovery immediately, serialized with the scheduler.
+
+        Takes the same per-key lock as the scheduled comms-loss probe. Calling
+        ``_recover_from_comms_loss`` directly would bypass it, letting a
+        scheduled tick overlap this one -- and recovery checks for and possibly
+        re-POSTs the client's own EndDevice before it reaches the rediscovery
+        lock, so two overlapping runs can register twice against a live
+        head-end.
+
+        The active check happens inside the lock, so a tick that recovered while
+        this call was waiting is not undone by a second, redundant recovery.
+        """
+
+        async def _run() -> None:
+            if not self._comms_loss.active:
+                return
+            await self._recover_from_comms_loss()
+
+        await self._scheduler.run_exclusive("comms_loss", _run)
+
+    def comm_loss_simulation_status(self) -> dict[str, Any]:
+        """Report the simulation window and its recovery phase."""
+        return self._http.comm_loss_simulation.status()
+
+    def _cancel_comm_loss_simulation_expiry(self) -> None:
+        if self._comm_loss_simulation_expiry is not None:
+            self._comm_loss_simulation_expiry.cancel()
+            self._comm_loss_simulation_expiry = None
+
+    async def _expire_comm_loss_simulation(self, duration_seconds: float) -> None:
+        """Close the window on time, with no operator action."""
+        try:
+            await asyncio.sleep(duration_seconds)
+        except asyncio.CancelledError:
+            return
+        if not self._http.comm_loss_simulation.active:
+            return
+        logger.info("Comms-loss simulation expired after %.0fs; restoring", duration_seconds)
+        # Cleared through the same path an operator would use, so expiry and a
+        # manual clear cannot diverge.
+        self._comm_loss_simulation_expiry = None
+        await self.clear_comm_loss_simulation()
 
     async def _poll_dcap(self) -> None:
         await self._poll_with_404_recovery(self._do_poll_dcap)

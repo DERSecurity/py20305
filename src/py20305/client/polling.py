@@ -128,6 +128,26 @@ class PollScheduler:
             name=f"poll-{key}",
         )
 
+    async def run_exclusive(self, key: str, callback: Callable[[], Awaitable[None]]) -> None:
+        """Run ``callback`` under ``key``'s lock, outside the periodic schedule.
+
+        For work a caller needs to happen now that must not overlap the
+        scheduled poll for the same key -- an operator clearing a simulated
+        outage, say, where the scheduled recovery and the manual one both
+        reregister an EndDevice and would otherwise send the head-end two
+        registration POSTs.
+
+        Waits for the lock rather than skipping, since the caller asked for this
+        explicitly; the scheduled loop already skips a tick whose lock is held,
+        so the two do not queue up behind each other. The lock is created on
+        demand, so this works for a key that was never scheduled (comms-loss
+        detection disabled, for instance).
+        """
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            self._last_run[key] = time.monotonic()
+            await callback()
+
     def _heartbeat_due(self, key: str, interval: int) -> bool:
         """Return True if a suppressed key is overdue for its heartbeat poll.
 
