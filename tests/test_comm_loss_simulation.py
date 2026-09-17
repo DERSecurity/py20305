@@ -435,3 +435,39 @@ class TestSimulationCoordination:
             await client.clear_comm_loss_simulation()
 
         assert client._comm_loss_simulation_expiry is None
+
+
+class TestSimulationDiagnostics:
+    """The simulated marker on comms-loss entry."""
+
+    @staticmethod
+    async def _enter(client):
+        with patch.object(client._event_processor, "enter_comms_loss", new_callable=AsyncMock):
+            await client._enter_comms_loss(900)
+
+    async def test_entry_caused_by_a_simulation_is_marked(self):
+        client = CsipClient("https://example.com", comms_loss_seconds=900)
+        client._http.comm_loss_simulation.arm(expires_at=_FAR_FUTURE)
+
+        with patch("py20305.diagnostics.report") as report:
+            await self._enter(client)
+
+        details = report.call_args.kwargs["details"]
+        assert details["simulated"] is True
+        assert "simulation" in report.call_args.args[1]
+
+    async def test_a_genuine_outage_is_not_marked(self):
+        """An unmarked record is the operator's proof the outage was real.
+
+        The marker goes on records causally produced by the injected failure,
+        not on everything raised while a window happens to be open -- otherwise
+        a real fault occurring during a simulation would be relabelled a test
+        artifact and hidden.
+        """
+        client = CsipClient("https://example.com", comms_loss_seconds=900)
+
+        with patch("py20305.diagnostics.report") as report:
+            await self._enter(client)
+
+        assert "simulated" not in report.call_args.kwargs["details"]
+        assert "simulation" not in report.call_args.args[1]

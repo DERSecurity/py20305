@@ -618,14 +618,27 @@ class CsipClient:
         self._comms_loss.active = True
         from py20305.diagnostics import report
 
+        # Marked only when this entry was caused by the injected failure, never
+        # on everything raised while a window happens to be open: a real fault
+        # during a simulation would otherwise be relabelled a test artifact and
+        # hidden. Conversely, an unmarked record captured from a deployed
+        # aggregator is genuine.
+        simulated = self._http.comm_loss_simulation.active
+        details: dict[str, Any] = {
+            "elapsed_seconds": elapsed,
+            "threshold": self._comms_loss_seconds,
+        }
+        if simulated:
+            details["simulated"] = True
         report(
             "warnings",
             f"Loss of communications: no upstream contact for {elapsed}s "
             f"(>= {self._comms_loss_seconds}s). Opting out of active events and "
-            "managing the DER at the planning limit (DefaultDERControl).",
+            "managing the DER at the planning limit (DefaultDERControl)."
+            + (" Cause: operator-triggered simulation." if simulated else ""),
             source="client",
             dedup_key="comms_loss:entered",
-            details={"elapsed_seconds": elapsed, "threshold": self._comms_loss_seconds},
+            details=details,
         )
         logger.warning("Entering loss-of-communications mode (silent for %ds)", elapsed)
         await self._event_processor.enter_comms_loss()
