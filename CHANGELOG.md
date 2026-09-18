@@ -5,26 +5,48 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
-## [0.7.1] — 2026-09-18
+## [0.8.0] — 2026-09-18
 
+- The SunSpec connector no longer writes control registers a device reports as
+  unimplemented. Almost every setpoint in model 704 is optional, so a device can
+  implement the model and none of the individual registers, and until now every
+  control path assigned to its target regardless. That went wrong two ways.
+  Where the point's scale factor happened to be implemented the write was
+  accepted and the head-end was told a control had been applied to a register
+  the device never advertised. Where the scale factor was unimplemented too,
+  pysunspec2 raised out of the `cvalue` setter — after the enable point beside
+  it had already been written, leaving an enable standing over a setpoint that
+  was never set.
+- Each control now checks its target points before writing anything, including
+  before the enable, and a device that cannot accept the control has it reported
+  once rather than written. This covers `opModMaxLimW`, `opModFixedVar`,
+  `opModFixedW`, `opModTargetW` and the two power-factor controls. Disabling is
+  unaffected: lowering an enable is safe whether or not the setpoint exists, and
+  refusing to would leave a device stuck in whatever state it was already in.
+- `opModTargetW` prefers whichever form the device implements. Absolute watts go
+  to `WSet` where it exists, and to `WSetPct` as a percent of `WMax` where only
+  the percent form does, rather than declining a control the device could
+  actually honour.
+- **Behavior change.** A control that previously appeared to apply on such a
+  device now reports as unsupported. That is the point — the head-end was being
+  told a limit was in force that nothing was holding — but an operator watching
+  a device of this kind will see controls stop claiming success.
 - A device that maps a model 702 rate setting without supporting it is no longer
   sent a limit it cannot apply. 0.7.0 decided a device could be limited through
   `WDisChaRteMax` / `WChaRteMax` by reading whether the register was
   implemented, which a device of this kind answers with a number — usually 0 —
   rather than by reporting the point as absent. The write then came back as a
   Modbus exception and the limit went unapplied, on devices the
-  percent-of-`WMax` fallback had been enforcing correctly before 0.7.0.
-- The question is now put to the nameplate instead: a device that can limit a
-  direction publishes a non-zero maximum rate rating for it
-  (`WDisChaRteMaxRtg`, `WChaRteMaxRtg`), and a zero, absent or missing rating is
-  taken as no declared capability. The setting register is no longer consulted
-  for this, since zero is a legitimate setting on a device that can hold it and
-  reading it would misjudge a device currently limited to zero as one that
-  cannot be limited at all.
-- Erring towards the fallback is deliberate. It is the route every device took
-  before rate settings were used, so a device misjudged that way keeps working
-  exactly as it did; a device misjudged the other way silently fails to enforce
-  a limit the head-end believes is in force.
+  percent-of-`WMax` fallback had been enforcing correctly before 0.7.0. The
+  question is now put to the nameplate: a device that can limit a direction
+  publishes a non-zero maximum rate rating for it (`WDisChaRteMaxRtg`,
+  `WChaRteMaxRtg`), and zero, absent or missing is taken as no declared
+  capability. The setting register is not consulted for this, since zero is a
+  legitimate setting on a device that can hold it and reading it would misjudge
+  a device currently limited to zero as one that cannot be limited at all.
+- Erring towards the fallback, and towards declining, is deliberate throughout.
+  A device misjudged that way keeps behaving as it did before; one misjudged the
+  other way silently fails to enforce a limit the head-end believes is in force.
 
 ## [0.7.0] — 2026-09-18
 

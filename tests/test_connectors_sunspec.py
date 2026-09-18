@@ -6,6 +6,7 @@ to verify Modbus register writes and adopt polling.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -2041,3 +2042,146 @@ class TestRateSettingCapabilityDetection:
 
         model_704 = sunspec_connector._target.models[704][0]
         assert model_704.WMaxLimPct.cvalue == 60
+
+
+class TestUnimplementedControlRegisters:
+    """Model 704 setpoints a device does not implement.
+
+    Almost every one is optional, so a device can implement the model and none
+    of the registers. Writing anyway fails in two different ways -- accepted
+    silently where the scale factor happens to be implemented, or raising out of
+    pysunspec2 where it is not -- and the raising case lands after the enable
+    beside it has gone up. Both are avoided by asking first.
+    """
+
+    @staticmethod
+    def _unimplement(model, *names):
+        for name in names:
+            parent = model
+            attr = name
+            if "." in name:
+                head, attr = name.split(".", 1)
+                parent = getattr(model, head)
+            setattr(parent, attr, MagicMock(value=None, cvalue=None))
+
+    @pytest.mark.asyncio
+    async def test_p_lim_is_declined(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "WMaxLimPct")
+
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
+
+        model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_p_lim_does_not_raise_the_enable_it_cannot_back(self, sunspec_connector):
+        """The ordering that matters.
+
+        An enable raised over a register that was never written leaves the
+        device advertising a limit nothing is holding.
+        """
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "WMaxLimPct")
+        model_704.WMaxLimPctEna.cvalue = 0
+
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
+
+        assert model_704.WMaxLimPctEna.cvalue == 0
+
+    @pytest.mark.asyncio
+    async def test_const_q_is_declined(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "VarSetPct")
+
+        await sunspec_connector.update_const_q(
+            {"const_q_mode_enable": 1, "const_q_pct": 30, "const_q_ref": 2}
+        )
+
+        model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fixed_w_is_declined(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "WSetPct")
+
+        await sunspec_connector.update_fixed_w({"WSetEna": 1, "WSetMod": 0, "WSet": 50})
+
+        model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_const_pf_is_declined(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "PFWInj.PF")
+
+        await sunspec_connector.update_const_pf({"inj": {"mode": 1, "pf": 0.95, "excitation": 0}})
+
+        model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_disable_still_reaches_the_device(self, sunspec_connector):
+        """Lowering an enable is safe whether or not the setpoint exists.
+
+        Refusing to disable a control because its setpoint is unimplemented
+        would leave a device stuck in whatever state it was already in.
+        """
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "WMaxLimPct")
+
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 0})
+
+        assert model_704.WMaxLimPctEna.cvalue == 0
+
+    @pytest.mark.asyncio
+    async def test_the_gap_is_reported_once_per_device(self, sunspec_connector, caplog):
+        """A head-end re-sends a control every event.
+
+        An operator needs to see the gap, not a line per dispatch.
+        """
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "WMaxLimPct")
+
+        with caplog.at_level(logging.WARNING):
+            for _ in range(3):
+                await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
+
+        assert sum("opModMaxLimW not applied" in r.message for r in caplog.records) == 1
+
+
+class TestTargetWPrefersAnImplementedForm:
+    """opModTargetW has two registers it can land on."""
+
+    @pytest.mark.asyncio
+    async def test_absolute_watts_when_the_device_implements_wset(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+
+        await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
+
+        assert model_704.WSetMod.value == 1  # WATTS
+        assert model_704.WSet.cvalue == 3000
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_the_percent_form(self, sunspec_connector):
+        """A device implementing only WSetPct can still hold the setpoint.
+
+        Declining outright would give up a control this device can honour.
+        """
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.WSet = MagicMock(value=None, cvalue=None)
+
+        await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
+
+        assert model_704.WSetMod.value == 0  # W_MAX_PCT
+        # 3000 W of this device's 5000 W WMax.
+        assert model_704.WSetPct.cvalue == 60
+
+    @pytest.mark.asyncio
+    async def test_declined_when_neither_form_is_implemented(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.WSet = MagicMock(value=None, cvalue=None)
+        model_704.WSetPct = MagicMock(value=None, cvalue=None)
+        model_704.WSetEna.cvalue = 0
+
+        await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
+
+        model_704.write.assert_not_called()
+        assert model_704.WSetEna.cvalue == 0
