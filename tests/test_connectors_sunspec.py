@@ -2028,8 +2028,8 @@ class TestRateSettingCapabilityDetection:
         assert model_702.WDisChaRteMax.cvalue == 4000
 
     @pytest.mark.asyncio
-    async def test_a_missing_rating_point_falls_back(self, sunspec_connector):
-        """No rating to consult means no declared capability.
+    async def test_an_unimplemented_rating_falls_back(self, sunspec_connector):
+        """A rating the device does not implement declares no capability.
 
         The fallback is the route every device took before rate settings were
         used at all, so erring towards it leaves such a device working exactly

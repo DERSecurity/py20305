@@ -145,12 +145,18 @@ _P_LIM_W_RATINGS: dict[str, str] = {
 
 
 def _resolve_point(model: Any, dotted: str) -> Any:
-    """Return the point at ``dotted`` (e.g. ``"PFWInj.PF"``), or ``None``."""
+    """Return the point at ``dotted`` (e.g. ``"PFWInj.PF"``).
+
+    Plain attribute access, as the nameplate and configuration reads use: a
+    pysunspec2 model exposes every point its definition declares, implemented or
+    not, and an unimplemented one is signalled by ``value`` rather than by
+    absence. Tolerating a missing attribute here would turn a mistyped point
+    name into every control silently reporting unsupported, where an
+    ``AttributeError`` names the typo.
+    """
     node: Any = model
     for part in dotted.split("."):
-        node = getattr(node, part, None)
-        if node is None:
-            return None
+        node = getattr(node, part)
     return node
 
 
@@ -169,12 +175,7 @@ def _unimplemented_points(model: Any, names: tuple[str, ...]) -> list[str]:
     Checking the target first is what avoids both. It is the same question the
     model 702 rate settings ask before choosing their route.
     """
-    missing = []
-    for name in names:
-        point = _resolve_point(model, name)
-        if point is None or point.value is None:
-            missing.append(name)
-    return missing
+    return [name for name in names if _resolve_point(model, name).value is None]
 
 
 def _rate_setting_is_supported(model_702: Any, slot: str, point: Any) -> bool:
@@ -198,12 +199,9 @@ def _rate_setting_is_supported(model_702: Any, slot: str, point: Any) -> bool:
     way keeps working exactly as it used to; a device misjudged the other way
     silently fails to enforce a limit the head-end believes is in force.
     """
-    if point is None or point.value is None:
+    if point.value is None:
         return False
-    rating_name = _P_LIM_W_RATINGS[slot]
-    rating = getattr(model_702, rating_name, None)
-    if rating is None or rating.value is None:
-        return False
+    rating = getattr(model_702, _P_LIM_W_RATINGS[slot])
     return bool(rating.value)
 
 
@@ -1054,12 +1052,10 @@ class SunSpecModbusConnector:
         value = _require_watts(watts, control)
 
         model_702 = self._get_model(702)
-        point = getattr(model_702, point_name, None)
+        point = getattr(model_702, point_name)
         if not _rate_setting_is_supported(model_702, slot, point):
             self._apply_p_lim_w_without_register(slot, value, model_702)
             return
-        # Narrowing only: the guard above returns for a missing point.
-        assert point is not None
 
         _require_uint16_watts(value, model_702.W_SF.value, control)
         point.cvalue = value
@@ -1211,9 +1207,11 @@ class SunSpecModbusConnector:
         if slot == "abs":
             if not self._p_lim_abs_warned:
                 logger.warning(
-                    "opModMaxLimWAbsorb received (%s W) but this device implements "
-                    "neither model 702 WChaRteMax nor any absorb-direction limit in "
-                    "model 704; not applied",
+                    "opModMaxLimWAbsorb received (%s W) but this device declares no "
+                    "absorb-direction limiting capability -- model 702 WChaRteMax is "
+                    "unimplemented or its WChaRteMaxRtg rating is zero -- and model "
+                    "704 carries no absorb-direction active-power limit to fall back "
+                    "on; not applied",
                     watts,
                 )
                 self._p_lim_abs_warned = True

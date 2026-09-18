@@ -44,9 +44,22 @@ below says so explicitly.
   capability. The setting register is not consulted for this, since zero is a
   legitimate setting on a device that can hold it and reading it would misjudge
   a device currently limited to zero as one that cannot be limited at all.
-- Erring towards the fallback, and towards declining, is deliberate throughout.
-  A device misjudged that way keeps behaving as it did before; one misjudged the
-  other way silently fails to enforce a limit the head-end believes is in force.
+- **`opModMaxLimWAbsorb` can lose enforcement on one device shape.** Model 704
+  has no absorb-direction active-power limit, so absorb has no fallback: where
+  inject reroutes, absorb is simply not applied. A device that implements
+  `WChaRteMax` but leaves the optional `WChaRteMaxRtg` rating unimplemented had
+  its absorb limit applied under 0.7.0 and now gets a warning instead. Neither
+  rating point is mandatory, so this is a real shape rather than a hypothetical
+  one. It is still the better trade than answering a head-end with a Modbus
+  exception, and it matches pre-0.7.0 behavior, where absorb was never applied
+  at all — but for absorb specifically, erring towards the fallback costs
+  enforcement rather than preserving it. The warning is emitted once per
+  connector, so it appears when the control is first enabled rather than on
+  every dispatch.
+- Erring towards the fallback, and towards declining, is deliberate everywhere
+  else. A device misjudged that way keeps behaving as it did before; one
+  misjudged the other way silently fails to enforce a limit the head-end
+  believes is in force.
 
 ## [0.7.0] — 2026-09-18
 
