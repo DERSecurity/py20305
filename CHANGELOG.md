@@ -5,7 +5,7 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
-## [Unreleased]
+## [0.7.0] — 2026-09-18
 
 - The SunSpec connector now applies `opModMaxLimWInject` and
   `opModMaxLimWAbsorb` to the model 702 rate settings. Both controls are
@@ -63,9 +63,6 @@ below says so explicitly.
   connector base and mapped into DERSettings and DERCapability, but no SunSpec
   connector populated them, so a head-end could not read back the discharge-rate
   limit it had set.
-
-## [0.7.0] — 2026-09-17
-
 - A client can now be told to simulate a loss of communications with its
   head-end, so loss-of-communications behavior can be verified against a
   production server without taking that server out of service.
