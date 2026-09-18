@@ -18,6 +18,7 @@ import time
 from collections.abc import Callable
 from typing import Any, Literal
 
+from py20305.connectors.control_errors import ModeNotSupportedError
 from py20305.connectors.errors import (
     ConnectorConnectionError,
     ConnectorTimeoutError,
@@ -133,6 +134,76 @@ _P_LIM_W_CONTROLS: dict[str, tuple[str, str]] = {
     "inj": ("opModMaxLimWInject", "WDisChaRteMax"),
     "abs": ("opModMaxLimWAbsorb", "WChaRteMax"),
 }
+
+#: The nameplate rating that declares whether the device can limit that
+#: direction at all. A device advertising a maximum discharge rate of zero is
+#: telling us it does not do discharge-rate limiting, whatever its setting
+#: register happens to read.
+_P_LIM_W_RATINGS: dict[str, str] = {
+    "inj": "WDisChaRteMaxRtg",
+    "abs": "WChaRteMaxRtg",
+}
+
+
+def _resolve_point(model: Any, dotted: str) -> Any:
+    """Return the point at ``dotted`` (e.g. ``"PFWInj.PF"``).
+
+    Plain attribute access, as the nameplate and configuration reads use: a
+    pysunspec2 model exposes every point its definition declares, implemented or
+    not, and an unimplemented one is signalled by ``value`` rather than by
+    absence. Tolerating a missing attribute here would turn a mistyped point
+    name into every control silently reporting unsupported, where an
+    ``AttributeError`` names the typo.
+    """
+    node: Any = model
+    for part in dotted.split("."):
+        node = getattr(node, part)
+    return node
+
+
+def _unimplemented_points(model: Any, names: tuple[str, ...]) -> list[str]:
+    """Which of ``names`` this device does not implement.
+
+    Almost every setpoint in model 704 is optional, so a device can implement
+    the model and none of the individual registers. An unimplemented point reads
+    back as ``None``, and writing to one goes wrong in two different ways: where
+    its scale factor is implemented the write is accepted and the head-end is
+    told a control was applied to a register the device never advertised, and
+    where the scale factor is unimplemented too pysunspec2 raises out of the
+    ``cvalue`` setter -- after the enable point beside it has already been
+    written, leaving an enable raised over nothing.
+
+    Checking the target first is what avoids both. It is the same question the
+    model 702 rate settings ask before choosing their route.
+    """
+    return [name for name in names if _resolve_point(model, name).value is None]
+
+
+def _rate_setting_is_supported(model_702: Any, slot: str, point: Any) -> bool:
+    """Whether this device can actually be limited through its rate setting.
+
+    An unimplemented point is the easy case: it reads back as ``None`` and the
+    caller takes the percent-of-WMax fallback. The case this exists for is the
+    device that *maps* the register -- so it reads as a number, typically 0 --
+    without supporting it. Keying on ``value is None`` alone sends a limit to
+    such a device, which answers the write with an exception and leaves the
+    control unapplied, when the fallback route would have worked. That is worse
+    than the behaviour the fallback was written to preserve.
+
+    So the question is put to the nameplate instead: model 702 publishes a
+    maximum rate rating per direction, and a device that can limit discharge has
+    a non-zero ``WDisChaRteMaxRtg`` to say so. Zero, absent, or a model with no
+    rating point at all means no declared capability, and the fallback is taken.
+
+    Erring towards the fallback is deliberate. It is the route every device
+    handled before rate settings were used at all, so a device misjudged this
+    way keeps working exactly as it used to; a device misjudged the other way
+    silently fails to enforce a limit the head-end believes is in force.
+    """
+    if point.value is None:
+        return False
+    rating = getattr(model_702, _P_LIM_W_RATINGS[slot])
+    return bool(rating.value)
 
 
 def _as_number(value: object, label: str, quantity: str) -> float:
@@ -341,6 +412,10 @@ class SunSpecModbusConnector:
         # combination that cannot be applied at all: opModMaxLimWAbsorb on a
         # device implementing neither WChaRteMax nor any absorb-direction limit.
         self._p_lim_abs_warned: bool = False
+        #: Controls already reported as unsupported by this device. A
+        #: head-end re-sends a control every event, and an operator needs
+        #: to see the gap once, not on every dispatch.
+        self._unsupported_reported: set[str] = set()
         self._lock_loop: asyncio.AbstractEventLoop | None = None
 
         if transport == "tcp":
@@ -877,6 +952,22 @@ class SunSpecModbusConnector:
 
         model = self._get_model(704)
         merged_enabled, merged_value = self._compute_merged_inject_pct()
+        # Checked before the enable: raising it over a register this device does
+        # not implement asserts a limit nothing is holding. A teardown still
+        # runs -- driving an enable low is safe whether or not the setpoint
+        # beside it exists, and refusing to lower one would be worse.
+        if merged_enabled:
+            missing = _unimplemented_points(model, ("WMaxLimPct",))
+            if missing:
+                # Named for the control that was dispatched, not for the
+                # register they share: "inj" arrives here having been rerouted
+                # off model 702, and reporting it as opModMaxLimW would both
+                # misidentify it and let one control's report suppress the
+                # other's, since the two share a dedup key.
+                self._control_unsupported(
+                    "opModMaxLimWInject" if slot == "inj" else "opModMaxLimW",
+                    f"this device does not implement {', '.join(missing)} (model 704)",
+                )
         self._update_enable(
             model.WMaxLimPctEna,
             1 if merged_enabled else 0,
@@ -970,7 +1061,7 @@ class SunSpecModbusConnector:
 
         model_702 = self._get_model(702)
         point = getattr(model_702, point_name)
-        if point.value is None:  # register not implemented by this device
+        if not _rate_setting_is_supported(model_702, slot, point):
             self._apply_p_lim_w_without_register(slot, value, model_702)
             return
 
@@ -1047,10 +1138,85 @@ class SunSpecModbusConnector:
         model_702.write()
         self._wmax_baseline = None
 
+    def _watts_as_pct_of_wmax(self, watts: float, control: str) -> float | None:
+        """Express ``watts`` as a percent of the device's max active power.
+
+        ``None`` when no base is available, in which case nothing is written and
+        the caller returns. WMax is the settable maximum; a device that does not
+        implement it falls back to the nameplate WMaxRtg, which the
+        scan-readiness check guarantees. That is an approximation -- it treats
+        nameplate as the effective maximum -- and it holds precisely when there
+        is no settable WMax to be lower than it.
+        """
+        model_702 = self._get_model(702)
+        wmax = model_702.WMax.cvalue
+        if not wmax:  # None or 0
+            wmax = model_702.WMaxRtg.cvalue
+            if wmax:
+                logger.info(
+                    "model 702 WMax unavailable; using WMaxRtg (%s W) as the percent "
+                    "base for %s",
+                    wmax,
+                    control,
+                )
+        if not wmax:
+            logger.warning(
+                "%s received (%s W) but neither model 702 WMax nor WMaxRtg is "
+                "available; cannot convert to a percent, ignoring",
+                control,
+                watts,
+            )
+            return None
+        pct = watts / wmax * 100
+        # Bounded on magnitude, not just above. opModTargetW is signed -- WSet
+        # is an int32 and WSetPct an int16, and the translator passes an
+        # ActivePower value through unchanged -- so a negative target is an
+        # ordinary input here, and a percent of WMax below -100 is no more
+        # holdable than one above 100. Clamping only the positive end let a
+        # -160% reach the register silently.
+        if abs(pct) > 100:
+            logger.warning(
+                "%s %s W exceeds device WMax %s W in magnitude; clamping to %d%%",
+                control,
+                watts,
+                wmax,
+                100 if pct > 0 else -100,
+            )
+            pct = 100.0 if pct > 0 else -100.0
+        return pct
+
+    def _control_unsupported(self, control: str, detail: str) -> None:
+        """Decline a control this device cannot accept, and say so upstream.
+
+        Raises rather than returns. Suppressing the write alone would leave the
+        dispatch completing normally, so the head-end would still be told the
+        control is in force -- the symptom this guard exists to remove, with
+        only a local log line to show for it.
+        ``ModeNotSupportedError`` carries Table 31 ``NOT_SUPPORTED`` (251).
+
+        The deduplication is on the log, not on the raise. An operator needs to
+        see the gap once; a head-end re-sending the control every event needs
+        the refusal every event, or the second one looks like it succeeded.
+        """
+        if control not in self._unsupported_reported:
+            self._unsupported_reported.add(control)
+            logger.warning(
+                "%s not applied: %s. No register was changed and no enable "
+                "point was raised; the control is reported to the server as "
+                "not supported.",
+                control,
+                detail,
+            )
+        raise ModeNotSupportedError(f"{control} not applied: {detail}")
+
     def _apply_p_lim_w_without_register(
         self, slot: str, watts: float, model_702: Any
     ) -> None:
-        """Apply a watts-typed limit on a device lacking its model 702 setting.
+        """Apply a watts-typed limit on a device that cannot take the rate setting.
+
+        Reached when the device does not implement the setting, and also when it
+        implements it but declares no capability through the matching nameplate
+        rating -- see ``_rate_setting_is_supported``.
 
         ``"inj"`` falls back to the indirect route: convert the watts to a
         percent of WMax and merge into 704 WMaxLimPct, which a conformant device
@@ -1065,45 +1231,25 @@ class SunSpecModbusConnector:
         if slot == "abs":
             if not self._p_lim_abs_warned:
                 logger.warning(
-                    "opModMaxLimWAbsorb received (%s W) but this device implements "
-                    "neither model 702 WChaRteMax nor any absorb-direction limit in "
-                    "model 704; not applied",
+                    "opModMaxLimWAbsorb received (%s W) but this device declares no "
+                    "absorb-direction limiting capability -- model 702 WChaRteMax is "
+                    "unimplemented or its WChaRteMaxRtg rating is zero -- and model "
+                    "704 carries no absorb-direction active-power limit to fall back "
+                    "on; not applied",
                     watts,
                 )
                 self._p_lim_abs_warned = True
             return
 
-        # WMaxLimPct is a percent of WMax (the settable max active power).
-        # Some devices don't implement WMax; fall back to the nameplate rating
-        # WMaxRtg (guaranteed present -- the scan-readiness check refuses to
-        # initialise without it). The fallback is an approximation: it treats
-        # nameplate as the effective max, which holds when there is no settable
-        # WMax to be lower than it.
-        wmax = model_702.WMax.cvalue
-        if not wmax:  # None or 0
-            wmax = model_702.WMaxRtg.cvalue
-            if wmax:
-                logger.info(
-                    "model 702 WMax unavailable; using WMaxRtg (%s W) as the "
-                    "WMaxLimPct percent base for opModMaxLimWInject",
-                    wmax,
-                )
-        if not wmax:  # neither WMax nor WMaxRtg available -- can't form a percent
-            logger.warning(
-                "opModMaxLimWInject received (%s W) but neither model 702 WMax "
-                "nor WMaxRtg is available; cannot convert to a WMaxLimPct percent, ignoring",
-                watts,
-            )
+        # One conversion for both callers. Keeping a second copy here let the
+        # two drift -- this one clamped both ends and the shared helper only the
+        # top -- and the lower bound is provably unnecessary on this path
+        # (``_require_watts`` refuses a negative before the conversion runs)
+        # while being necessary on the signed one. Better to have a single bound
+        # to get right than two to keep in step.
+        pct = self._watts_as_pct_of_wmax(watts, "opModMaxLimWInject")
+        if pct is None:
             return
-
-        pct = watts / wmax * 100
-        if pct > 100:
-            logger.warning(
-                "opModMaxLimWInject %s W exceeds device WMax %s W; clamping to 100%%",
-                watts,
-                wmax,
-            )
-        pct = max(0.0, min(100.0, pct))
         self._apply_inject_pct_slot("inj", True, pct)
 
     def _update_pf_sync(self, params: dict[str, Any]) -> None:
@@ -1154,6 +1300,13 @@ class SunSpecModbusConnector:
             )
             return
 
+        missing = _unimplemented_points(model, ("VarSetPct", "VarSetMod", "VarSetPri"))
+        if missing:
+            self._control_unsupported(
+                "opModFixedVar",
+                f"this device does not implement {', '.join(missing)} (model 704)",
+            )
+
         self._update_enable(model.VarSetEna, 1, "Constant Reactive Power")
         # VarSetPct is a scaled percent (model 704). Set the engineering cvalue
         # and let pysunspec2 apply the scale factor / round, rather than
@@ -1165,6 +1318,14 @@ class SunSpecModbusConnector:
 
     def _update_fixed_w_sync(self, params: dict[str, Any]) -> None:
         model = self._get_model(704)
+        if params.get("WSetEna") == 1:
+            missing = _unimplemented_points(model, ("WSetMod", "WSetPct"))
+            if missing:
+                self._control_unsupported(
+                    "opModFixedW",
+                    f"this device does not implement {', '.join(missing)} (model 704)",
+                )
+
         self._update_enable(model.WSetEna, params.get("WSetEna", 0), "Fixed Active Power")
 
         if params.get("WSetEna") != 1:
@@ -1223,16 +1384,60 @@ class SunSpecModbusConnector:
             )
             return
 
+        # Which form of the setpoint this device implements decides the route,
+        # and it is settled before the enable: raising WSetEna over a register
+        # the device does not implement leaves an enable standing on nothing,
+        # which is the state the missing-watts branch above already refuses to
+        # create.
+        route: str | None = None
+        pct: float | None = None
+        if enable == 1:
+            if not _unimplemented_points(model, ("WSetMod", "WSet")):
+                route = "watts"
+            elif not _unimplemented_points(model, ("WSetMod", "WSetPct")):
+                # Absolute watts expressed as a percent of WMax. Less direct,
+                # but a device implementing only the percent form can still hold
+                # the setpoint, and declining outright would give up a control
+                # this device can actually honour.
+                #
+                # Converted here rather than after the enable: the conversion
+                # can fail on a device with no usable percent base -- WMaxRtg of
+                # zero clears the readiness check, which only rejects None -- and
+                # discovering that later would leave WSetEna raised over a
+                # WSetPct that was never written.
+                #
+                # Narrowing only: the malformed-payload branch above returns
+                # when an enabled control carries no watts.
+                assert watts is not None
+                pct = self._watts_as_pct_of_wmax(watts, "opModTargetW")
+                if pct is None:
+                    return
+                route = "percent"
+            else:
+                missing = _unimplemented_points(model, ("WSetMod", "WSet", "WSetPct"))
+                self._control_unsupported(
+                    "opModTargetW",
+                    f"this device implements neither WSet nor WSetPct "
+                    f"({', '.join(missing)} unimplemented, model 704)",
+                )
+
         self._update_enable(model.WSetEna, enable, "Target Active Power")
 
         if enable != 1:
             return
 
-        # WSetMod is the same enum16 as in fixed_w above. WATTS selects
-        # the absolute-value branch (WSet); writing to WSetPct in this
-        # mode would have no effect on the inverter setpoint.
-        model.WSetMod.value = 1
-        model.WSet.cvalue = watts
+        if route == "watts":
+            # WSetMod is the same enum16 as in fixed_w above. WATTS selects
+            # the absolute-value branch (WSet); writing to WSetPct in this
+            # mode would have no effect on the inverter setpoint.
+            model.WSetMod.value = 1
+            model.WSet.cvalue = watts
+            model.write()
+            return
+
+        assert pct is not None  # settled before the enable, above
+        model.WSetMod.value = 0  # W_MAX_PCT
+        model.WSetPct.cvalue = pct
         model.write()
 
     def _update_const_pf_sync(self, params: dict[str, Any]) -> None:
@@ -1246,6 +1451,12 @@ class SunSpecModbusConnector:
             # not leave PFWInjEna raised over a setpoint we never wrote.
             pf = _require_power_factor(inj["pf"], "opModFixedPFInjectW")
             exc = 0 if inj.get("excitation") else 1
+            missing = _unimplemented_points(model, ("PFWInj.Ext", "PFWInj.PF"))
+            if missing:
+                self._control_unsupported(
+                    "opModFixedPFInjectW",
+                    f"this device does not implement {', '.join(missing)} (model 704)",
+                )
             self._update_enable(model.PFWInjEna, 1, "Power factor (inject)")
             model.PFWInj.Ext.cvalue = exc
             model.PFWInj.PF.cvalue = pf
@@ -1253,6 +1464,12 @@ class SunSpecModbusConnector:
         elif abs_.get("mode"):
             pf = _require_power_factor(abs_["pf"], "opModFixedPFAbsorbW")
             exc = 1 if abs_.get("excitation") else 0
+            missing = _unimplemented_points(model, ("PFWAbs.Ext", "PFWAbs.PF"))
+            if missing:
+                self._control_unsupported(
+                    "opModFixedPFAbsorbW",
+                    f"this device does not implement {', '.join(missing)} (model 704)",
+                )
             self._update_enable(model.PFWAbsEna, 1, "Power factor (absorb)")
             model.PFWAbs.Ext.cvalue = exc
             model.PFWAbs.PF.cvalue = pf

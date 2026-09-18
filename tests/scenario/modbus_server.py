@@ -59,6 +59,7 @@ def build_der_image(
     w_max: int = 10000,
     rate_settings: bool = True,
     w_sf: int = 0,
+    limit_setpoint: bool = True,
 ) -> bytes:
     """A plausible inverter: measurements in 701, ratings in 702, controls in 704.
 
@@ -120,6 +121,12 @@ def build_der_image(
     # the connector cannot know what its percent means on this device.
     m704.points["WMaxLimPct_SF"].value = 0
     m704.points["WMaxLimPctEna"].value = 0
+    if limit_setpoint:
+        # The setpoint itself, at "no limit". Almost every model 704 setpoint is
+        # optional, so implementing it has to be stated: a device that leaves it
+        # out is a device the connector must decline rather than write to, and
+        # `limit_setpoint=False` models exactly that.
+        m704.points["WMaxLimPct"].value = 100
 
     return _pack_models([common, m701, m702, m704])
 

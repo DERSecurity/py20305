@@ -6,6 +6,7 @@ to verify Modbus register writes and adopt polling.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +16,7 @@ from py20305.connectors.base import (
     ConnectorValueError,
     ConnectorWriteError,
 )
+from py20305.connectors.control_errors import ModeNotSupportedError
 from py20305.connectors.modes import translate_const_q, translate_fixed_w
 from py20305.models.sep.sep import (
     DercontrolBase,
@@ -1959,3 +1961,291 @@ class TestFixedWEndToEnd:
         model = sunspec_connector._target.models[704][0]
         assert model.WSetPct.cvalue == 50.0  # 50%, not 5000%
         assert model.WSetMod.value == 0  # W_MAX_PCT (percent of WMax)
+
+
+class TestRateSettingCapabilityDetection:
+    """A device that maps a rate setting without supporting it.
+
+    The register reads back as a number -- typically 0 -- rather than as
+    unimplemented, so a check for "is the value None" concludes the device can
+    be limited that way. It cannot: the write comes back as a Modbus exception
+    and the limit is never applied, where the percent-of-WMax fallback would
+    have worked. The nameplate is the honest signal, since a device that limits
+    discharge publishes a non-zero maximum discharge rate to say so.
+    """
+
+    @staticmethod
+    def _present_but_unsupported(model_702, direction="dis"):
+        """Shape a real device reports when it maps the register, unsupported."""
+        setting = "WDisChaRteMax" if direction == "dis" else "WChaRteMax"
+        rating = setting + "Rtg"
+        setattr(model_702, setting, MagicMock(value=0, cvalue=0))
+        setattr(model_702, rating, MagicMock(value=0, cvalue=0))
+
+    @pytest.mark.asyncio
+    async def test_inject_falls_back_when_the_rating_is_zero(self, sunspec_connector):
+        model_702 = sunspec_connector._target.models[702][0]
+        self._present_but_unsupported(model_702)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+
+        # The rate setting is left alone and the limit goes the percent route:
+        # 3000 W of this device's 5000 W WMax is 60%.
+        assert model_702.WDisChaRteMax.cvalue == 0
+        model_704 = sunspec_connector._target.models[704][0]
+        assert model_704.WMaxLimPct.cvalue == 60
+
+    @pytest.mark.asyncio
+    async def test_absorb_is_not_written_when_the_rating_is_zero(self, sunspec_connector):
+        """Absorb has no fallback, so the only correct action is not to write."""
+        model_702 = sunspec_connector._target.models[702][0]
+        self._present_but_unsupported(model_702, direction="cha")
+
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+
+        assert model_702.WChaRteMax.cvalue == 0
+
+    @pytest.mark.asyncio
+    async def test_a_rated_device_still_takes_the_direct_route(self, sunspec_connector):
+        """The fix must not cost a capable device its rate setting."""
+        model_702 = sunspec_connector._target.models[702][0]
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        assert model_702.WDisChaRteMax.cvalue == 4000
+
+    @pytest.mark.asyncio
+    async def test_a_zero_setting_on_a_rated_device_is_still_direct(self, sunspec_connector):
+        """Zero is a legitimate setting on a device that can hold it.
+
+        Reading the *setting* rather than the rating would misread a device
+        currently limited to zero as one that cannot be limited at all.
+        """
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WDisChaRteMax = MagicMock(value=0, cvalue=0)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        assert model_702.WDisChaRteMax.cvalue == 4000
+
+    @pytest.mark.asyncio
+    async def test_an_unimplemented_rating_falls_back(self, sunspec_connector):
+        """A rating the device does not implement declares no capability.
+
+        The fallback is the route every device took before rate settings were
+        used at all, so erring towards it leaves such a device working exactly
+        as it used to.
+        """
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WDisChaRteMaxRtg = MagicMock(value=None, cvalue=None)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+
+        model_704 = sunspec_connector._target.models[704][0]
+        assert model_704.WMaxLimPct.cvalue == 60
+
+
+class TestUnimplementedControlRegisters:
+    """Model 704 setpoints a device does not implement.
+
+    Almost every one is optional, so a device can implement the model and none
+    of the registers. Writing anyway fails in two different ways -- accepted
+    silently where the scale factor happens to be implemented, or raising out of
+    pysunspec2 where it is not -- and the raising case lands after the enable
+    beside it has gone up. Both are avoided by asking first.
+    """
+
+    @staticmethod
+    def _unimplement(model, *names):
+        for name in names:
+            parent = model
+            attr = name
+            if "." in name:
+                head, attr = name.split(".", 1)
+                parent = getattr(model, head)
+            setattr(parent, attr, MagicMock(value=None, cvalue=None))
+
+    @pytest.mark.asyncio
+    async def test_p_lim_is_declined(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "WMaxLimPct")
+
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
+
+        model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_p_lim_does_not_raise_the_enable_it_cannot_back(self, sunspec_connector):
+        """The ordering that matters.
+
+        An enable raised over a register that was never written leaves the
+        device advertising a limit nothing is holding.
+        """
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "WMaxLimPct")
+        model_704.WMaxLimPctEna.cvalue = 0
+
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
+
+        assert model_704.WMaxLimPctEna.cvalue == 0
+
+    @pytest.mark.asyncio
+    async def test_const_q_is_declined(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "VarSetPct")
+
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_const_q(
+                {"const_q_mode_enable": 1, "const_q_pct": 30, "ref_type": 2}
+            )
+
+        model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fixed_w_is_declined(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "WSetPct")
+
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_fixed_w({"WSetEna": 1, "WSetMod": 0, "WSet": 50})
+
+        model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_const_pf_is_declined(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "PFWInj.PF")
+
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_const_pf(
+                {"inj": {"mode": 1, "pf": 0.95, "excitation": 0}}
+            )
+
+        model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_disable_still_reaches_the_device(self, sunspec_connector):
+        """Lowering an enable is safe whether or not the setpoint exists.
+
+        Refusing to disable a control because its setpoint is unimplemented
+        would leave a device stuck in whatever state it was already in.
+        """
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "WMaxLimPct")
+
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 0})
+
+        assert model_704.WMaxLimPctEna.cvalue == 0
+
+    @pytest.mark.asyncio
+    async def test_the_gap_is_reported_once_per_device(self, sunspec_connector, caplog):
+        """A head-end re-sends a control every event.
+
+        An operator needs to see the gap, not a line per dispatch.
+        """
+        model_704 = sunspec_connector._target.models[704][0]
+        self._unimplement(model_704, "WMaxLimPct")
+
+        with caplog.at_level(logging.WARNING):
+            for _ in range(3):
+                # Every dispatch is refused -- a head-end re-sending the control
+                # each event needs NOT_SUPPORTED each event, or the second looks
+                # like it succeeded.
+                with pytest.raises(ModeNotSupportedError):
+                    await sunspec_connector.update_p_lim(
+                        {"p_lim_mode_enable": 1, "p_lim_w": 80}
+                    )
+
+        # The operator-facing log is what is deduplicated, not the refusal.
+        assert sum("opModMaxLimW not applied" in r.message for r in caplog.records) == 1
+
+
+class TestTargetWPrefersAnImplementedForm:
+    """opModTargetW has two registers it can land on."""
+
+    @pytest.mark.asyncio
+    async def test_absolute_watts_when_the_device_implements_wset(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+
+        await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
+
+        assert model_704.WSetMod.value == 1  # WATTS
+        assert model_704.WSet.cvalue == 3000
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_the_percent_form(self, sunspec_connector):
+        """A device implementing only WSetPct can still hold the setpoint.
+
+        Declining outright would give up a control this device can honour.
+        """
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.WSet = MagicMock(value=None, cvalue=None)
+
+        await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
+
+        assert model_704.WSetMod.value == 0  # W_MAX_PCT
+        # 3000 W of this device's 5000 W WMax.
+        assert model_704.WSetPct.cvalue == 60
+
+    @pytest.mark.asyncio
+    async def test_declined_when_neither_form_is_implemented(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.WSet = MagicMock(value=None, cvalue=None)
+        model_704.WSetPct = MagicMock(value=None, cvalue=None)
+        model_704.WSetEna.cvalue = 0
+
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
+
+        model_704.write.assert_not_called()
+        assert model_704.WSetEna.cvalue == 0
+
+class TestFallbackDiagnosticsNameTheRightControl:
+    @pytest.mark.asyncio
+    async def test_a_rerouted_inject_limit_is_reported_as_inject(
+        self, sunspec_connector, caplog
+    ):
+        """The two controls share WMaxLimPct but are not the same control.
+
+        Inject arrives here having been rerouted off model 702. Reporting it
+        under the other control's name would misdirect the operator, and the
+        shared dedup key would let whichever came first silence the other.
+        """
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WDisChaRteMaxRtg = MagicMock(value=0, cvalue=0)
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.WMaxLimPct = MagicMock(value=None, cvalue=None)
+
+        with caplog.at_level(logging.WARNING), pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_p_lim_inj(
+                {"p_lim_mode_enable": 1, "p_lim_watts": 3000}
+            )
+
+        assert any("opModMaxLimWInject not applied" in r.message for r in caplog.records)
+
+
+class TestTargetWPercentFallbackNeedsABase:
+    @pytest.mark.asyncio
+    async def test_no_enable_is_raised_when_the_percent_cannot_be_formed(
+        self, sunspec_connector
+    ):
+        """A device with no usable percent base.
+
+        WMaxRtg of zero clears the readiness check, which rejects only None, so
+        the conversion can still fail. Discovering that after the enable had
+        gone up would leave WSetEna raised over a WSetPct that was never
+        written -- the exact state this guard exists to prevent.
+        """
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.WSet = MagicMock(value=None, cvalue=None)
+        model_704.WSetEna.cvalue = 0
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WMax = MagicMock(value=0, cvalue=0)
+        model_702.WMaxRtg = MagicMock(value=0, cvalue=0)
+
+        await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
+
+        assert model_704.WSetEna.cvalue == 0
+        model_704.write.assert_not_called()

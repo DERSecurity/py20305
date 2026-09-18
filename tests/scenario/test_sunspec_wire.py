@@ -16,6 +16,7 @@ import pytest
 from py20305.client import CsipClient, TlsConfig
 from py20305.client.retry import RetryPolicy
 from py20305.connectors.config import SunSpecDeviceConfig
+from py20305.connectors.control_errors import ModeNotSupportedError
 from py20305.connectors.dispatcher import ConnectorDispatcher
 from py20305.connectors.registry import ConnectorConfigRegistry
 from py20305.security import compute_lfdi
@@ -67,6 +68,19 @@ async def modbus():
 async def modbus_without_rate_settings():
     """A device that implements neither model 702 charge/discharge rate setting."""
     handle = await _start_modbus(build_der_image(rate_settings=False))
+    yield handle
+    await handle.server.close()
+
+
+@pytest.fixture
+async def modbus_without_limit_setpoint():
+    """A device implementing the limit's enable and scale factor, not the setpoint.
+
+    Almost every model 704 setpoint is optional, so this is a shape a real
+    device takes: enough of the control present to look writable, with the
+    register that would hold the value unimplemented.
+    """
+    handle = await _start_modbus(build_der_image(limit_setpoint=False))
     yield handle
     await handle.server.close()
 
@@ -338,3 +352,29 @@ async def test_csip_control_becomes_modbus_registers(modbus, tmp_path):
     finally:
         await client.shutdown()
         await csip.close()
+
+async def test_an_unimplemented_limit_setpoint_is_declined_not_written(
+    modbus_without_limit_setpoint,
+):
+    """The control is reported rather than written, and no enable is raised.
+
+    Writing anyway would take one of two wrong turns on a real device: the write
+    is accepted because the scale factor is implemented, and the head-end is
+    told a limit is in force that nothing is holding; or it raises out of
+    pysunspec2 after the enable has already gone up, leaving the enable standing
+    over a register that was never set.
+    """
+    modbus = modbus_without_limit_setpoint
+    connector = await _resolve(modbus.registry())
+
+    # Declined to the head-end as well as withheld from the device: suppressing
+    # only the write would leave the dispatch completing normally, and the
+    # server would still be told a limit is in force.
+    with pytest.raises(ModeNotSupportedError):
+        await connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
+
+    ena = point_address(modbus.image, 704, "WMaxLimPctEna")
+    pct = point_address(modbus.image, 704, "WMaxLimPct")
+    written = _written_addresses(modbus.server)
+    assert pct not in written, "wrote to a register the device never implemented"
+    assert ena not in written, "raised an enable over a setpoint that was never written"
