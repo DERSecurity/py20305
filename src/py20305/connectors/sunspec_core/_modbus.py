@@ -333,6 +333,10 @@ class SunSpecModbusConnector:
         # ``_p_lim_slots`` precisely because the units differ: these are raw
         # watts and must never reach the percent merge.
         self._p_lim_w_settings: dict[str, float | None] = {"inj": None, "abs": None}
+        # The device's own WMax, captured on the first mirror write of an inject
+        # event and written back when the control clears. None means nothing is
+        # mirrored, so there is nothing to restore.
+        self._wmax_baseline: float | None = None
         # Suppresses log noise after the first enable per device on the one
         # combination that cannot be applied at all: opModMaxLimWAbsorb on a
         # device implementing neither WChaRteMax nor any absorb-direction limit.
@@ -939,18 +943,21 @@ class SunSpecModbusConnector:
             logger.warning("%s enabled but carried no value; nothing to apply", control)
 
         if not enabled or watts is None:
-            # Model 702 keeps its last written value -- see the docstring. Only
-            # the bookkeeping is reset, plus the one lever this connector does
-            # own: an inject cap the fallback route installed on 704 WMaxLimPct
-            # must still fall, or it would outlive the event that imposed it.
+            # The rate setting keeps its last written value -- see the
+            # docstring. What the connector put there on its own initiative it
+            # does take back: the mirrored WMax, and an inject cap the fallback
+            # route installed on 704 WMaxLimPct, which would otherwise outlive
+            # the event that imposed it.
             self._p_lim_w_settings[slot] = None
-            if slot == "inj" and self._p_lim_slots["inj"] != (False, None):
+            if slot == "inj":
+                self._restore_mirrored_wmax()
                 # Guarded: only the fallback route populates this slot. On the
                 # direct route model 704 belongs to opModMaxLimW alone, and
                 # re-entering the merge would rewrite that control's register
                 # for a teardown that has nothing to do with it.
-                self._apply_inject_pct_slot("inj", enabled, None)
-            elif slot == "abs" and not enabled:
+                if self._p_lim_slots["inj"] != (False, None):
+                    self._apply_inject_pct_slot("inj", enabled, None)
+            elif not enabled:
                 # Re-arm the not-applied warning so a future enable is surfaced
                 # once more rather than silently swallowed.
                 self._p_lim_abs_warned = False
@@ -984,20 +991,61 @@ class SunSpecModbusConnector:
         of device; where both are honoured the two agree, so the extra write is
         inert.
 
+        WMax is itself optional -- no mandatory flag and no IEEE 1547 standards
+        tag in model 702, exactly like the two rate settings -- so a device may
+        implement WDisChaRteMax and not WMax. Writing it unguarded would hand
+        such a device a register it never advertised: at best ignored while the
+        head-end is told the limit was applied, at worst rejected, which fails
+        the whole model write and takes WDisChaRteMax down with it. That is the
+        same failure the WMaxRtg clamp below exists to prevent.
+
         Clamped to the nameplate rating when it is known. A limit above WMaxRtg
         is a valid request -- it simply does not bind -- but a WMax *above*
-        nameplate is meaningless, and a device that rejects it would fail the
-        whole model write and take WDisChaRteMax down with it.
+        nameplate is meaningless.
 
-        Note the coupling this creates: WMax is the base that WMaxLimPct is a
-        percent of, so lowering it here also lowers what a subsequent
-        opModMaxLimW percent resolves to in watts. That is arguably the right
-        composition -- the two controls then agree on the device's ceiling --
-        but it is a side effect on a register no other control writes.
+        The device's own WMax is captured on the *first* mirror write and put
+        back by ``_restore_mirrored_wmax`` when the control clears, so a second
+        inject update within one event records what the device had rather than
+        what the first update wrote. The capture is in memory, so a connector
+        restart mid-event forfeits the restore; the alternative is a register
+        read on every teardown to guess at a baseline, which is worse.
         """
+        wmax_point = model_702.WMax
+        if wmax_point.value is None:  # register not implemented by this device
+            return
+
+        if self._wmax_baseline is None:
+            self._wmax_baseline = wmax_point.cvalue
+
         wmax_rtg = model_702.WMaxRtg.cvalue
         target = min(watts, wmax_rtg) if wmax_rtg else watts
-        model_702.WMax.cvalue = target
+        wmax_point.cvalue = target
+
+    def _restore_mirrored_wmax(self) -> None:
+        """Put WMax back where the device had it before an inject limit lowered it.
+
+        The rate settings themselves stay where the event left them: an operator
+        limit outliving its event is the DefaultDERControl's problem, and those
+        registers are where the head-end's control actually landed. WMax is
+        different in kind. No head-end control writes it; the connector lowered
+        it on its own initiative to cover devices that honour only WMax, so the
+        connector owes the restore -- the same reasoning that has the fallback
+        route drive WMaxLimPctEna low on teardown rather than leave a lever it
+        raised itself.
+
+        Leaving it lowered would also size a later opModMaxLimW to an event that
+        has ended, since WMax is the base WMaxLimPct is a percent of.
+
+        A no-op when nothing was mirrored, which covers both a device that does
+        not implement WMax and the fallback route, where the mirror never runs.
+        """
+        if self._wmax_baseline is None:
+            return
+
+        model_702 = self._get_model(702)
+        model_702.WMax.cvalue = self._wmax_baseline
+        model_702.write()
+        self._wmax_baseline = None
 
     def _apply_p_lim_w_without_register(
         self, slot: str, watts: float, model_702: Any

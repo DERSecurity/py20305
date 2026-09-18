@@ -926,6 +926,75 @@ class TestSunSpecPLimWattsRegisters:
         assert model_702.WMax.cvalue == 5000
 
     @pytest.mark.asyncio
+    async def test_wmax_mirror_skipped_when_wmax_unimplemented(self, sunspec_connector):
+        """WMax is optional in model 702, exactly like the rate settings, so a
+        device may implement WDisChaRteMax and not WMax. Writing it unguarded
+        would hand that device a register it never advertised -- and a rejection
+        would fail the whole model write, taking WDisChaRteMax with it."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WMax = MagicMock(value=None, cvalue=None)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        assert model_702.WDisChaRteMax.cvalue == 4000
+        assert model_702.WMax.cvalue is None
+
+    @pytest.mark.asyncio
+    async def test_wmax_restored_when_inject_clears(self, sunspec_connector):
+        """The connector lowered WMax on its own initiative, so it puts it back.
+        Leaving it lowered would size a later opModMaxLimW to an event that has
+        ended, since WMax is the base WMaxLimPct is a percent of."""
+        model_702 = sunspec_connector._target.models[702][0]
+        assert model_702.WMax.cvalue == 5000  # the device's own value
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        assert model_702.WMax.cvalue == 4000
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        assert model_702.WMax.cvalue == 5000
+        # The rate setting itself stays where the event put it.
+        assert model_702.WDisChaRteMax.cvalue == 4000
+
+    @pytest.mark.asyncio
+    async def test_wmax_baseline_captured_once_per_event(self, sunspec_connector):
+        """A second inject update within one event must not record what the
+        first one wrote, or the restore would put back a connector-authored
+        value instead of the device's."""
+        model_702 = sunspec_connector._target.models[702][0]
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+        assert model_702.WMax.cvalue == 3000
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        assert model_702.WMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_wmax_baseline_rearmed_for_the_next_event(self, sunspec_connector):
+        """After a restore the next event captures afresh, rather than treating
+        the first event's baseline as permanent."""
+        model_702 = sunspec_connector._target.models[702][0]
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        model_702.WMax.cvalue = 4500  # operator adjusts between events
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 2000})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        assert model_702.WMax.cvalue == 4500
+
+    @pytest.mark.asyncio
+    async def test_clear_writes_nothing_when_nothing_was_mirrored(self, sunspec_connector):
+        """No mirror, nothing to restore: a teardown that never lowered WMax
+        must not write model 702 at all."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.write.reset_mock()
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        model_702.write.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_absorb_does_not_touch_wmax(self, sunspec_connector):
         """The mirror is inject-only: WMax caps generation, so an absorption
         limit has no business lowering it."""
@@ -1005,13 +1074,14 @@ class TestSunSpecPLimWattsRegisters:
 
     @pytest.mark.asyncio
     async def test_clearing_leaves_the_setting_in_place(self, sunspec_connector):
-        """These are settings registers with no enable bit. On teardown the
-        connector writes nothing: the post-event state is governed by the
-        default DERControl, not by restoring a captured baseline."""
+        """The rate settings have no enable bit, and on teardown they keep the
+        value the event gave them: the post-event state is governed by the
+        default DERControl, not by restoring a captured baseline. Only the
+        mirrored WMax -- which the connector lowered on its own initiative --
+        is put back."""
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
         await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
         model_702 = sunspec_connector._target.models[702][0]
-        model_702.write.reset_mock()
 
         model_704 = sunspec_connector._target.models[704][0]
         model_704.write.reset_mock()
@@ -1020,9 +1090,9 @@ class TestSunSpecPLimWattsRegisters:
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
         await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 0})
 
-        model_702.write.assert_not_called()
         assert model_702.WDisChaRteMax.cvalue == 4000
         assert model_702.WChaRteMax.cvalue == 2500
+        assert model_702.WMax.cvalue == 5000  # the mirror, and only the mirror
         # Nor may the teardown reach into model 704: on the direct route that
         # register belongs to opModMaxLimW alone.
         model_704.write.assert_not_called()
@@ -1045,19 +1115,21 @@ class TestSunSpecPLimWattsRegisters:
     async def test_enabled_without_value_leaves_the_setting_and_warns(
         self, sunspec_connector, caplog
     ):
-        """An enabled-but-valueless update carries no limit to apply. Same
-        reasoning as a teardown: model 702 keeps its last written value."""
+        """An enabled-but-valueless update carries no limit to apply, so it is
+        treated as a teardown: the rate setting keeps its last written value,
+        and the mirrored WMax goes back. Leaving WMax lowered with no limit in
+        force would also contradict the fallback route, which drops its cap in
+        exactly this case."""
         import logging
 
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
         model_702 = sunspec_connector._target.models[702][0]
-        model_702.write.reset_mock()
 
         with caplog.at_level(logging.WARNING):
             await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1})
 
-        model_702.write.assert_not_called()
         assert model_702.WDisChaRteMax.cvalue == 4000
+        assert model_702.WMax.cvalue == 5000
         assert any("carried no value" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio

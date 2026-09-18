@@ -8,18 +8,18 @@ below says so explicitly.
 ## [Unreleased]
 
 - The SunSpec connector now applies `opModMaxLimWInject` and
-  `opModMaxLimWAbsorb` to the model 702 rate settings rather than routing both
-  through the model 704 percent register. Both controls are
+  `opModMaxLimWAbsorb` to the model 702 rate settings. Both controls are
   `UnsignedActivePowerControlType` — absolute watts — so each now maps onto the
   setting carrying the same quantity in the same units: inject limits
   generation, which is the discharge direction (`WDisChaRteMax`), and absorb
-  limits absorption, which is the charge direction (`WChaRteMax`). This is a
-  behavior change for inject, which previously converted its watts to a percent
-  of `WMax` and merged that into `WMaxLimPct`: the conversion lost precision to
-  the percent register's resolution, and it put two semantically distinct
-  IEEE 2030.5 controls in contention for one SunSpec register. `opModMaxLimW`,
-  which is genuinely a `PerCent`, is unaffected and remains the only routine
-  writer of `WMaxLimPct`.
+  limits absorption, which is the charge direction (`WChaRteMax`).
+  `opModMaxLimW`, which is genuinely a `PerCent`, is unaffected and remains the
+  only routine writer of `WMaxLimPct`.
+- This is a behavior change for `opModMaxLimWInject`, which previously converted
+  its watts to a percent of `WMax` and merged that into the model 704
+  `WMaxLimPct`. The conversion lost precision to the percent register's
+  resolution, and it put two semantically distinct IEEE 2030.5 controls in
+  contention for one SunSpec register.
 - `opModMaxLimWAbsorb` is enforced for the first time. Model 704 has no
   absorb-direction active-power limit, so the control had nowhere to go and was
   recorded for diagnostics but never written; a device implementing
@@ -30,9 +30,16 @@ below says so explicitly.
   not be enforced on them; where both are honoured the two agree and the extra
   write is inert. The mirrored value is clamped to `WMaxRtg`, since a `WMax`
   above nameplate is meaningless and a device that rejects it would fail the
-  whole model write. Note the coupling: `WMax` is the base that `WMaxLimPct` is
-  a percent of, so an inject limit now also lowers what a subsequent
-  `opModMaxLimW` percent resolves to in watts.
+  whole model write. `WMax` is itself optional in model 702, so it is written
+  only where the device implements it.
+- The mirrored `WMax` is restored when the inject control clears, back to the
+  value the device held before the event lowered it. The rate settings stay
+  where the event put them, but `WMax` is different in kind: no head-end control
+  writes it, and the connector lowered it on its own initiative, so the
+  connector puts it back — the same reasoning that has the fallback route drive
+  `WMaxLimPctEna` low on teardown. It also matters because `WMax` is the base
+  that `WMaxLimPct` is a percent of: leaving it lowered would size a later
+  `opModMaxLimW` to an event that has ended.
 - Neither model 702 rate setting carries an IEEE 1547 standards tag, so a device
   need not implement either. Where `WDisChaRteMax` is absent, inject falls back
   to the previous percent-of-`WMax` route, so no existing deployment loses
