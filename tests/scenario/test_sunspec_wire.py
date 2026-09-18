@@ -31,10 +31,8 @@ pytestmark = pytest.mark.asyncio
 LFDI = "ab" * 20
 
 
-@pytest.fixture
-async def modbus():
-    """A started 700-series server and a registry resolving to it."""
-    image = build_der_image()
+async def _start_modbus(image: bytes):
+    """A started 700-series server on *image*, and a registry resolving to it."""
     server = SunSpecModbusServer(image, free_port())
     await server.start()
 
@@ -51,12 +49,31 @@ async def modbus():
         ]
     )
 
-    yield type(
+    return type(
         "Modbus",
         (),
         {"server": server, "image": image, "registry": staticmethod(lambda: registry)},
     )
-    await server.close()
+
+
+@pytest.fixture
+async def modbus():
+    handle = await _start_modbus(build_der_image())
+    yield handle
+    await handle.server.close()
+
+
+@pytest.fixture
+async def modbus_without_rate_settings():
+    """A device that implements neither model 702 charge/discharge rate setting."""
+    handle = await _start_modbus(build_der_image(rate_settings=False))
+    yield handle
+    await handle.server.close()
+
+
+def _written_addresses(server) -> set[int]:
+    """Every register address the connector actually wrote to."""
+    return {w.address + i for w in server.writes for i in range(len(w.values))}
 
 
 async def _resolve(registry: ConnectorConfigRegistry):
@@ -125,6 +142,134 @@ async def test_p_lim_write_lands_in_the_controls_model(modbus):
     assert modbus.server.writes, "no Modbus write ever reached the device"
     assert modbus.server.registers[ena] == 1
     assert modbus.server.registers[pct] == 80
+
+
+async def test_inject_limit_writes_the_discharge_rate_setting(modbus):
+    """opModMaxLimWInject carries absolute watts and limits *generation*, so it
+    lands on model 702 WDisChaRteMax at its raw value -- no percent conversion.
+    """
+    connector = await _resolve(modbus.registry())
+    await connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+    addr = point_address(modbus.image, 702, "WDisChaRteMax")
+    assert addr in _written_addresses(modbus.server), "the discharge rate was never written"
+    assert modbus.server.registers[addr] == 4000
+
+
+async def test_absorb_limit_writes_the_charge_rate_setting(modbus):
+    """opModMaxLimWAbsorb limits *absorption*, so it lands on the charge-rate
+    setting -- the opposite register from inject."""
+    connector = await _resolve(modbus.registry())
+    await connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
+
+    addr = point_address(modbus.image, 702, "WChaRteMax")
+    assert addr in _written_addresses(modbus.server), "the charge rate was never written"
+    assert modbus.server.registers[addr] == 2500
+
+
+async def test_the_two_directions_are_not_crossed(modbus):
+    """Both controls at once, on the wire: neither register carries the other's
+    value. Inverting the pair would cap discharge when asked to cap charging."""
+    connector = await _resolve(modbus.registry())
+    await connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+    await connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
+
+    discharge = point_address(modbus.image, 702, "WDisChaRteMax")
+    charge = point_address(modbus.image, 702, "WChaRteMax")
+    assert modbus.server.registers[discharge] == 4000
+    assert modbus.server.registers[charge] == 2500
+
+
+async def test_watts_limits_leave_the_percent_register_alone(modbus):
+    """On a device implementing the 702 rate settings the watts-typed controls
+    no longer contend with opModMaxLimW for WMaxLimPct."""
+    connector = await _resolve(modbus.registry())
+    await connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+    await connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
+
+    written = _written_addresses(modbus.server)
+    assert point_address(modbus.image, 704, "WMaxLimPctEna") not in written
+    assert point_address(modbus.image, 704, "WMaxLimPct") not in written
+
+
+async def test_inject_encodes_against_the_scale_factor():
+    """The rate settings are raw uint16 scaled by model 702's W_SF, and the
+    default image uses W_SF=0, where watts and raw registers coincide and a
+    scaling bug is invisible. At W_SF=1 a 4000 W limit must reach the wire as
+    raw 400 -- not 4000 (unscaled) and not 40 (double-scaled)."""
+    handle = await _start_modbus(build_der_image(w_sf=1))
+    try:
+        connector = await _resolve(handle.registry())
+        await connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        addr = point_address(handle.image, 702, "WDisChaRteMax")
+        assert handle.server.registers[addr] == 400
+    finally:
+        await handle.server.close()
+
+
+async def test_inject_also_writes_wmax_on_the_wire(modbus):
+    """Some PV systems implement no charge/discharge rate points and honour only
+    WMax, so both registers carry the limit."""
+    connector = await _resolve(modbus.registry())
+    await connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+    written = _written_addresses(modbus.server)
+    wmax = point_address(modbus.image, 702, "WMax")
+    assert wmax in written, "WMax was never written"
+    assert modbus.server.registers[wmax] == 4000
+
+
+async def test_wmax_is_restored_when_inject_clears(modbus):
+    """On the wire, where pysunspec2's dirty-point tracking is real: clearing
+    inject puts WMax back to the device's own value and leaves the rate setting
+    where the event put it."""
+    connector = await _resolve(modbus.registry())
+    wmax = point_address(modbus.image, 702, "WMax")
+    discharge = point_address(modbus.image, 702, "WDisChaRteMax")
+
+    await connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+    assert modbus.server.registers[wmax] == 4000
+
+    await connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+    assert modbus.server.registers[wmax] == 10000
+    assert modbus.server.registers[discharge] == 4000
+
+
+async def test_discharge_rate_is_read_back(modbus):
+    """A head-end must be able to read back the limit it set: WDisChaRteMax and
+    its rating were declared on the connector base and mapped into DERSettings /
+    DERCapability, but no SunSpec connector populated them."""
+    connector = await _resolve(modbus.registry())
+    await connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+    configuration = await connector.fetch_configuration()
+    assert configuration["WDisChaRteMax"] == {"value": 4000, "multiplier": 0}
+    nameplate = await connector.fetch_nameplate()
+    assert nameplate["WDisChaRteMaxRtg"] == {"value": 10000, "multiplier": 0}
+
+
+async def test_discharge_rate_omitted_when_unimplemented(modbus_without_rate_settings):
+    """An unimplemented point must be omitted, not reported as a zero limit."""
+    connector = await _resolve(modbus_without_rate_settings.registry())
+
+    configuration = await connector.fetch_configuration()
+    assert "WDisChaRteMax" not in configuration
+    nameplate = await connector.fetch_nameplate()
+    assert "WDisChaRteMaxRtg" not in nameplate
+
+
+async def test_inject_falls_back_to_the_percent_register(modbus_without_rate_settings):
+    """A device lacking WDisChaRteMax still gets an inject limit, via the
+    percent route: 4000 W against WMax=10000 becomes WMaxLimPct=40."""
+    modbus = modbus_without_rate_settings
+    connector = await _resolve(modbus.registry())
+    await connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+    ena = point_address(modbus.image, 704, "WMaxLimPctEna")
+    pct = point_address(modbus.image, 704, "WMaxLimPct")
+    assert modbus.server.registers[ena] == 1
+    assert modbus.server.registers[pct] == 40
 
 
 # ---------------------------------------------------------------------------

@@ -107,10 +107,12 @@ def _make_mock_target():
             "WOvrExtRtg",
             "WUndExtRtg",
             "WChaRteMaxRtg",
+            "WDisChaRteMaxRtg",
             "WMax",
             "WMaxOvrExt",
             "WMaxUndExt",
             "WChaRteMax",
+            "WDisChaRteMax",
         ]:
             setattr(model, attr, MagicMock(value=5000, cvalue=5000))
         # VA-rated points
@@ -802,11 +804,11 @@ class TestSunSpecPLimPercentRange:
     the enable bit was raised, and a value above 100 encodes cleanly as a
     nonsense limit.
 
-    Note the deliberate contrast with opModMaxLimWInject, which clamps a
-    derived percent above 100 (see TestSunSpecPLimMerge): there the input is
-    valid watts and only the conversion overflows the register, so reducing it
-    still yields a limit. Here the input itself is outside the range the
-    profile declares."""
+    Note the deliberate contrast with opModMaxLimWInject on its fallback route,
+    which clamps a derived percent above 100 (see TestSunSpecPLimWattsFallback):
+    there the input is valid watts and only the conversion overflows the
+    register, so reducing it still yields a limit. Here the input itself is
+    outside the range the profile declares."""
 
     @pytest.mark.asyncio
     async def test_negative_percent_refused(self, sunspec_connector):
@@ -856,100 +858,444 @@ class TestSunSpecPLimPercentRange:
         model = sunspec_connector._target.models[704][0]
         assert model.WMaxLimPctEna.cvalue == 0
 
-    @pytest.mark.asyncio
-    async def test_inject_still_clamps_rather_than_refusing(self, sunspec_connector):
-        """Regression guard on the asymmetry: opModMaxLimWInject carries watts,
-        so a value above the device's WMax is a valid limit whose derived
-        percent overflows -- it clamps to 100 and is applied."""
-        # Fixture WMax = 5000 W; 9000 W -> 180% -> clamped to 100%.
-        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 9000})
-        model = sunspec_connector._target.models[704][0]
-        assert model.WMaxLimPct.cvalue == 100
 
+class TestSunSpecPLimWattsRegisters:
+    """opModMaxLimWInject / opModMaxLimWAbsorb are UnsignedActivePowerControlType
+    -- absolute watts -- so each maps straight onto the matching model 702 rate
+    setting rather than onto the percent-typed 704 WMaxLimPct.
 
-class TestSunSpecPLimMerge:
-    """opModMaxLimW{,Inject,Absorb} all map onto a single WMaxLimPct
-    register; the connector tracks the three IEEE 2030.5 controls
-    independently and applies the most restrictive inject-direction
-    cap. Absorb is recorded for diagnostics but never reaches a
-    register because SunSpec model 704 has no absorb-direction limit."""
+    Direction matters and is easy to invert: inject limits *generation*, which
+    is the discharge direction (WDisChaRteMax); absorb limits *absorption*,
+    which is the charge direction (WChaRteMax)."""
 
     @pytest.mark.asyncio
-    async def test_inject_alone_writes_register(self, sunspec_connector):
-        # opModMaxLimWInject is absolute watts; the connector converts to a
-        # percent of WMax (fixture WMax=5000), so 4000 W -> 80%.
+    async def test_inject_writes_discharge_rate_in_watts(self, sunspec_connector):
+        """Inject is the discharge direction, and the value reaches the register
+        as raw watts -- no percent conversion, no re-scaling (the SunSpec
+        multiplier is applied upstream in the translation layer)."""
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
-        model = sunspec_connector._target.models[704][0]
-        assert model.WMaxLimPct.cvalue == 80
+        model_702 = sunspec_connector._target.models[702][0]
+        assert model_702.WDisChaRteMax.cvalue == 4000
+        model_702.write.assert_called()
 
     @pytest.mark.asyncio
-    async def test_any_alone_writes_register(self, sunspec_connector):
-        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 75})
-        model = sunspec_connector._target.models[704][0]
-        assert model.WMaxLimPct.cvalue == 75
+    async def test_absorb_writes_charge_rate_in_watts(self, sunspec_connector):
+        """Absorb is the charge direction."""
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
+        model_702 = sunspec_connector._target.models[702][0]
+        assert model_702.WChaRteMax.cvalue == 2500
+        model_702.write.assert_called()
 
     @pytest.mark.asyncio
-    async def test_inject_then_any_writes_min(self, sunspec_connector):
-        """opModMaxLimW arriving after opModMaxLimWInject must NOT
-        clobber the inject value; the connector picks the more
-        restrictive limit of the two."""
+    async def test_directions_are_not_crossed(self, sunspec_connector):
+        """Guard against the two controls being wired to each other's register:
+        inverting them would cap a battery's discharge when the head-end asked
+        to cap its charging."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WDisChaRteMax.cvalue = None  # type: ignore[assignment]
+        model_702.WChaRteMax.cvalue = None  # type: ignore[assignment]
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        assert model_702.WDisChaRteMax.cvalue == 4000
+        assert model_702.WChaRteMax.cvalue is None
+
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
+        assert model_702.WChaRteMax.cvalue == 2500
+        # The inject limit is untouched by an absorb update.
+        assert model_702.WDisChaRteMax.cvalue == 4000
+
+    @pytest.mark.asyncio
+    async def test_inject_also_writes_wmax(self, sunspec_connector):
+        """Some PV systems implement no charge/discharge rate points and honour
+        only WMax, so an inject limit goes to both registers."""
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        model_702 = sunspec_connector._target.models[702][0]
+        assert model_702.WDisChaRteMax.cvalue == 4000
+        assert model_702.WMax.cvalue == 4000
+
+    @pytest.mark.asyncio
+    async def test_inject_wmax_mirror_is_clamped_to_the_rating(self, sunspec_connector):
+        """A limit above nameplate is a valid request that simply does not bind,
+        but a WMax above WMaxRtg is meaningless and a device may reject the
+        write -- which would take WDisChaRteMax down with it."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WMaxRtg.cvalue = 5000
+        # 6000 W encodes fine at W_SF=-1; only the WMax mirror is clamped.
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 6000})
+        assert model_702.WDisChaRteMax.cvalue == 6000
+        assert model_702.WMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_wmax_mirror_skipped_when_wmax_unimplemented(self, sunspec_connector):
+        """WMax is optional in model 702, exactly like the rate settings, so a
+        device may implement WDisChaRteMax and not WMax. Writing it unguarded
+        would hand that device a register it never advertised -- and a rejection
+        would fail the whole model write, taking WDisChaRteMax with it."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WMax = MagicMock(value=None, cvalue=None)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        assert model_702.WDisChaRteMax.cvalue == 4000
+        assert model_702.WMax.cvalue is None
+
+    @pytest.mark.asyncio
+    async def test_wmax_restored_when_inject_clears(self, sunspec_connector):
+        """The connector lowered WMax on its own initiative, so it puts it back.
+        Leaving it lowered would size a later opModMaxLimW to an event that has
+        ended, since WMax is the base WMaxLimPct is a percent of."""
+        model_702 = sunspec_connector._target.models[702][0]
+        assert model_702.WMax.cvalue == 5000  # the device's own value
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        assert model_702.WMax.cvalue == 4000
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        assert model_702.WMax.cvalue == 5000
+        # The rate setting itself stays where the event put it.
+        assert model_702.WDisChaRteMax.cvalue == 4000
+
+    @pytest.mark.asyncio
+    async def test_wmax_baseline_captured_once_per_event(self, sunspec_connector):
+        """A second inject update within one event must not record what the
+        first one wrote, or the restore would put back a connector-authored
+        value instead of the device's."""
+        model_702 = sunspec_connector._target.models[702][0]
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+        assert model_702.WMax.cvalue == 3000
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        assert model_702.WMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_wmax_baseline_rearmed_for_the_next_event(self, sunspec_connector):
+        """After a restore the next event captures afresh, rather than treating
+        the first event's baseline as permanent."""
+        model_702 = sunspec_connector._target.models[702][0]
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        model_702.WMax.cvalue = 4500  # operator adjusts between events
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 2000})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        assert model_702.WMax.cvalue == 4500
+
+    @pytest.mark.asyncio
+    async def test_clear_writes_nothing_when_nothing_was_mirrored(self, sunspec_connector):
+        """No mirror, nothing to restore: a teardown that never lowered WMax
+        must not write model 702 at all."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.write.reset_mock()
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        model_702.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_absorb_does_not_touch_wmax(self, sunspec_connector):
+        """The mirror is inject-only: WMax caps generation, so an absorption
+        limit has no business lowering it."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WMax.cvalue = 5000
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
+        assert model_702.WChaRteMax.cvalue == 2500
+        assert model_702.WMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_watts_limits_do_not_touch_wmaxlimpct(self, sunspec_connector):
+        """Neither watts-typed control may reach the percent register any more --
+        that is opModMaxLimW's alone, so the two can no longer contend."""
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.write.reset_mock()
+        model_704.WMaxLimPctEna.write.reset_mock()
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
+
+        model_704.write.assert_not_called()
+        model_704.WMaxLimPctEna.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_any_still_drives_wmaxlimpct_independently(self, sunspec_connector):
+        """The percent-typed opModMaxLimW is unaffected by either watts-typed
+        control: it still lands on WMaxLimPct at its own value."""
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        model_704 = sunspec_connector._target.models[704][0]
+        # 60%, not the 80% the old watts-to-percent route would have merged in.
+        assert model_704.WMaxLimPct.cvalue == 60
+        assert model_704.WMaxLimPctEna.cvalue == 1
+
+    @pytest.mark.asyncio
+    async def test_scale_factor_bounds_the_writable_range(self, sunspec_connector):
+        """The register is a uint16 scaled by W_SF, so the encodable maximum
+        depends on the device. Fixture W_SF=-1 -> raw = watts*10, so 6553.5 W is
+        the ceiling. Above it the write is refused rather than left to die
+        inside pysunspec2's encoder partway through."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.write.reset_mock()
+
+        with pytest.raises(ConnectorValueError, match="7000"):
+            await sunspec_connector.update_p_lim_inj(
+                {"p_lim_mode_enable": 1, "p_lim_watts": 7000}
+            )
+
+        model_702.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_negative_watts_refused(self, sunspec_connector):
+        """The registers are unsigned; a negative limit has nothing faithful to
+        write and must not reach the encoder."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.write.reset_mock()
+
+        with pytest.raises(ConnectorValueError, match="-100"):
+            await sunspec_connector.update_p_lim_abs(
+                {"p_lim_mode_enable": 1, "p_lim_watts": -100}
+            )
+
+        model_702.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_refusal_does_not_disturb_an_active_limit(self, sunspec_connector):
+        """A rejected value must not clobber a limit already in force."""
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        model_702 = sunspec_connector._target.models[702][0]
+
+        with pytest.raises(ConnectorValueError):
+            await sunspec_connector.update_p_lim_inj(
+                {"p_lim_mode_enable": 1, "p_lim_watts": 99000}
+            )
+
+        assert model_702.WDisChaRteMax.cvalue == 4000
+
+    @pytest.mark.asyncio
+    async def test_clearing_leaves_the_setting_in_place(self, sunspec_connector):
+        """The rate settings have no enable bit, and on teardown they keep the
+        value the event gave them: the post-event state is governed by the
+        default DERControl, not by restoring a captured baseline. Only the
+        mirrored WMax -- which the connector lowered on its own initiative --
+        is put back."""
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
+        model_702 = sunspec_connector._target.models[702][0]
+
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.write.reset_mock()
+        model_704.WMaxLimPctEna.write.reset_mock()
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 0})
+
+        assert model_702.WDisChaRteMax.cvalue == 4000
+        assert model_702.WChaRteMax.cvalue == 2500
+        assert model_702.WMax.cvalue == 5000  # the mirror, and only the mirror
+        # Nor may the teardown reach into model 704: on the direct route that
+        # register belongs to opModMaxLimW alone.
+        model_704.write.assert_not_called()
+        model_704.WMaxLimPctEna.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_clearing_inject_leaves_an_active_any_alone(self, sunspec_connector):
+        """Clearing inject on the direct route must not disturb an opModMaxLimW
+        limit in force -- the two no longer share a register."""
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        model_704 = sunspec_connector._target.models[704][0]
+        assert model_704.WMaxLimPct.cvalue == 60
+        assert model_704.WMaxLimPctEna.cvalue == 1
+
+    @pytest.mark.asyncio
+    async def test_enabled_without_value_leaves_the_setting_and_warns(
+        self, sunspec_connector, caplog
+    ):
+        """An enabled-but-valueless update carries no limit to apply, so it is
+        treated as a teardown: the rate setting keeps its last written value,
+        and the mirrored WMax goes back. Leaving WMax lowered with no limit in
+        force would also contradict the fallback route, which drops its cap in
+        exactly this case."""
+        import logging
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        model_702 = sunspec_connector._target.models[702][0]
+
+        with caplog.at_level(logging.WARNING):
+            await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1})
+
+        assert model_702.WDisChaRteMax.cvalue == 4000
+        assert model_702.WMax.cvalue == 5000
+        assert any("carried no value" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_zero_watts_is_a_limit_not_a_missing_value(self, sunspec_connector):
+        """0 W is a legitimate full curtailment and must be written, not treated
+        as an absent value."""
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 0})
+        model_702 = sunspec_connector._target.models[702][0]
+        assert model_702.WDisChaRteMax.cvalue == 0
+        model_702.write.assert_called()
+
+
+class TestSunSpecPLimWattsFallback:
+    """Neither model 702 rate setting carries an IEEE 1547 standards tag, so a
+    device need not implement either.
+
+    Inject falls back to the older indirect route -- watts converted to a
+    percent of WMax, merged into 704 WMaxLimPct -- so no deployment loses
+    inject-limit enforcement. Absorb has no fallback: model 704 has no
+    absorb-direction limit, so it is warned about rather than silently
+    swallowed."""
+
+    @staticmethod
+    def _drop_register(sunspec_connector, name):
+        """Make the device report *name* as unimplemented."""
+        model_702 = sunspec_connector._target.models[702][0]
+        setattr(model_702, name, MagicMock(value=None, cvalue=None))
+        return model_702
+
+    @pytest.mark.asyncio
+    async def test_negative_watts_refused_before_the_route_is_chosen(self, sunspec_connector):
+        """The fallback divides the watts into a percent, where a negative would
+        clamp to 0% -- a full curtailment nobody asked for. It must be refused
+        on this route too, not only where the register bounds it."""
+        self._drop_register(sunspec_connector, "WDisChaRteMax")
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.write.reset_mock()
+
+        with pytest.raises(ConnectorValueError, match="-100"):
+            await sunspec_connector.update_p_lim_inj(
+                {"p_lim_mode_enable": 1, "p_lim_watts": -100}
+            )
+
+        model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_numeric_watts_refused_on_the_fallback(self, sunspec_connector):
+        """A non-number must raise ConnectorValueError (Table 31 status 253),
+        not an untyped exception from the arithmetic (which reports 251)."""
+        self._drop_register(sunspec_connector, "WDisChaRteMax")
+
+        with pytest.raises(ConnectorValueError):
+            await sunspec_connector.update_p_lim_inj(
+                {"p_lim_mode_enable": 1, "p_lim_watts": "4000"}
+            )
+
+    @pytest.mark.asyncio
+    async def test_inject_falls_back_to_wmaxlimpct(self, sunspec_connector):
+        """Without WDisChaRteMax, inject converts to a percent of WMax (fixture
+        WMax=5000), so 4000 W -> 80% on WMaxLimPct."""
+        self._drop_register(sunspec_connector, "WDisChaRteMax")
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        model_704 = sunspec_connector._target.models[704][0]
+        assert model_704.WMaxLimPct.cvalue == 80
+        assert model_704.WMaxLimPctEna.cvalue == 1
+
+    @pytest.mark.asyncio
+    async def test_fallback_merges_with_any_taking_the_minimum(self, sunspec_connector):
+        """On the fallback route both controls share WMaxLimPct again, so the
+        more restrictive of the two wins and neither clobbers the other."""
+        self._drop_register(sunspec_connector, "WDisChaRteMax")
         # inj 4000 W / WMax 5000 -> 80%; any 60% is more restrictive.
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
         await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
-        model = sunspec_connector._target.models[704][0]
-        assert model.WMaxLimPct.cvalue == 60
+        model_704 = sunspec_connector._target.models[704][0]
+        assert model_704.WMaxLimPct.cvalue == 60
 
     @pytest.mark.asyncio
-    async def test_any_then_inject_writes_min(self, sunspec_connector):
-        """Reverse ordering: opModMaxLimW first, then opModMaxLimWInject
-        with a higher value -- the lower (any=60) wins."""
-        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
-        # inj 4000 W / WMax 5000 -> 80%; any 60% still wins.
-        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
-        model = sunspec_connector._target.models[704][0]
-        assert model.WMaxLimPct.cvalue == 60
-
-    @pytest.mark.asyncio
-    async def test_clearing_one_slot_keeps_the_other(self, sunspec_connector):
-        """Clearing opModMaxLimWInject while opModMaxLimW remains active
-        must keep the inject-direction cap on, at the remaining value."""
+    async def test_clearing_fallback_inject_keeps_an_active_any(self, sunspec_connector):
+        """Clearing opModMaxLimWInject while opModMaxLimW remains active must
+        keep the cap on, at the remaining value, rather than tearing down a
+        register the other control is still using."""
+        self._drop_register(sunspec_connector, "WDisChaRteMax")
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
         await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
-        # Clear inj only -- the merge should fall back to any=60.
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
-        model = sunspec_connector._target.models[704][0]
-        assert model.WMaxLimPct.cvalue == 60
-        # The WMaxLimPctEna readback chain ends with cvalue==1.
-        assert model.WMaxLimPctEna.cvalue == 1
+        model_704 = sunspec_connector._target.models[704][0]
+        assert model_704.WMaxLimPct.cvalue == 60
+        assert model_704.WMaxLimPctEna.cvalue == 1
 
     @pytest.mark.asyncio
-    async def test_clearing_all_inject_slots_disables_register(self, sunspec_connector):
-        """When every inject-direction slot is cleared, the enable bit
-        gets driven low instead of leaving a stale cap in place."""
-        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
-        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 0})
-        model = sunspec_connector._target.models[704][0]
-        # The fixture's _update_enable readback sees the value we set.
-        assert model.WMaxLimPctEna.cvalue == 0
+    async def test_clearing_fallback_inject_drives_the_enable_low(self, sunspec_connector):
+        """The fallback route raises a lever this connector owns, so unlike the
+        model 702 path a teardown must still drive WMaxLimPctEna low rather than
+        leave the cap outliving its event."""
+        self._drop_register(sunspec_connector, "WDisChaRteMax")
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        model_704 = sunspec_connector._target.models[704][0]
+        assert model_704.WMaxLimPctEna.cvalue == 1
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        assert model_704.WMaxLimPctEna.cvalue == 0
 
     @pytest.mark.asyncio
-    async def test_absorb_does_not_write_register(self, sunspec_connector, caplog):
-        """opModMaxLimWAbsorb must not touch WMaxLimPct -- model 704
-        has no absorb-direction limit. The connector logs once per
-        device so the misconfiguration is operator-visible."""
+    async def test_fallback_clamps_rather_than_refusing(self, sunspec_connector, caplog):
+        """A watt limit above WMax is a valid request whose *derived* percent
+        overflows, so it clamps to 100 and is applied -- the deliberate contrast
+        with opModMaxLimW, where the input itself is out of range."""
         import logging
 
-        model = sunspec_connector._target.models[704][0]
-        # Pre-condition: nothing written yet.
-        model.WMaxLimPct.cvalue = None  # type: ignore[assignment]
-        model.write.reset_mock()
-        # The warning is emitted by the sunspec_core._modbus logger; caplog
-        # captures WARNING+ via root propagation, so we set the level and assert
-        # on message content rather than scoping to a logger name.
+        self._drop_register(sunspec_connector, "WDisChaRteMax")
+        with caplog.at_level(logging.WARNING):
+            await sunspec_connector.update_p_lim_inj(
+                {"p_lim_mode_enable": 1, "p_lim_watts": 6000}
+            )
+        model_704 = sunspec_connector._target.models[704][0]
+        assert model_704.WMaxLimPct.cvalue == 100
+        assert any("clamping to 100" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_fallback_uses_wmaxrtg_when_wmax_unavailable(self, sunspec_connector):
+        """When the settable WMax is unimplemented (None), the percent base
+        falls back to the nameplate rating WMaxRtg. WMaxRtg=8000, so 2000 W
+        -> 25% (not 40%, which 5000 would give)."""
+        model_702 = self._drop_register(sunspec_connector, "WDisChaRteMax")
+        model_702.WMax.cvalue = None
+        model_702.WMaxRtg.cvalue = 8000
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 2000})
+        model_704 = sunspec_connector._target.models[704][0]
+        assert model_704.WMaxLimPct.cvalue == 25
+
+    @pytest.mark.asyncio
+    async def test_fallback_skipped_when_neither_wmax_available(self, sunspec_connector, caplog):
+        """If both WMax and WMaxRtg are unavailable (None), the watts cannot be
+        turned into a percent: skip the write with a warning rather than
+        fabricate a cap or divide by zero."""
+        import logging
+
+        model_702 = self._drop_register(sunspec_connector, "WDisChaRteMax")
+        model_702.WMax.cvalue = None
+        model_702.WMaxRtg.cvalue = None
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.write.reset_mock()
+        with caplog.at_level(logging.WARNING):
+            await sunspec_connector.update_p_lim_inj(
+                {"p_lim_mode_enable": 1, "p_lim_watts": 4000}
+            )
+        model_704.write.assert_not_called()
+        assert any("WMaxRtg" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_absorb_without_register_warns_and_applies_nothing(
+        self, sunspec_connector, caplog
+    ):
+        """Model 704 has no absorb-direction limit, so there is nowhere to fall
+        back to. The connector logs once per device so the gap is visible."""
+        import logging
+
+        model_702 = self._drop_register(sunspec_connector, "WChaRteMax")
+        model_704 = sunspec_connector._target.models[704][0]
+        model_702.write.reset_mock()
+        model_704.write.reset_mock()
         with caplog.at_level(logging.WARNING):
             await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
-        assert model.WMaxLimPct.cvalue is None
-        model.write.assert_not_called()
+        model_702.write.assert_not_called()
+        model_704.write.assert_not_called()
         assert any("opModMaxLimWAbsorb" in rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
@@ -958,6 +1304,7 @@ class TestSunSpecPLimMerge:
         between resets the suppression so the next enable warns again."""
         import logging
 
+        self._drop_register(sunspec_connector, "WChaRteMax")
         with caplog.at_level(logging.WARNING):
             await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
             await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2000})
@@ -971,94 +1318,28 @@ class TestSunSpecPLimMerge:
         second_run = sum("opModMaxLimWAbsorb" in r.message for r in caplog.records)
         assert second_run == 1
 
-    @pytest.mark.asyncio
-    async def test_absorb_does_not_disturb_inject_cap(self, sunspec_connector):
-        """A subsequent opModMaxLimWAbsorb update must not clear or
-        change the inject-direction cap the operator already set."""
-        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
-        model = sunspec_connector._target.models[704][0]
-        model.write.reset_mock()
-        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 1250})
-        model.write.assert_not_called()
-        # Re-read the recorded value -- still 80% (inj 4000 W / WMax 5000).
-        assert model.WMaxLimPct.cvalue == 80
+
+class TestSunSpecPLimMerge:
+    """opModMaxLimW ("any") owns the 704 WMaxLimPct register. The merge with
+    the inject slot survives for the fallback route, where a device lacking
+    model 702 WDisChaRteMax puts both controls back on that one register (see
+    TestSunSpecPLimWattsFallback)."""
 
     @pytest.mark.asyncio
-    async def test_inject_watts_converted_to_pct_of_wmax(self, sunspec_connector):
-        """opModMaxLimWInject (absolute watts) is written as a percent of the
-        device's model-702 WMax, not the raw value. WMax=5000, so 2500 W -> 50%."""
-        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
+    async def test_any_alone_writes_register(self, sunspec_connector):
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 75})
         model = sunspec_connector._target.models[704][0]
-        assert model.WMaxLimPct.cvalue == 50
+        assert model.WMaxLimPct.cvalue == 75
 
     @pytest.mark.asyncio
-    async def test_inject_clamped_to_100_when_above_wmax(self, sunspec_connector, caplog):
-        """A watt limit at or above WMax cannot exceed 100% -- it is clamped
-        and a warning is logged."""
-        import logging
-
-        with caplog.at_level(logging.WARNING):
-            await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 6000})
+    async def test_clearing_all_inject_slots_disables_register(self, sunspec_connector):
+        """When every inject-direction slot is cleared, the enable bit
+        gets driven low instead of leaving a stale cap in place."""
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 0})
         model = sunspec_connector._target.models[704][0]
-        assert model.WMaxLimPct.cvalue == 100
-        assert any("clamping to 100" in r.message for r in caplog.records)
-
-    @pytest.mark.asyncio
-    async def test_inject_falls_back_to_wmaxrtg_when_wmax_unavailable(self, sunspec_connector):
-        """When the settable WMax is unimplemented (None), the percent base
-        falls back to the nameplate rating WMaxRtg. WMaxRtg=8000, so 2000 W
-        -> 25% (not 40%, which 5000 would give)."""
-        model_702 = sunspec_connector._target.models[702][0]
-        model_702.WMax.cvalue = None
-        model_702.WMaxRtg.cvalue = 8000
-        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 2000})
-        model = sunspec_connector._target.models[704][0]
-        assert model.WMaxLimPct.cvalue == 25
-
-    @pytest.mark.asyncio
-    async def test_inject_skipped_when_neither_wmax_available(self, sunspec_connector, caplog):
-        """If both WMax and WMaxRtg are unavailable (None), the watts cannot be
-        turned into a percent: skip the write with a warning rather than
-        fabricate a cap or divide by zero."""
-        import logging
-
-        model_702 = sunspec_connector._target.models[702][0]
-        model_702.WMax.cvalue = None
-        model_702.WMaxRtg.cvalue = None
-        model = sunspec_connector._target.models[704][0]
-        model.write.reset_mock()
-        with caplog.at_level(logging.WARNING):
-            await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
-        model.write.assert_not_called()
-        assert any("WMaxRtg" in r.message for r in caplog.records)
-
-    @pytest.mark.asyncio
-    async def test_inject_multiplier_applied_upstream_is_watts(self, sunspec_connector):
-        """The connector receives absolute watts -- the SunSpec multiplier is
-        applied upstream in the translation layer, so the connector does not
-        re-scale the value. 1000 W / WMax 5000 -> 20% (not 0.2% or 200%)."""
-        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 1000})
-        model = sunspec_connector._target.models[704][0]
-        assert model.WMaxLimPct.cvalue == 20
-
-    @pytest.mark.asyncio
-    async def test_inject_enabled_without_value_clears_stale_cap(self, sunspec_connector, caplog):
-        """An inject update that enables the mode but carries no watts value
-        cannot form a cap. It must not leave a previously-applied inject cap
-        in place: the slot is re-evaluated like the percent path, dropping the
-        stale value and driving the enable bit low when nothing else is active."""
-        import logging
-
-        # Apply a real inject cap first (4000 W / WMax 5000 -> 80%).
-        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
-        model = sunspec_connector._target.models[704][0]
-        assert model.WMaxLimPctEna.cvalue == 1
-        assert model.WMaxLimPct.cvalue == 80
-        # An enabled-but-valueless inject update arrives; the stale cap must go.
-        with caplog.at_level(logging.WARNING):
-            await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1})
+        # The fixture's _update_enable readback sees the value we set.
         assert model.WMaxLimPctEna.cvalue == 0
-        assert any("carried no value" in r.message for r in caplog.records)
 
 
 class TestSunSpecScanReadiness:

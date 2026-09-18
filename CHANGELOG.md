@@ -5,6 +5,65 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
+## [Unreleased]
+
+- The SunSpec connector now applies `opModMaxLimWInject` and
+  `opModMaxLimWAbsorb` to the model 702 rate settings. Both controls are
+  `UnsignedActivePowerControlType` — absolute watts — so each now maps onto the
+  setting carrying the same quantity in the same units: inject limits
+  generation, which is the discharge direction (`WDisChaRteMax`), and absorb
+  limits absorption, which is the charge direction (`WChaRteMax`).
+  `opModMaxLimW`, which is genuinely a `PerCent`, is unaffected and remains the
+  only routine writer of `WMaxLimPct`.
+- This is a behavior change for `opModMaxLimWInject`, which previously converted
+  its watts to a percent of `WMax` and merged that into the model 704
+  `WMaxLimPct`. The conversion lost precision to the percent register's
+  resolution, and it put two semantically distinct IEEE 2030.5 controls in
+  contention for one SunSpec register.
+- `opModMaxLimWAbsorb` is enforced for the first time. Model 704 has no
+  absorb-direction active-power limit, so the control had nowhere to go and was
+  recorded for diagnostics but never written; a device implementing
+  `WChaRteMax` now gets the limit applied.
+- `opModMaxLimWInject` also writes `WMax`, in the same model write as
+  `WDisChaRteMax`. Some PV systems implement no charge/discharge rate points at
+  all and honour only `WMax`, so a limit sent solely to the rate setting would
+  not be enforced on them; where both are honoured the two agree and the extra
+  write is inert. The mirrored value is clamped to `WMaxRtg`, since a `WMax`
+  above nameplate is meaningless and a device that rejects it would fail the
+  whole model write. `WMax` is itself optional in model 702, so it is written
+  only where the device implements it.
+- The mirrored `WMax` is restored when the inject control clears, back to the
+  value the device held before the event lowered it. The rate settings stay
+  where the event put them, but `WMax` is different in kind: no head-end control
+  writes it, and the connector lowered it on its own initiative, so the
+  connector puts it back — the same reasoning that has the fallback route drive
+  `WMaxLimPctEna` low on teardown. It also matters because `WMax` is the base
+  that `WMaxLimPct` is a percent of: leaving it lowered would size a later
+  `opModMaxLimW` to an event that has ended.
+- Neither model 702 rate setting carries an IEEE 1547 standards tag, so a device
+  need not implement either. Where `WDisChaRteMax` is absent, inject falls back
+  to the previous percent-of-`WMax` route, so no existing deployment loses
+  inject-limit enforcement. Absorb has no fallback, for the same reason it had
+  no home before, and still logs once per device when it cannot be applied.
+- Clearing either control writes nothing to model 702. These are settings
+  registers with no enable bit, and restoring a captured baseline would fight
+  whatever the DefaultDERControl establishes on revert, so the post-event state
+  is left to that control. The fallback route still drives `WMaxLimPctEna` low,
+  since that lever is one the connector raised itself.
+- A watts limit that is negative, non-numeric or cannot be encoded into the
+  `uint16` register at the device's `W_SF` is now refused before any write and
+  reported as Table 31 status 253, rather than failing inside the encoder
+  partway through. The negative and non-numeric checks run before the route is
+  chosen, so they also cover the fallback, where a negative would previously
+  have been divided into a percent and clamped to 0 — commanding a full
+  curtailment nobody asked for. Unlike the percent route, which clamps a derived
+  value above 100, an unencodable watts value has nothing faithful to write.
+- `WDisChaRteMax` and `WDisChaRteMaxRtg` are now read back in
+  `fetch_configuration` and `fetch_nameplate`. Both were already declared on the
+  connector base and mapped into DERSettings and DERCapability, but no SunSpec
+  connector populated them, so a head-end could not read back the discharge-rate
+  limit it had set.
+
 ## [0.7.0] — 2026-09-17
 
 - A client can now be told to simulate a loss of communications with its
