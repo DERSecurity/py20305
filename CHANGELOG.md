@@ -18,11 +18,19 @@ below says so explicitly.
   it had already been written, leaving an enable standing over a setpoint that
   was never set.
 - Each control now checks its target points before writing anything, including
-  before the enable, and a device that cannot accept the control has it reported
-  once rather than written. This covers `opModMaxLimW`, `opModFixedVar`,
+  before the enable, and a device that cannot accept the control is told so
+  rather than written to. This covers `opModMaxLimW`, `opModFixedVar`,
   `opModFixedW`, `opModTargetW` and the two power-factor controls. Disabling is
   unaffected: lowering an enable is safe whether or not the setpoint exists, and
   refusing to would leave a device stuck in whatever state it was already in.
+- **The refusal reaches the server.** A declined control raises
+  `ModeNotSupportedError`, which the event layer reports as Table 31
+  `NOT_SUPPORTED` (251). Withholding the write alone would have left the
+  dispatch completing normally, so the head-end would still have been told the
+  control was in force, with only a local log line to show otherwise — the
+  symptom this change exists to remove. The operator-facing log is emitted once
+  per control per connector; the refusal is sent every event, since a head-end
+  re-sending a control needs each dispatch answered rather than only the first.
 - `opModTargetW` prefers whichever form the device implements. Absolute watts go
   to `WSet` where it exists, and to `WSetPct` as a percent of `WMax` where only
   the percent form does, rather than declining a control the device could
@@ -48,7 +56,7 @@ below says so explicitly.
   has no absorb-direction active-power limit, so absorb has no fallback: where
   inject reroutes, absorb is simply not applied. A device that implements
   `WChaRteMax` but leaves the optional `WChaRteMaxRtg` rating unimplemented had
-  its absorb limit applied under 0.7.0 and now gets a warning instead. Neither
+  its absorb limit applied under 0.7.0 and is now refused instead. Neither
   rating point is mandatory, so this is a real shape rather than a hypothetical
   one. It is still the better trade than answering a head-end with a Modbus
   exception, and it matches pre-0.7.0 behavior, where absorb was never applied

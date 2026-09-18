@@ -16,6 +16,7 @@ import pytest
 from py20305.client import CsipClient, TlsConfig
 from py20305.client.retry import RetryPolicy
 from py20305.connectors.config import SunSpecDeviceConfig
+from py20305.connectors.control_errors import ModeNotSupportedError
 from py20305.connectors.dispatcher import ConnectorDispatcher
 from py20305.connectors.registry import ConnectorConfigRegistry
 from py20305.security import compute_lfdi
@@ -366,7 +367,11 @@ async def test_an_unimplemented_limit_setpoint_is_declined_not_written(
     modbus = modbus_without_limit_setpoint
     connector = await _resolve(modbus.registry())
 
-    await connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
+    # Declined to the head-end as well as withheld from the device: suppressing
+    # only the write would leave the dispatch completing normally, and the
+    # server would still be told a limit is in force.
+    with pytest.raises(ModeNotSupportedError):
+        await connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
 
     ena = point_address(modbus.image, 704, "WMaxLimPctEna")
     pct = point_address(modbus.image, 704, "WMaxLimPct")

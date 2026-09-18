@@ -16,6 +16,7 @@ from py20305.connectors.base import (
     ConnectorValueError,
     ConnectorWriteError,
 )
+from py20305.connectors.control_errors import ModeNotSupportedError
 from py20305.connectors.modes import translate_const_q, translate_fixed_w
 from py20305.models.sep.sep import (
     DercontrolBase,
@@ -2069,7 +2070,8 @@ class TestUnimplementedControlRegisters:
         model_704 = sunspec_connector._target.models[704][0]
         self._unimplement(model_704, "WMaxLimPct")
 
-        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
 
         model_704.write.assert_not_called()
 
@@ -2084,7 +2086,8 @@ class TestUnimplementedControlRegisters:
         self._unimplement(model_704, "WMaxLimPct")
         model_704.WMaxLimPctEna.cvalue = 0
 
-        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
 
         assert model_704.WMaxLimPctEna.cvalue == 0
 
@@ -2093,9 +2096,10 @@ class TestUnimplementedControlRegisters:
         model_704 = sunspec_connector._target.models[704][0]
         self._unimplement(model_704, "VarSetPct")
 
-        await sunspec_connector.update_const_q(
-            {"const_q_mode_enable": 1, "const_q_pct": 30, "ref_type": 2}
-        )
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_const_q(
+                {"const_q_mode_enable": 1, "const_q_pct": 30, "ref_type": 2}
+            )
 
         model_704.write.assert_not_called()
 
@@ -2104,7 +2108,8 @@ class TestUnimplementedControlRegisters:
         model_704 = sunspec_connector._target.models[704][0]
         self._unimplement(model_704, "WSetPct")
 
-        await sunspec_connector.update_fixed_w({"WSetEna": 1, "WSetMod": 0, "WSet": 50})
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_fixed_w({"WSetEna": 1, "WSetMod": 0, "WSet": 50})
 
         model_704.write.assert_not_called()
 
@@ -2113,7 +2118,10 @@ class TestUnimplementedControlRegisters:
         model_704 = sunspec_connector._target.models[704][0]
         self._unimplement(model_704, "PFWInj.PF")
 
-        await sunspec_connector.update_const_pf({"inj": {"mode": 1, "pf": 0.95, "excitation": 0}})
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_const_pf(
+                {"inj": {"mode": 1, "pf": 0.95, "excitation": 0}}
+            )
 
         model_704.write.assert_not_called()
 
@@ -2142,8 +2150,15 @@ class TestUnimplementedControlRegisters:
 
         with caplog.at_level(logging.WARNING):
             for _ in range(3):
-                await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 80})
+                # Every dispatch is refused -- a head-end re-sending the control
+                # each event needs NOT_SUPPORTED each event, or the second looks
+                # like it succeeded.
+                with pytest.raises(ModeNotSupportedError):
+                    await sunspec_connector.update_p_lim(
+                        {"p_lim_mode_enable": 1, "p_lim_w": 80}
+                    )
 
+        # The operator-facing log is what is deduplicated, not the refusal.
         assert sum("opModMaxLimW not applied" in r.message for r in caplog.records) == 1
 
 
@@ -2181,7 +2196,8 @@ class TestTargetWPrefersAnImplementedForm:
         model_704.WSetPct = MagicMock(value=None, cvalue=None)
         model_704.WSetEna.cvalue = 0
 
-        await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
 
         model_704.write.assert_not_called()
         assert model_704.WSetEna.cvalue == 0
@@ -2202,7 +2218,7 @@ class TestFallbackDiagnosticsNameTheRightControl:
         model_704 = sunspec_connector._target.models[704][0]
         model_704.WMaxLimPct = MagicMock(value=None, cvalue=None)
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING), pytest.raises(ModeNotSupportedError):
             await sunspec_connector.update_p_lim_inj(
                 {"p_lim_mode_enable": 1, "p_lim_watts": 3000}
             )
