@@ -1959,3 +1959,85 @@ class TestFixedWEndToEnd:
         model = sunspec_connector._target.models[704][0]
         assert model.WSetPct.cvalue == 50.0  # 50%, not 5000%
         assert model.WSetMod.value == 0  # W_MAX_PCT (percent of WMax)
+
+
+class TestRateSettingCapabilityDetection:
+    """A device that maps a rate setting without supporting it.
+
+    The register reads back as a number -- typically 0 -- rather than as
+    unimplemented, so a check for "is the value None" concludes the device can
+    be limited that way. It cannot: the write comes back as a Modbus exception
+    and the limit is never applied, where the percent-of-WMax fallback would
+    have worked. The nameplate is the honest signal, since a device that limits
+    discharge publishes a non-zero maximum discharge rate to say so.
+    """
+
+    @staticmethod
+    def _present_but_unsupported(model_702, direction="dis"):
+        """Shape a real device reports when it maps the register, unsupported."""
+        setting = "WDisChaRteMax" if direction == "dis" else "WChaRteMax"
+        rating = setting + "Rtg"
+        setattr(model_702, setting, MagicMock(value=0, cvalue=0))
+        setattr(model_702, rating, MagicMock(value=0, cvalue=0))
+
+    @pytest.mark.asyncio
+    async def test_inject_falls_back_when_the_rating_is_zero(self, sunspec_connector):
+        model_702 = sunspec_connector._target.models[702][0]
+        self._present_but_unsupported(model_702)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+
+        # The rate setting is left alone and the limit goes the percent route:
+        # 3000 W of this device's 5000 W WMax is 60%.
+        assert model_702.WDisChaRteMax.cvalue == 0
+        model_704 = sunspec_connector._target.models[704][0]
+        assert model_704.WMaxLimPct.cvalue == 60
+
+    @pytest.mark.asyncio
+    async def test_absorb_is_not_written_when_the_rating_is_zero(self, sunspec_connector):
+        """Absorb has no fallback, so the only correct action is not to write."""
+        model_702 = sunspec_connector._target.models[702][0]
+        self._present_but_unsupported(model_702, direction="cha")
+
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+
+        assert model_702.WChaRteMax.cvalue == 0
+
+    @pytest.mark.asyncio
+    async def test_a_rated_device_still_takes_the_direct_route(self, sunspec_connector):
+        """The fix must not cost a capable device its rate setting."""
+        model_702 = sunspec_connector._target.models[702][0]
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        assert model_702.WDisChaRteMax.cvalue == 4000
+
+    @pytest.mark.asyncio
+    async def test_a_zero_setting_on_a_rated_device_is_still_direct(self, sunspec_connector):
+        """Zero is a legitimate setting on a device that can hold it.
+
+        Reading the *setting* rather than the rating would misread a device
+        currently limited to zero as one that cannot be limited at all.
+        """
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WDisChaRteMax = MagicMock(value=0, cvalue=0)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        assert model_702.WDisChaRteMax.cvalue == 4000
+
+    @pytest.mark.asyncio
+    async def test_a_missing_rating_point_falls_back(self, sunspec_connector):
+        """No rating to consult means no declared capability.
+
+        The fallback is the route every device took before rate settings were
+        used at all, so erring towards it leaves such a device working exactly
+        as it used to.
+        """
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WDisChaRteMaxRtg = MagicMock(value=None, cvalue=None)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+
+        model_704 = sunspec_connector._target.models[704][0]
+        assert model_704.WMaxLimPct.cvalue == 60

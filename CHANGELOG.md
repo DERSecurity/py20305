@@ -5,6 +5,27 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
+## [0.7.1] — 2026-09-18
+
+- A device that maps a model 702 rate setting without supporting it is no longer
+  sent a limit it cannot apply. 0.7.0 decided a device could be limited through
+  `WDisChaRteMax` / `WChaRteMax` by reading whether the register was
+  implemented, which a device of this kind answers with a number — usually 0 —
+  rather than by reporting the point as absent. The write then came back as a
+  Modbus exception and the limit went unapplied, on devices the
+  percent-of-`WMax` fallback had been enforcing correctly before 0.7.0.
+- The question is now put to the nameplate instead: a device that can limit a
+  direction publishes a non-zero maximum rate rating for it
+  (`WDisChaRteMaxRtg`, `WChaRteMaxRtg`), and a zero, absent or missing rating is
+  taken as no declared capability. The setting register is no longer consulted
+  for this, since zero is a legitimate setting on a device that can hold it and
+  reading it would misjudge a device currently limited to zero as one that
+  cannot be limited at all.
+- Erring towards the fallback is deliberate. It is the route every device took
+  before rate settings were used, so a device misjudged that way keeps working
+  exactly as it did; a device misjudged the other way silently fails to enforce
+  a limit the head-end believes is in force.
+
 ## [0.7.0] — 2026-09-18
 
 - The SunSpec connector now applies `opModMaxLimWInject` and

@@ -134,6 +134,45 @@ _P_LIM_W_CONTROLS: dict[str, tuple[str, str]] = {
     "abs": ("opModMaxLimWAbsorb", "WChaRteMax"),
 }
 
+#: The nameplate rating that declares whether the device can limit that
+#: direction at all. A device advertising a maximum discharge rate of zero is
+#: telling us it does not do discharge-rate limiting, whatever its setting
+#: register happens to read.
+_P_LIM_W_RATINGS: dict[str, str] = {
+    "inj": "WDisChaRteMaxRtg",
+    "abs": "WChaRteMaxRtg",
+}
+
+
+def _rate_setting_is_supported(model_702: Any, slot: str, point: Any) -> bool:
+    """Whether this device can actually be limited through its rate setting.
+
+    An unimplemented point is the easy case: it reads back as ``None`` and the
+    caller takes the percent-of-WMax fallback. The case this exists for is the
+    device that *maps* the register -- so it reads as a number, typically 0 --
+    without supporting it. Keying on ``value is None`` alone sends a limit to
+    such a device, which answers the write with an exception and leaves the
+    control unapplied, when the fallback route would have worked. That is worse
+    than the behaviour the fallback was written to preserve.
+
+    So the question is put to the nameplate instead: model 702 publishes a
+    maximum rate rating per direction, and a device that can limit discharge has
+    a non-zero ``WDisChaRteMaxRtg`` to say so. Zero, absent, or a model with no
+    rating point at all means no declared capability, and the fallback is taken.
+
+    Erring towards the fallback is deliberate. It is the route every device
+    handled before rate settings were used at all, so a device misjudged this
+    way keeps working exactly as it used to; a device misjudged the other way
+    silently fails to enforce a limit the head-end believes is in force.
+    """
+    if point is None or point.value is None:
+        return False
+    rating_name = _P_LIM_W_RATINGS[slot]
+    rating = getattr(model_702, rating_name, None)
+    if rating is None or rating.value is None:
+        return False
+    return bool(rating.value)
+
 
 def _as_number(value: object, label: str, quantity: str) -> float:
     """Return *value* as a finite float, or raise ``ConnectorValueError``.
@@ -969,10 +1008,12 @@ class SunSpecModbusConnector:
         value = _require_watts(watts, control)
 
         model_702 = self._get_model(702)
-        point = getattr(model_702, point_name)
-        if point.value is None:  # register not implemented by this device
+        point = getattr(model_702, point_name, None)
+        if not _rate_setting_is_supported(model_702, slot, point):
             self._apply_p_lim_w_without_register(slot, value, model_702)
             return
+        # Narrowing only: the guard above returns for a missing point.
+        assert point is not None
 
         _require_uint16_watts(value, model_702.W_SF.value, control)
         point.cvalue = value
