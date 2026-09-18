@@ -958,7 +958,14 @@ class SunSpecModbusConnector:
         if merged_enabled:
             missing = _unimplemented_points(model, ("WMaxLimPct",))
             if missing:
-                self._control_unsupported("opModMaxLimW", missing)
+                # Named for the control that was dispatched, not for the
+                # register they share: "inj" arrives here having been rerouted
+                # off model 702, and reporting it as opModMaxLimW would both
+                # misidentify it and let one control's report suppress the
+                # other's, since the two share a dedup key.
+                self._control_unsupported(
+                    "opModMaxLimWInject" if slot == "inj" else "opModMaxLimW", missing
+                )
                 return
         self._update_enable(
             model.WMaxLimPctEna,
@@ -1384,6 +1391,7 @@ class SunSpecModbusConnector:
         # which is the state the missing-watts branch above already refuses to
         # create.
         route: str | None = None
+        pct: float | None = None
         if enable == 1:
             if not _unimplemented_points(model, ("WSetMod", "WSet")):
                 route = "watts"
@@ -1392,6 +1400,19 @@ class SunSpecModbusConnector:
                 # but a device implementing only the percent form can still hold
                 # the setpoint, and declining outright would give up a control
                 # this device can actually honour.
+                #
+                # Converted here rather than after the enable: the conversion
+                # can fail on a device with no usable percent base -- WMaxRtg of
+                # zero clears the readiness check, which only rejects None -- and
+                # discovering that later would leave WSetEna raised over a
+                # WSetPct that was never written.
+                #
+                # Narrowing only: the malformed-payload branch above returns
+                # when an enabled control carries no watts.
+                assert watts is not None
+                pct = self._watts_as_pct_of_wmax(watts, "opModTargetW")
+                if pct is None:
+                    return
                 route = "percent"
             else:
                 self._control_unsupported(
@@ -1414,12 +1435,7 @@ class SunSpecModbusConnector:
             model.write()
             return
 
-        # Narrowing only: the malformed-payload branch above returns when an
-        # enabled control carries no watts.
-        assert watts is not None
-        pct = self._watts_as_pct_of_wmax(watts, "opModTargetW")
-        if pct is None:
-            return
+        assert pct is not None  # settled before the enable, above
         model.WSetMod.value = 0  # W_MAX_PCT
         model.WSetPct.cvalue = pct
         model.write()

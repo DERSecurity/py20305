@@ -2094,7 +2094,7 @@ class TestUnimplementedControlRegisters:
         self._unimplement(model_704, "VarSetPct")
 
         await sunspec_connector.update_const_q(
-            {"const_q_mode_enable": 1, "const_q_pct": 30, "const_q_ref": 2}
+            {"const_q_mode_enable": 1, "const_q_pct": 30, "ref_type": 2}
         )
 
         model_704.write.assert_not_called()
@@ -2185,3 +2185,51 @@ class TestTargetWPrefersAnImplementedForm:
 
         model_704.write.assert_not_called()
         assert model_704.WSetEna.cvalue == 0
+
+class TestFallbackDiagnosticsNameTheRightControl:
+    @pytest.mark.asyncio
+    async def test_a_rerouted_inject_limit_is_reported_as_inject(
+        self, sunspec_connector, caplog
+    ):
+        """The two controls share WMaxLimPct but are not the same control.
+
+        Inject arrives here having been rerouted off model 702. Reporting it
+        under the other control's name would misdirect the operator, and the
+        shared dedup key would let whichever came first silence the other.
+        """
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WDisChaRteMaxRtg = MagicMock(value=0, cvalue=0)
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.WMaxLimPct = MagicMock(value=None, cvalue=None)
+
+        with caplog.at_level(logging.WARNING):
+            await sunspec_connector.update_p_lim_inj(
+                {"p_lim_mode_enable": 1, "p_lim_watts": 3000}
+            )
+
+        assert any("opModMaxLimWInject not applied" in r.message for r in caplog.records)
+
+
+class TestTargetWPercentFallbackNeedsABase:
+    @pytest.mark.asyncio
+    async def test_no_enable_is_raised_when_the_percent_cannot_be_formed(
+        self, sunspec_connector
+    ):
+        """A device with no usable percent base.
+
+        WMaxRtg of zero clears the readiness check, which rejects only None, so
+        the conversion can still fail. Discovering that after the enable had
+        gone up would leave WSetEna raised over a WSetPct that was never
+        written -- the exact state this guard exists to prevent.
+        """
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.WSet = MagicMock(value=None, cvalue=None)
+        model_704.WSetEna.cvalue = 0
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WMax = MagicMock(value=0, cvalue=0)
+        model_702.WMaxRtg = MagicMock(value=0, cvalue=0)
+
+        await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
+
+        assert model_704.WSetEna.cvalue == 0
+        model_704.write.assert_not_called()
