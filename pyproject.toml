@@ -32,6 +32,12 @@ dependencies = [
     "lxml>=5.0",
 ]
 
+[project.urls]
+Homepage = "https://open-satori.org"
+Documentation = "https://dersecurity.github.io/py20305/"
+Source = "https://github.com/DERSecurity/py20305"
+Issues = "https://github.com/DERSecurity/py20305/issues"
+
 [project.scripts]
 py20305 = "py20305.cli:main"
 
