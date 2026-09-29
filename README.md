@@ -19,7 +19,7 @@
 
 # py20305
 
-**The IEEE 2030.5 / CSIP client of [Project Satori](https://dersec.io/satori)** —
+**The IEEE 2030.5 / CSIP client of [Project Satori](https://open-satori.org)** —
 an open-source project led by the SunSpec Alliance, DER Security,
 and industry consortium members.
 
@@ -29,7 +29,7 @@ and industry consortium members.
 [![PyPI](https://img.shields.io/pypi/v/py20305)](https://pypi.org/project/py20305/)
 [![Python](https://img.shields.io/pypi/pyversions/py20305)](https://pypi.org/project/py20305/)
 [![License](https://img.shields.io/github/license/DERSecurity/py20305)](https://github.com/DERSecurity/py20305/blob/main/LICENSE)
-[![Project Satori](https://img.shields.io/badge/Project-Satori-b7410e)](https://dersec.io/satori)
+[![Project Satori](https://img.shields.io/badge/Project-Satori-b7410e)](https://open-satori.org)
 
 An open IEEE 2030.5 client for distributed energy resources, with CSIP-AUS
 support. It speaks the utility's protocol so your device doesn't have to.
@@ -152,6 +152,8 @@ DER Security, and this repository is its IEEE 2030.5 half:
 | [PySunSpec2](https://github.com/sunspec/pysunspec2) | SunSpec Modbus reference library, used in more than 80% of inverter-based products shipped globally |
 | **py20305** (this repository) | IEEE 2030.5 client stack with CSIP and CSIP-AUS support, and a SunSpec Modbus bridge |
 | SunSpec DevKit CE | Discover, read and identify SunSpec devices on the wire |
+
+Project website: <https://open-satori.org>
 
 ## Documentation
 
