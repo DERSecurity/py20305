@@ -36,6 +36,7 @@ Then:
 pytest tests -q
 ruff check src tests examples scripts
 mypy src/py20305
+python scripts/build_changelog.py --check
 mkdocs serve
 ```
 
