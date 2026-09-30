@@ -565,3 +565,35 @@ async def test_unparseable_location_is_dropped(aiohttp_server, caplog, location)
             loc = await client.post("/mup", make_time())
     assert loc is None
     assert "/mup/1" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("location", "resolved"),
+    [
+        ("upt/7", "/api/v1/upt/7"),
+        ("../v2/upt/7", "/api/v2/upt/7"),
+        ("upt/7?s=1", "/api/v1/upt/7?s=1"),
+    ],
+)
+async def test_relative_location_resolves_against_request_path(aiohttp_server, location, resolved):
+    """A Location without a leading slash is relative to the URL that was
+    POSTed to (RFC 3986 section 5), not to the base URL."""
+    hits: list[str] = []
+
+    async def create(request):
+        return web.Response(status=201, headers={"Location": location})
+
+    async def follow(request):
+        hits.append(request.path_qs)
+        return web.Response(status=201)
+
+    app = web.Application()
+    app.router.add_post("/api/v1/mup", create)
+    app.router.add_post(resolved.split("?")[0], follow)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        loc = await client.post_bytes("/api/v1/mup", b"<MirrorUsagePoint/>")
+        assert loc == resolved
+        await client.post_bytes(loc, b"<MirrorMeterReading/>")
+    assert hits == [resolved]

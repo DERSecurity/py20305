@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, TypeVar
-from urllib.parse import ParseResult, urlparse
+from urllib.parse import ParseResult, urljoin, urlparse
 
 import aiohttp
 
@@ -1293,7 +1293,7 @@ class Sep2Client:
                 async with session.post(url, data=body, ssl=self._ssl) as resp:
                     logger.debug("POST %s -> %s", url, resp.status)
                     await self._check_and_record_write("POST", path, resp, (200, 201, 204))
-                    return self._location_href(resp)
+                    return self._location_href(resp, path)
             except ssl.SSLError:
                 raise
             except aiohttp.InvalidURL as exc:
@@ -1321,7 +1321,7 @@ class Sep2Client:
                 async with session.post(url, data=body, ssl=self._ssl) as resp:
                     logger.debug("POST %s -> %s", url, resp.status)
                     await self._check_and_record_write("POST", path, resp, (200, 201, 204))
-                    return self._location_href(resp)
+                    return self._location_href(resp, path)
             except ssl.SSLError:
                 raise
             except aiohttp.InvalidURL as exc:
@@ -1437,13 +1437,15 @@ class Sep2Client:
                 retry_after=retry_after,
             )
 
-    def _location_href(self, resp: aiohttp.ClientResponse) -> str | None:
+    def _location_href(self, resp: aiohttp.ClientResponse, request_path: str) -> str | None:
         """Return the Location header as a path on the server origin.
 
-        Every request builds its URL as base URL + path, so an absolute
-        Location (RFC 9110 permits one, and some servers send it) would
-        otherwise be prefixed with the base URL a second time on the next
-        request. A Location on another origin, or one that does not parse,
+        Every request builds its URL as base URL + path, so the header is
+        resolved against the URL that was requested (RFC 3986 section 5) and
+        reduced to its path. Otherwise an absolute Location (RFC 9110 permits
+        one) would be prefixed with the base URL a second time, and a relative
+        one such as ``upt/7`` would be appended to the base URL with no
+        separator. A Location on another origin, or one that does not parse,
         cannot be reached that way and is treated as absent, which leaves
         callers on their no-Location path.
         """
@@ -1452,9 +1454,7 @@ class Sep2Client:
             return None
         base = urlparse(self._base_url)
         try:
-            parsed = urlparse(location)
-            if not parsed.scheme and not parsed.netloc:
-                return location
+            parsed = urlparse(urljoin(f"{self._base_url}{request_path}", location))
             same_origin = (parsed.scheme, parsed.hostname, _port(parsed)) == (
                 base.scheme,
                 base.hostname,
