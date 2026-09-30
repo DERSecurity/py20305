@@ -36,6 +36,7 @@ Then:
 pytest tests -q
 ruff check src tests examples scripts
 mypy src/py20305
+python scripts/build_changelog.py --check
 mkdocs serve
 ```
 
@@ -67,9 +68,15 @@ maintainers' own. Direct pushes, force pushes and branch deletion are blocked
 by a repository ruleset, with no bypass for anyone. A pull request merges when
 CI is green: lint, the test matrix, the package build and the container image.
 
-Releases follow the same road: a pull request bumps the version and dates the
-changelog entry, and once it merges, pushing the `vX.Y.Z` tag builds, checks
-and publishes the release.
+A changelog entry is a file in `changelog.d/`, not an edit to `CHANGELOG.md`.
+Name it `<pull-request>.<category>.md` and write the entry body into it;
+`changelog.d/README.md` has the rules and the reason, which is that two pull
+requests editing the same `[Unreleased]` heading conflict on every pair.
+
+Releases follow the same road: a pull request folds the fragments in with
+`python scripts/build_changelog.py --release X.Y.Z`, bumps the version, and
+deletes the fragments it consumed in that same commit. Once it merges, pushing
+the `vX.Y.Z` tag builds, checks and publishes the release.
 
 ## Conventions
 

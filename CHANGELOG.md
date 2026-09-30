@@ -5,7 +5,11 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
-## [0.8.0] — 2026-09-18
+## [Unreleased]
+
+Nothing yet.
+
+## [0.8.0] - 2026-09-18
 
 - The SunSpec connector no longer writes control registers a device reports as
   unimplemented. Almost every setpoint in model 704 is optional, so a device can
@@ -69,7 +73,7 @@ below says so explicitly.
   misjudged the other way silently fails to enforce a limit the head-end
   believes is in force.
 
-## [0.7.0] — 2026-09-18
+## [0.7.0] - 2026-09-18
 
 - The SunSpec connector now applies `opModMaxLimWInject` and
   `opModMaxLimWAbsorb` to the model 702 rate settings. Both controls are
@@ -162,11 +166,11 @@ below says so explicitly.
   window: a real fault occurring while a simulation runs must stay legible as a
   real fault rather than being filed as a test artifact.
 
-## [0.6.1] — 2026-09-10
+## [0.6.1] - 2026-09-10
 
 No functional changes. The README has been updated.
 
-## [0.6.0] — 2026-09-08
+## [0.6.0] - 2026-09-08
 
 - An event that disappears from a server's DERControlList is now cancelled
   rather than left running to its end. IEEE 2030.5-2023 §10.2.2.3 rule p) is
@@ -368,7 +372,7 @@ No functional changes. The README has been updated.
   took to send. A multicast group is the one place on this path where bytes
   arrive from an unauthenticated source.
 
-## [0.5.0] — 2026-08-25
+## [0.5.0] - 2026-08-25
 
 - Telemetry can no longer evict captured protocol traffic from the MQTT
   forwarder under broker backpressure. One queue carried all three payload
@@ -436,7 +440,7 @@ No functional changes. The README has been updated.
   entry `"stale": true` and reports the threshold, and the client raises a
   warning naming the FSA the first time each scope is bypassed.
 
-## [0.4.0] — 2026-08-21
+## [0.4.0] - 2026-08-21
 
 - **Behavior change:** `telemetry.enabled` now defaults to `true`. A
   deployment that never set the field starts reading its devices and
@@ -547,7 +551,7 @@ No functional changes. The README has been updated.
   do not wait for a next success that may never come; and a never-opened
   failure no longer wears an earlier attempt's local port.
 
-## [0.3.0] — 2026-08-19
+## [0.3.0] - 2026-08-19
 
 - Connection telemetry: the client reports its own connection outcomes as
   OCSF Network Activity (4001) events on their own MQTT topic
@@ -574,7 +578,7 @@ No functional changes. The README has been updated.
   connection-outcome session tracking, downstream device telemetry -- are
   asserted end to end on the bytes that reach the broker.
 
-## [0.2.0] — 2026-08-19
+## [0.2.0] - 2026-08-19
 
 - Subscribe/notify from the runner: a `subscription:` section constructs the
   subscription manager and notification listener and wires them into the
@@ -609,13 +613,13 @@ No functional changes. The README has been updated.
 - A public seam for embedders: `CsipClient.attach_subscriptions()` and a
   `subscription_manager` property replace reaching into private attributes.
 
-## [0.1.1] — 2026-08-19
+## [0.1.1] - 2026-08-19
 
 No functional changes. The README now uses absolute image and link
 addresses, so the PyPI project page renders the project banner and
 badges rather than their alt text — PyPI resolves no relative URLs.
 
-## [0.1.0] — 2026-08-18
+## [0.1.0] - 2026-08-18
 
 First release.
 
