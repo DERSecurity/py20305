@@ -14,6 +14,8 @@ import pytest
 from aiohttp import web
 
 from py20305.client.errors import (
+    Sep2ConnectionError,
+    Sep2Error,
     Sep2NoContentError,
     Sep2ProtocolError,
     Sep2RateLimitError,
@@ -449,3 +451,204 @@ async def test_get_list_later_page_204_is_protocol_error_not_no_content(aiohttp_
             await client.get_list("/edev", EndDeviceList)
     assert not isinstance(info.value, Sep2NoContentError)  # surfaces, not benign
     assert info.value.status_code == 204
+
+
+async def test_post_bytes_absolute_location_is_followable(aiohttp_server):
+    """A server may return an absolute Location (RFC 9110 permits it). The
+    returned href must be usable as a path on the next request, not
+    concatenated onto the base URL a second time."""
+    readings: list[bytes] = []
+
+    async def create(request):
+        return web.Response(status=201, headers={"Location": f"{request.url.origin()}/upt/dev7"})
+
+    async def post_readings(request):
+        readings.append(await request.read())
+        return web.Response(status=201)
+
+    app = web.Application()
+    app.router.add_post("/mup", create)
+    app.router.add_post("/upt/dev7", post_readings)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        loc = await client.post_bytes("/mup", b"<MirrorUsagePoint/>")
+        assert loc == "/upt/dev7"
+        await client.post_bytes(loc, b"<MirrorMeterReading/>")
+    assert readings == [b"<MirrorMeterReading/>"]
+
+
+async def test_post_absolute_location_keeps_query(aiohttp_server):
+    async def handler(request):
+        return web.Response(status=201, headers={"Location": f"{request.url.origin()}/sub/1?s=2"})
+
+    app = web.Application()
+    app.router.add_post("/sub", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        loc = await client.post("/sub", make_time())
+    assert loc == "/sub/1?s=2"
+
+
+async def test_post_cross_origin_location_is_dropped(aiohttp_server):
+    """A Location on another origin cannot be reached through this client's
+    base URL, so it is treated as absent rather than returned."""
+
+    async def handler(request):
+        return web.Response(status=201, headers={"Location": "https://other.example.com/mup/1"})
+
+    app = web.Application()
+    app.router.add_post("/mup", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        loc = await client.post("/mup", make_time())
+    assert loc is None
+
+
+@pytest.mark.parametrize("method", ["get", "post_bytes"])
+async def test_malformed_url_is_not_reported_as_unreachable(method):
+    """A URL aiohttp rejects before connecting is a client-side defect: it
+    must not be retried or reported as the server being unreachable."""
+    client = Sep2Client("https://server.example.com:8443")
+    href = "https://server.example.com:8443/upt/dev7"
+    async with client:
+        call = client.get(href, Time) if method == "get" else client.post_bytes(href, b"")
+        with pytest.raises(Sep2Error, match="Invalid request URL") as exc_info:
+            await call
+    assert not isinstance(exc_info.value, Sep2ConnectionError)
+    assert client.last_error is None
+
+
+async def test_cross_origin_location_log_omits_credentials(aiohttp_server, caplog):
+    """The Location is peer-controlled and may carry userinfo or signed query
+    parameters, so only its origin is logged."""
+
+    async def handler(request):
+        return web.Response(
+            status=201,
+            headers={"Location": "https://user:secret@other.example.com/mup/1?sig=token"},
+        )
+
+    app = web.Application()
+    app.router.add_post("/mup", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        with caplog.at_level("WARNING", logger="py20305.client.http"):
+            loc = await client.post("/mup", make_time())
+    assert loc is None
+    assert "https://other.example.com" in caplog.text
+    for leaked in ("user", "secret", "sig=", "token", "/mup/1"):
+        assert leaked not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["https://other.example.com:x/mup/1", "https://[invalid/mup/1"],
+    ids=["bad-port", "bad-ipv6-authority"],
+)
+async def test_unparseable_location_is_dropped(aiohttp_server, caplog, location):
+    """The POST succeeded, so a Location that does not parse must not raise
+    out of it; nor is the peer-controlled value logged."""
+
+    async def handler(request):
+        return web.Response(status=201, headers={"Location": location})
+
+    app = web.Application()
+    app.router.add_post("/mup", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        with caplog.at_level("WARNING", logger="py20305.client.http"):
+            loc = await client.post("/mup", make_time())
+    assert loc is None
+    assert "/mup/1" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("location", "resolved"),
+    [
+        ("upt/7", "/api/v1/upt/7"),
+        ("../v2/upt/7", "/api/v2/upt/7"),
+        ("upt/7?s=1", "/api/v1/upt/7?s=1"),
+    ],
+)
+async def test_relative_location_resolves_against_request_path(aiohttp_server, location, resolved):
+    """A Location without a leading slash is relative to the URL that was
+    POSTed to (RFC 3986 section 5), not to the base URL."""
+    hits: list[str] = []
+
+    async def create(request):
+        return web.Response(status=201, headers={"Location": location})
+
+    async def follow(request):
+        hits.append(request.path_qs)
+        return web.Response(status=201)
+
+    app = web.Application()
+    app.router.add_post("/api/v1/mup", create)
+    app.router.add_post(resolved.split("?")[0], follow)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        loc = await client.post_bytes("/api/v1/mup", b"<MirrorUsagePoint/>")
+        assert loc == resolved
+        await client.post_bytes(loc, b"<MirrorMeterReading/>")
+    assert hits == [resolved]
+
+
+@pytest.mark.parametrize("location", ["/sub/1;version=2?s=3", "sub/1;v=2", "/a;x/b;y"])
+async def test_location_keeps_path_parameters(aiohttp_server, location):
+    """Semicolon parameters are part of the path (RFC 3986 section 3.3) and
+    name a different resource if dropped."""
+
+    async def handler(request):
+        return web.Response(status=201, headers={"Location": location})
+
+    app = web.Application()
+    app.router.add_post("/sub", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        loc = await client.post("/sub", make_time())
+    assert loc == (location if location.startswith("/") else f"/{location}")
+
+
+@pytest.mark.parametrize(
+    ("location", "href", "reached"),
+    [
+        ("{origin}/api/upt/7", "/upt/7", "/api/upt/7"),
+        ("/api/upt/7", "/upt/7", "/api/upt/7"),
+        ("upt/7", "/upt/7", "/api/upt/7"),
+        ("/api", "/", "/api/"),
+        ("/apix/upt/7", "/apix/upt/7", "/api/apix/upt/7"),
+    ],
+    ids=["absolute", "root-relative", "relative", "exact-prefix", "segment-boundary"],
+)
+async def test_location_under_prefixed_base_url(aiohttp_server, location, href, reached):
+    """A base URL may carry a path, and every request is built as base URL +
+    path, so a Location under that path is returned without it. A path that
+    only shares its leading characters is not under it."""
+    hits: list[str] = []
+
+    async def create(request):
+        return web.Response(
+            status=201, headers={"Location": location.format(origin=request.url.origin())}
+        )
+
+    async def follow(request):
+        hits.append(request.path)
+        return web.Response(status=201)
+
+    app = web.Application()
+    app.router.add_post("/api/mup", create)
+    app.router.add_post(reached, follow)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(f"{base_url}/api") as client:
+        loc = await client.post_bytes("/mup", b"<MirrorUsagePoint/>")
+        assert loc == href
+        await client.post_bytes(loc, b"<MirrorMeterReading/>")
+    assert hits == [reached]
