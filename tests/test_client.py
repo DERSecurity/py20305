@@ -519,3 +519,39 @@ async def test_malformed_url_is_not_reported_as_unreachable(method):
             await call
     assert not isinstance(exc_info.value, Sep2ConnectionError)
     assert client.last_error is None
+
+
+async def test_cross_origin_location_log_omits_credentials(aiohttp_server, caplog):
+    """The Location is peer-controlled and may carry userinfo or signed query
+    parameters, so only its origin is logged."""
+
+    async def handler(request):
+        return web.Response(
+            status=201,
+            headers={"Location": "https://user:secret@other.example.com/mup/1?sig=token"},
+        )
+
+    app = web.Application()
+    app.router.add_post("/mup", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        with caplog.at_level("WARNING", logger="py20305.client.http"):
+            loc = await client.post("/mup", make_time())
+    assert loc is None
+    assert "https://other.example.com" in caplog.text
+    for leaked in ("user", "secret", "sig=", "token", "/mup/1"):
+        assert leaked not in caplog.text
+
+
+async def test_location_with_invalid_port_is_dropped(aiohttp_server):
+    async def handler(request):
+        return web.Response(status=201, headers={"Location": "https://other.example.com:x/mup/1"})
+
+    app = web.Application()
+    app.router.add_post("/mup", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        loc = await client.post("/mup", make_time())
+    assert loc is None

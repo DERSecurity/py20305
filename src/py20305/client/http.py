@@ -1438,13 +1438,14 @@ class Sep2Client:
             )
 
     def _location_href(self, resp: aiohttp.ClientResponse) -> str | None:
-        """Return the Location header as a path relative to the base URL.
+        """Return the Location header as a path on the server origin.
 
         Every request builds its URL as base URL + path, so an absolute
         Location (RFC 9110 permits one, and some servers send it) would
         otherwise be prefixed with the base URL a second time on the next
-        request. A Location on another origin cannot be reached that way and
-        is treated as absent, which leaves callers on their no-Location path.
+        request. A Location on another origin, or one that does not parse,
+        cannot be reached that way and is treated as absent, which leaves
+        callers on their no-Location path.
         """
         location = resp.headers.get("Location")
         if not location:
@@ -1453,20 +1454,26 @@ class Sep2Client:
         if not parsed.scheme and not parsed.netloc:
             return location
         base = urlparse(self._base_url)
-        if (parsed.scheme, parsed.hostname, _port(parsed)) != (
-            base.scheme,
-            base.hostname,
-            _port(base),
-        ):
+        try:
+            same_origin = (parsed.scheme, parsed.hostname, _port(parsed)) == (
+                base.scheme,
+                base.hostname,
+                _port(base),
+            )
+        except ValueError:
+            same_origin = False
+        if not same_origin:
+            # Origins only: the Location is peer-controlled and may carry
+            # userinfo or signed query parameters.
             logger.warning(
-                "Ignoring Location %s: it is not on the server origin %s",
-                location,
-                self._base_url,
+                "Ignoring Location on %s://%s: it is not on the server origin %s://%s",
+                parsed.scheme,
+                parsed.hostname,
+                base.scheme,
+                base.hostname,
             )
             return None
         path = parsed.path or "/"
-        if base.path and path.startswith(f"{base.path}/"):
-            path = path[len(base.path) :]
         return f"{path}?{parsed.query}" if parsed.query else path
 
     def _forward_upstream(
