@@ -1438,16 +1438,16 @@ class Sep2Client:
             )
 
     def _location_href(self, resp: aiohttp.ClientResponse, request_path: str) -> str | None:
-        """Return the Location header as a path on the server origin.
+        """Return the Location header as a path to request on this client.
 
         Every request builds its URL as base URL + path, so the header is
         resolved against the URL that was requested (RFC 3986 section 5) and
-        reduced to its path. Otherwise an absolute Location (RFC 9110 permits
-        one) would be prefixed with the base URL a second time, and a relative
-        one such as ``upt/7`` would be appended to the base URL with no
-        separator. A Location on another origin, or one that does not parse,
-        cannot be reached that way and is treated as absent, which leaves
-        callers on their no-Location path.
+        reduced to its path, less any path the base URL carries. Otherwise an
+        absolute Location (RFC 9110 permits one) would be prefixed with the base
+        URL a second time, and a relative one such as ``upt/7`` would be
+        appended to the base URL with no separator. A Location on another
+        origin, or one that does not parse, cannot be reached that way and is
+        treated as absent, which leaves callers on their no-Location path.
         """
         location = resp.headers.get("Location")
         if not location:
@@ -1475,6 +1475,8 @@ class Sep2Client:
             )
             return None
         path = parsed.path or "/"
+        if base.path and (path == base.path or path.startswith(f"{base.path}/")):
+            path = path[len(base.path) :] or "/"
         return f"{path}?{parsed.query}" if parsed.query else path
 
     def _forward_upstream(

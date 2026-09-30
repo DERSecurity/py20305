@@ -614,3 +614,41 @@ async def test_location_keeps_path_parameters(aiohttp_server, location):
     async with Sep2Client(base_url) as client:
         loc = await client.post("/sub", make_time())
     assert loc == (location if location.startswith("/") else f"/{location}")
+
+
+@pytest.mark.parametrize(
+    ("location", "href", "reached"),
+    [
+        ("{origin}/api/upt/7", "/upt/7", "/api/upt/7"),
+        ("/api/upt/7", "/upt/7", "/api/upt/7"),
+        ("upt/7", "/upt/7", "/api/upt/7"),
+        ("/api", "/", "/api/"),
+        ("/apix/upt/7", "/apix/upt/7", "/api/apix/upt/7"),
+    ],
+    ids=["absolute", "root-relative", "relative", "exact-prefix", "segment-boundary"],
+)
+async def test_location_under_prefixed_base_url(aiohttp_server, location, href, reached):
+    """A base URL may carry a path, and every request is built as base URL +
+    path, so a Location under that path is returned without it. A path that
+    only shares its leading characters is not under it."""
+    hits: list[str] = []
+
+    async def create(request):
+        return web.Response(
+            status=201, headers={"Location": location.format(origin=request.url.origin())}
+        )
+
+    async def follow(request):
+        hits.append(request.path)
+        return web.Response(status=201)
+
+    app = web.Application()
+    app.router.add_post("/api/mup", create)
+    app.router.add_post(reached, follow)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(f"{base_url}/api") as client:
+        loc = await client.post_bytes("/mup", b"<MirrorUsagePoint/>")
+        assert loc == href
+        await client.post_bytes(loc, b"<MirrorMeterReading/>")
+    assert hits == [reached]
