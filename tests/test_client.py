@@ -14,6 +14,8 @@ import pytest
 from aiohttp import web
 
 from py20305.client.errors import (
+    Sep2ConnectionError,
+    Sep2Error,
     Sep2NoContentError,
     Sep2ProtocolError,
     Sep2RateLimitError,
@@ -449,3 +451,71 @@ async def test_get_list_later_page_204_is_protocol_error_not_no_content(aiohttp_
             await client.get_list("/edev", EndDeviceList)
     assert not isinstance(info.value, Sep2NoContentError)  # surfaces, not benign
     assert info.value.status_code == 204
+
+
+async def test_post_bytes_absolute_location_is_followable(aiohttp_server):
+    """A server may return an absolute Location (RFC 9110 permits it). The
+    returned href must be usable as a path on the next request, not
+    concatenated onto the base URL a second time."""
+    readings: list[bytes] = []
+
+    async def create(request):
+        return web.Response(status=201, headers={"Location": f"{request.url.origin()}/upt/dev7"})
+
+    async def post_readings(request):
+        readings.append(await request.read())
+        return web.Response(status=201)
+
+    app = web.Application()
+    app.router.add_post("/mup", create)
+    app.router.add_post("/upt/dev7", post_readings)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        loc = await client.post_bytes("/mup", b"<MirrorUsagePoint/>")
+        assert loc == "/upt/dev7"
+        await client.post_bytes(loc, b"<MirrorMeterReading/>")
+    assert readings == [b"<MirrorMeterReading/>"]
+
+
+async def test_post_absolute_location_keeps_query(aiohttp_server):
+    async def handler(request):
+        return web.Response(status=201, headers={"Location": f"{request.url.origin()}/sub/1?s=2"})
+
+    app = web.Application()
+    app.router.add_post("/sub", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        loc = await client.post("/sub", make_time())
+    assert loc == "/sub/1?s=2"
+
+
+async def test_post_cross_origin_location_is_dropped(aiohttp_server):
+    """A Location on another origin cannot be reached through this client's
+    base URL, so it is treated as absent rather than returned."""
+
+    async def handler(request):
+        return web.Response(status=201, headers={"Location": "https://other.example.com/mup/1"})
+
+    app = web.Application()
+    app.router.add_post("/mup", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        loc = await client.post("/mup", make_time())
+    assert loc is None
+
+
+@pytest.mark.parametrize("method", ["get", "post_bytes"])
+async def test_malformed_url_is_not_reported_as_unreachable(method):
+    """A URL aiohttp rejects before connecting is a client-side defect: it
+    must not be retried or reported as the server being unreachable."""
+    client = Sep2Client("https://server.example.com:8443")
+    href = "https://server.example.com:8443/upt/dev7"
+    async with client:
+        call = client.get(href, Time) if method == "get" else client.post_bytes(href, b"")
+        with pytest.raises(Sep2Error, match="Invalid request URL") as exc_info:
+            await call
+    assert not isinstance(exc_info.value, Sep2ConnectionError)
+    assert client.last_error is None

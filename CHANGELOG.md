@@ -5,6 +5,22 @@ Notable changes to this project, newest first. Versions follow
 version is `0`, a minor bump may carry a breaking change and the release note
 below says so explicitly.
 
+## [0.8.1] — 2026-09-30
+
+- An absolute `Location` header is now followed correctly. HTTP permits a
+  server to answer a POST with a full URL rather than a path, and the client
+  prefixed every returned `Location` with the base URL on the next request. A
+  server that did so left the client with a URL naming the host twice, so after
+  the MirrorUsagePoint POST every readings POST failed and no telemetry reached
+  the server. Subscription URIs were affected the same way. A same-origin
+  `Location` is now reduced to its path; one on another origin cannot be
+  reached through the configured server and is treated as absent, which leaves
+  the caller on its existing no-`Location` path.
+- A request URL the HTTP library rejects before connecting now raises
+  `Sep2Error` ("Invalid request URL") at once. It was previously retried as a
+  connection failure and reported as the server being unreachable, which sent
+  diagnosis towards the network when the fault was in the client.
+
 ## [0.8.0] — 2026-09-18
 
 - The SunSpec connector no longer writes control registers a device reports as

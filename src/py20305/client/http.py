@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, TypeVar
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 import aiohttp
 
@@ -24,6 +24,7 @@ from py20305.client.comm_loss_simulation import (
 from py20305.client.connector import Ieee2030TCPConnector, SocketPair
 from py20305.client.errors import (
     Sep2ConnectionError,
+    Sep2Error,
     Sep2NoContentError,
     Sep2PayloadError,
     Sep2ProtocolError,
@@ -79,6 +80,11 @@ _DEFAULT_TIMEOUT = aiohttp.ClientTimeout(sock_connect=5, sock_read=15)
 # passthrough: the value reaches aiohttp's request line, and the debugger this
 # backs is aimed at a live utility server.
 _RAW_PROXY_METHODS = frozenset({"GET", "POST", "PUT", "DELETE"})
+
+
+def _port(url: ParseResult) -> int | None:
+    return url.port or {"https": 443, "http": 80}.get(url.scheme)
+
 
 # Strong references for fire-and-forget background tasks (e.g. closing an
 # orphaned aiohttp session after `update_client_cert`). Asyncio holds only
@@ -1106,6 +1112,8 @@ class Sep2Client:
                 self._chain_validated = False
                 self._last_error = str(exc)
                 raise
+            except aiohttp.InvalidURL as exc:
+                raise Sep2Error(f"Invalid request URL: {exc}") from exc
             except aiohttp.ClientError as exc:
                 self._record_contact(reachable=False, error=exc)
                 self._chain_validated = False
@@ -1192,6 +1200,8 @@ class Sep2Client:
                 self._chain_validated = False
                 self._last_error = str(exc)
                 raise
+            except aiohttp.InvalidURL as exc:
+                raise Sep2Error(f"Invalid request URL: {exc}") from exc
             except aiohttp.ClientError as exc:
                 self._record_contact(reachable=False, error=exc)
                 self._chain_validated = False
@@ -1283,9 +1293,11 @@ class Sep2Client:
                 async with session.post(url, data=body, ssl=self._ssl) as resp:
                     logger.debug("POST %s -> %s", url, resp.status)
                     await self._check_and_record_write("POST", path, resp, (200, 201, 204))
-                    return str(resp.headers["Location"]) if "Location" in resp.headers else None
+                    return self._location_href(resp)
             except ssl.SSLError:
                 raise
+            except aiohttp.InvalidURL as exc:
+                raise Sep2Error(f"Invalid request URL: {exc}") from exc
             except aiohttp.ClientError as exc:
                 raise OSError(str(exc)) from exc
 
@@ -1309,9 +1321,11 @@ class Sep2Client:
                 async with session.post(url, data=body, ssl=self._ssl) as resp:
                     logger.debug("POST %s -> %s", url, resp.status)
                     await self._check_and_record_write("POST", path, resp, (200, 201, 204))
-                    return str(resp.headers["Location"]) if "Location" in resp.headers else None
+                    return self._location_href(resp)
             except ssl.SSLError:
                 raise
+            except aiohttp.InvalidURL as exc:
+                raise Sep2Error(f"Invalid request URL: {exc}") from exc
             except aiohttp.ClientError as exc:
                 raise OSError(str(exc)) from exc
 
@@ -1338,6 +1352,8 @@ class Sep2Client:
                     return int(resp.status)
             except ssl.SSLError:
                 raise
+            except aiohttp.InvalidURL as exc:
+                raise Sep2Error(f"Invalid request URL: {exc}") from exc
             except aiohttp.ClientError as exc:
                 raise OSError(str(exc)) from exc
 
@@ -1366,6 +1382,8 @@ class Sep2Client:
                     return int(resp.status)
             except ssl.SSLError:
                 raise
+            except aiohttp.InvalidURL as exc:
+                raise Sep2Error(f"Invalid request URL: {exc}") from exc
             except aiohttp.ClientError as exc:
                 raise OSError(str(exc)) from exc
 
@@ -1385,6 +1403,8 @@ class Sep2Client:
                     return int(resp.status)
             except ssl.SSLError:
                 raise
+            except aiohttp.InvalidURL as exc:
+                raise Sep2Error(f"Invalid request URL: {exc}") from exc
             except aiohttp.ClientError as exc:
                 raise OSError(str(exc)) from exc
 
@@ -1416,6 +1436,38 @@ class Sep2Client:
                 f"{method} {path} returned 429 Too Many Requests",
                 retry_after=retry_after,
             )
+
+    def _location_href(self, resp: aiohttp.ClientResponse) -> str | None:
+        """Return the Location header as a path relative to the base URL.
+
+        Every request builds its URL as base URL + path, so an absolute
+        Location (RFC 9110 permits one, and some servers send it) would
+        otherwise be prefixed with the base URL a second time on the next
+        request. A Location on another origin cannot be reached that way and
+        is treated as absent, which leaves callers on their no-Location path.
+        """
+        location = resp.headers.get("Location")
+        if not location:
+            return None
+        parsed = urlparse(location)
+        if not parsed.scheme and not parsed.netloc:
+            return location
+        base = urlparse(self._base_url)
+        if (parsed.scheme, parsed.hostname, _port(parsed)) != (
+            base.scheme,
+            base.hostname,
+            _port(base),
+        ):
+            logger.warning(
+                "Ignoring Location %s: it is not on the server origin %s",
+                location,
+                self._base_url,
+            )
+            return None
+        path = parsed.path or "/"
+        if base.path and path.startswith(f"{base.path}/"):
+            path = path[len(base.path) :]
+        return f"{path}?{parsed.query}" if parsed.query else path
 
     def _forward_upstream(
         self,
