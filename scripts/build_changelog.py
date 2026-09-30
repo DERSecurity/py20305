@@ -32,7 +32,7 @@ A fragment opens with a bolded summary — ``**...**`` closing in the same
 paragraph, with at least one letter between the delimiters.
 
 That is the one body rule checked here rather than left to review. A rule of
-"1–3 lines per change" was tried first and does not survive contact: a line
+"1-3 lines per change" was tried first and does not survive contact: a line
 depends on where the author happened to wrap, so the same entry passes or fails
 on its formatting alone and a reviewer adjudicates it every time.
 
