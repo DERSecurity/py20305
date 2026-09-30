@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, TypeVar
-from urllib.parse import ParseResult, urljoin, urlparse
+from urllib.parse import SplitResult, urljoin, urlparse, urlsplit
 
 import aiohttp
 
@@ -82,7 +82,7 @@ _DEFAULT_TIMEOUT = aiohttp.ClientTimeout(sock_connect=5, sock_read=15)
 _RAW_PROXY_METHODS = frozenset({"GET", "POST", "PUT", "DELETE"})
 
 
-def _port(url: ParseResult) -> int | None:
+def _port(url: SplitResult) -> int | None:
     return url.port or {"https": 443, "http": 80}.get(url.scheme)
 
 
@@ -1452,9 +1452,9 @@ class Sep2Client:
         location = resp.headers.get("Location")
         if not location:
             return None
-        base = urlparse(self._base_url)
+        base = urlsplit(self._base_url)
         try:
-            parsed = urlparse(urljoin(f"{self._base_url}{request_path}", location))
+            parsed = urlsplit(urljoin(f"{self._base_url}{request_path}", location))
             same_origin = (parsed.scheme, parsed.hostname, _port(parsed)) == (
                 base.scheme,
                 base.hostname,

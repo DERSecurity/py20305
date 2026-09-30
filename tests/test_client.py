@@ -597,3 +597,20 @@ async def test_relative_location_resolves_against_request_path(aiohttp_server, l
         assert loc == resolved
         await client.post_bytes(loc, b"<MirrorMeterReading/>")
     assert hits == [resolved]
+
+
+@pytest.mark.parametrize("location", ["/sub/1;version=2?s=3", "sub/1;v=2", "/a;x/b;y"])
+async def test_location_keeps_path_parameters(aiohttp_server, location):
+    """Semicolon parameters are part of the path (RFC 3986 section 3.3) and
+    name a different resource if dropped."""
+
+    async def handler(request):
+        return web.Response(status=201, headers={"Location": location})
+
+    app = web.Application()
+    app.router.add_post("/sub", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        loc = await client.post("/sub", make_time())
+    assert loc == (location if location.startswith("/") else f"/{location}")
