@@ -1450,18 +1450,19 @@ class Sep2Client:
         location = resp.headers.get("Location")
         if not location:
             return None
-        parsed = urlparse(location)
-        if not parsed.scheme and not parsed.netloc:
-            return location
         base = urlparse(self._base_url)
         try:
+            parsed = urlparse(location)
+            if not parsed.scheme and not parsed.netloc:
+                return location
             same_origin = (parsed.scheme, parsed.hostname, _port(parsed)) == (
                 base.scheme,
                 base.hostname,
                 _port(base),
             )
         except ValueError:
-            same_origin = False
+            logger.warning("Ignoring a Location header that does not parse as a URL")
+            return None
         if not same_origin:
             # Origins only: the Location is peer-controlled and may carry
             # userinfo or signed query parameters.

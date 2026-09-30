@@ -544,14 +544,24 @@ async def test_cross_origin_location_log_omits_credentials(aiohttp_server, caplo
         assert leaked not in caplog.text
 
 
-async def test_location_with_invalid_port_is_dropped(aiohttp_server):
+@pytest.mark.parametrize(
+    "location",
+    ["https://other.example.com:x/mup/1", "https://[invalid/mup/1"],
+    ids=["bad-port", "bad-ipv6-authority"],
+)
+async def test_unparseable_location_is_dropped(aiohttp_server, caplog, location):
+    """The POST succeeded, so a Location that does not parse must not raise
+    out of it; nor is the peer-controlled value logged."""
+
     async def handler(request):
-        return web.Response(status=201, headers={"Location": "https://other.example.com:x/mup/1"})
+        return web.Response(status=201, headers={"Location": location})
 
     app = web.Application()
     app.router.add_post("/mup", handler)
     base_url = await _serve(aiohttp_server, app)
 
     async with Sep2Client(base_url) as client:
-        loc = await client.post("/mup", make_time())
+        with caplog.at_level("WARNING", logger="py20305.client.http"):
+            loc = await client.post("/mup", make_time())
     assert loc is None
+    assert "/mup/1" not in caplog.text
