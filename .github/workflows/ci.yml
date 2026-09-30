@@ -28,6 +28,10 @@ jobs:
         run: ruff check src tests examples scripts
       - name: mypy
         run: mypy src/py20305
+      - name: changelog fragments
+        # Validates changelog.d/, so a malformed entry fails here rather than
+        # at release, when whoever is cutting it has the least context.
+        run: python scripts/build_changelog.py --check
 
   test:
     runs-on: ${{ matrix.os }}
