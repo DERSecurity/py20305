@@ -9,6 +9,20 @@ below says so explicitly.
 
 Nothing yet.
 
+## [0.8.1] - 2026-09-30
+
+### Changed
+
+- **Changelog entries are now files in `changelog.d/` rather than edits to `CHANGELOG.md` (#36).** Two pull requests adding entries used to insert at the same line under `[Unreleased]`, so they conflicted on every pair even though the resolution was always "keep both". Each entry is its own file now, so there is no shared hunk to conflict on.
+
+  `changelog.d/README.md` has the naming rules and the reasoning. A release folds the pending fragments in with `python scripts/build_changelog.py --release X.Y.Z`, which also empties `[Unreleased]` and names the fragments it consumed so they can be deleted in the same commit.
+
+### Fixed
+
+- **An absolute `Location` header is now followed rather than appended to the server URL (#37).** HTTP permits a server to answer a POST with a full URL instead of a path, and the client prefixed every returned `Location` with the base URL on the next request, producing a URL that named the host twice. Against such a server, every readings POST after the MirrorUsagePoint POST failed and no telemetry was delivered; subscription URIs were affected the same way. A `Location` is now resolved against the URL that was POSTed to, as RFC 3986 specifies, and reduced to its path, so a relative one such as `upt/7` also resolves correctly rather than being appended to the server URL with no separator. When the server URL itself carries a path, that path is removed from the result, so it is not repeated on the next request. A `Location` on another origin cannot be reached through the configured server, so it is treated as absent and the caller takes its existing no-`Location` path.
+
+  **A request URL the HTTP library rejects is reported as invalid, not as the server being unreachable (#37).** The rejection was retried three times as a transient connection failure and surfaced as `Cannot reach <host>`, which pointed diagnosis at the network when the fault was in the client. It now raises `Sep2Error` ("Invalid request URL") at once.
+
 ## [0.8.0] - 2026-09-18
 
 - The SunSpec connector no longer writes control registers a device reports as
