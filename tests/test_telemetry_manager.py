@@ -1684,3 +1684,107 @@ class TestManagerReadsAreReported:
         mock_client.put_bytes.assert_called_once()
 
         await manager.shutdown()
+
+
+class TestSignedLoadRegistration:
+    """SIGNED_LOAD_CONVENTION re-POSTs the MUP when a new reading appears."""
+
+    @pytest.fixture
+    def signed_manager(self, mock_client, connector_resolver):
+        from py20305.telemetry.mup import ReadingProfile
+
+        return TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+        )
+
+    @staticmethod
+    def _mup_posts(mock_client):
+        from py20305.models.sep import MirrorUsagePoint
+        from py20305.xml.serialization import from_xml
+
+        return [
+            from_xml(call.args[1], MirrorUsagePoint)
+            for call in mock_client.post_bytes.call_args_list
+            if call.args[0] == MUP_LIST_HREF
+        ]
+
+    @staticmethod
+    def _descriptions(mup):
+        return {m.description for m in mup.mirror_meter_reading}
+
+    @staticmethod
+    def _monitoring(**extra):
+        return {
+            "W": 1000.0,
+            "Var": 200.0,
+            "Hz": 60.0,
+            "V": 240.0,
+            "PF": 0.98,
+            "VA": 1020.0,
+            "A": 4.25,
+            "ACType": 2,
+            **extra,
+        }
+
+    async def test_new_reading_reposts_mup_before_readings(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        mock_connector.fetch_monitoring.return_value = self._monitoring()
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        targets = [call.args[0] for call in mock_client.post_bytes.call_args_list]
+        assert targets == [MUP_LIST_HREF, "/mup/device1"]
+        assert "State of Energy" in self._descriptions(self._mup_posts(mock_client)[0])
+
+        await signed_manager.shutdown()
+
+    async def test_repost_happens_once(self, signed_manager, mock_client, mock_connector):
+        mock_connector.fetch_monitoring.return_value = self._monitoring()
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert self._mup_posts(mock_client) == []
+
+        await signed_manager.shutdown()
+
+    async def test_repost_keeps_a_reading_absent_this_cycle(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        # State of Energy drops out in the same cycle a line-to-line voltage appears.
+        mock_connector.fetch_monitoring.return_value = self._monitoring(VL1L2=240.0)
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        descriptions = self._descriptions(self._mup_posts(mock_client)[0])
+        assert {"State of Energy", "Voltage L1-L2"} <= descriptions
+
+        await signed_manager.shutdown()
+
+    async def test_default_profile_never_reposts(self, manager, mock_client, mock_connector):
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        mock_client.post_bytes.reset_mock()
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert self._mup_posts(mock_client) == []
+
+        await manager.shutdown()

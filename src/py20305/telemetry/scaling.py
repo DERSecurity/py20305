@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # Flow direction codes per IEEE 2030.5
+FLOW_NOT_APPLICABLE = 0
 FLOW_NORMAL = 1
 FLOW_REVERSE = 19
 

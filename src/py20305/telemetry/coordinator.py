@@ -18,6 +18,8 @@ import logging
 from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING
 
+from py20305.telemetry.mup import ReadingProfile
+
 if TYPE_CHECKING:
     from py20305.client.csip_client import CsipClient
     from py20305.commands import CommandObserver
@@ -63,6 +65,8 @@ class TelemetryCoordinator:
         is_provisioned: Optional per-cycle gate on mirroring a device.
         command_observer: Offered the DERStatus the resource manager already
             reads, as confirmation evidence for outstanding commands.
+        reading_profile: How MirrorMeterReadings are encoded; see
+            :class:`~py20305.telemetry.mup.ReadingProfile`.
     """
 
     def __init__(
@@ -78,8 +82,10 @@ class TelemetryCoordinator:
         source: MeasurementSource | None = None,
         is_provisioned: Callable[[str], bool] | None = None,
         command_observer: CommandObserver | None = None,
+        reading_profile: ReadingProfile = ReadingProfile.DEFAULT,
     ) -> None:
         self._client = client
+        self._reading_profile = reading_profile
         self._resolve_connector = connector_resolver
         self._post_rate = post_rate_seconds
         self._capability_poll_rate = der_capability_poll_rate_seconds
@@ -153,6 +159,7 @@ class TelemetryCoordinator:
             is_provisioned=self._is_provisioned,
             source=self._source,
             device_telemetry=self._device_telemetry,
+            reading_profile=self._reading_profile,
         )
 
     def _setup_der_resources(self) -> None:

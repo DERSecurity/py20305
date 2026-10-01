@@ -44,7 +44,12 @@ from py20305.telemetry.log_events import (
     extract_alarm_status,
     unmapped_alarm_bits,
 )
-from py20305.telemetry.mup import create_meter_reading_list, create_mup
+from py20305.telemetry.mup import (
+    ReadingProfile,
+    create_meter_reading_list,
+    create_mup,
+    registration_slots,
+)
 from py20305.xml.serialization import to_xml
 
 if TYPE_CHECKING:
@@ -86,6 +91,9 @@ class DeviceTelemetryState:
     lfdi: str
     mup_posted: bool = False
     mup_href: str | None = None
+    #: mRID slots the last successful MUP POST registered. Kept across a 400/404
+    #: reset so the re-created MUP still registers readings absent that cycle.
+    registered_slots: frozenset[int] = frozenset()
     post_rate: int = 300
     log_event_list_href: str | None = None
     der_availability_href: str | None = None
@@ -147,6 +155,7 @@ class TelemetryManager:
         is_provisioned: Callable[[str], bool] | None = None,
         source: MeasurementSource | None = None,
         device_telemetry: DeviceTelemetryEmitter | None = None,
+        reading_profile: ReadingProfile = ReadingProfile.DEFAULT,
     ) -> None:
         """Initialize the TelemetryManager.
 
@@ -182,8 +191,12 @@ class TelemetryManager:
                 passed — the metering reads of the source constructed here; a
                 caller passing its own ``source`` configures that source's
                 reporting there instead. Optional and disabled by default.
+            reading_profile: How MirrorMeterReadings are encoded, for every
+                device. Fixed for the manager's lifetime: a change of profile
+                changes units and sign on existing mRIDs, so it is a restart.
         """
         self._client = client
+        self._reading_profile = reading_profile
         # Server timebase for telemetry timestamp defaults. isinstance guard
         # keeps AsyncMock clients in tests (whose .timebase is a Mock)
         # falling back to an identity timebase; production Sep2Client always
@@ -239,6 +252,7 @@ class TelemetryManager:
             if existing.mup_posted:
                 new_state.mup_posted = existing.mup_posted
                 new_state.mup_href = existing.mup_href
+                new_state.registered_slots = existing.registered_slots
                 new_state.log_event_id_counter = existing.log_event_id_counter
             # Alarm-transition state is independent of MUP registration, so it
             # carries over unconditionally: an idempotent start_metering (config
@@ -397,6 +411,11 @@ class TelemetryManager:
         if not state.mup_posted:
             await self._post_mup(state, monitoring, overrides)
         else:
+            if self._registration_grew(state, monitoring):
+                # A reading first supplied after the MUP was posted needs its
+                # ReadingType registered before readings for it are posted
+                # (Rule h.2); without it the server answers 400 (Rule h.3).
+                await self._post_mup(state, monitoring, overrides)
             await self._post_readings(
                 state,
                 monitoring,
@@ -460,12 +479,21 @@ class TelemetryManager:
         IEEE B.17.1: The server MAY modify postRate to indicate its preferred
         posting rate. We read back the created MUP to honour the server's rate.
         """
-        mup = create_mup(state.lfdi, monitoring_data, state.post_rate, overrides)
+        slots = registration_slots(monitoring_data, self._reading_profile, state.registered_slots)
+        mup = create_mup(
+            state.lfdi,
+            monitoring_data,
+            state.post_rate,
+            overrides,
+            profile=self._reading_profile,
+            registered=state.registered_slots,
+        )
         body = to_xml(mup, server_2018_compat=self._client.server_2018_compat)
 
         try:
             location = await self._client.post_bytes(self._mup_list_href_source(), body)
             state.mup_posted = True
+            state.registered_slots = slots
 
             if location:
                 state.mup_href = location
@@ -549,6 +577,19 @@ class TelemetryManager:
                 exc_info=True,
             )
 
+    def _registration_grew(
+        self, state: DeviceTelemetryState, monitoring_data: dict[str, Any]
+    ) -> bool:
+        """Whether this cycle supplies a reading the posted MUP did not register.
+
+        Only SIGNED_LOAD_CONVENTION registers readings as they appear. DEFAULT
+        registers its set once, as it always has.
+        """
+        if self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION:
+            return False
+        slots = registration_slots(monitoring_data, self._reading_profile, state.registered_slots)
+        return slots != state.registered_slots
+
     async def _readback_post_rate(
         self,
         state: DeviceTelemetryState,
@@ -600,6 +641,7 @@ class TelemetryManager:
             post_rate=state.post_rate,
             next_update_time=next_update_time,
             stale=stale,
+            profile=self._reading_profile,
         )
         body = to_xml(readings, server_2018_compat=self._client.server_2018_compat)
 

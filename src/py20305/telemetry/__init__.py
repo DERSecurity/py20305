@@ -8,11 +8,12 @@ from py20305.telemetry.der_settings import build_der_settings
 from py20305.telemetry.der_status import build_der_status
 from py20305.telemetry.log_events import create_log_event_xml
 from py20305.telemetry.manager import TelemetryManager
-from py20305.telemetry.mup import create_meter_reading_list, create_mup
+from py20305.telemetry.mup import ReadingProfile, create_meter_reading_list, create_mup
 from py20305.telemetry.scaling import ScaledReading
 
 __all__ = [
     "DerResourceManager",
+    "ReadingProfile",
     "ScaledReading",
     "TelemetryCoordinator",
     "TelemetryManager",

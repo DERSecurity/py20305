@@ -729,6 +729,24 @@ class SunSpecModbusConnector:
             }
             if any(v is not None for v in line_points.values()):
                 result.update(line_points)
+
+        # Phase-to-phase voltages stay out of the line blocks above, so a device
+        # that populates only these does not gain a per-line block.
+        for key in ("VL1L2", "VL2L3", "VL3L1"):
+            value = _cvalue_or_none(model, key)
+            if value is not None:
+                result[key] = value
+
+        # Checked against the scanned models first, so a device without storage
+        # costs no Modbus read.
+        if self._target.models.get(713):
+            try:
+                storage = self._get_model(713)
+            except ConnectorConnectionError:
+                storage = None
+            wh_avail = _cvalue_or_none(storage, "WHAvail") if storage is not None else None
+            if wh_avail is not None:
+                result["WHAvail"] = wh_avail
         return result
 
     def _fetch_nameplate_sync(self) -> dict[str, Any]:
