@@ -9,11 +9,11 @@ VA/A per line; Hz is grid-wide and stays system-only).
 from __future__ import annotations
 
 import logging
-import math
 import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -446,8 +446,15 @@ def registration_slots(
     return frozenset(index for index, _ in specs)
 
 
-def _round_half_away(value: float) -> int:
-    return int(math.copysign(math.floor(abs(value) + 0.5), value))
+def _scale_half_away(raw: float, multiplier: int) -> int:
+    """``raw x 10^-multiplier`` rounded half away from zero, in decimal.
+
+    Scaling the float directly misrounds decimal ties: 1.005 is stored as
+    1.00499..., so x100 rounds to 100. ``str`` gives the shortest decimal that
+    round-trips, which is the value the device reported.
+    """
+    scaled = Decimal(str(raw)).scaleb(-multiplier)
+    return int(scaled.to_integral_value(rounding=ROUND_HALF_UP))
 
 
 def _signed_load_value(
@@ -460,7 +467,7 @@ def _signed_load_value(
     with it -- negative when the DER injects -- and stays an unsigned
     magnitude when that var is missing. Everything else is a magnitude.
     """
-    scaled = _round_half_away(monitoring_data[spec.key] * 10 ** (-spec.multiplier))
+    scaled = _scale_half_away(monitoring_data[spec.key], spec.multiplier)
     quantity = _quantity(spec.key)
     if quantity in _NEGATED_QUANTITIES:
         return -scaled

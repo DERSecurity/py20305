@@ -285,3 +285,19 @@ class TestRegisteredSlotsAreKept:
 
         assert 8 not in values
         assert SYSTEM_SLOTS["W"] in values
+
+
+class TestDecimalTies:
+    @pytest.mark.parametrize(
+        ("raw", "multiplier", "expected"),
+        [(1.005, -2, 101), (-1.005, -2, 101), (0.9995, -3, 1000), (2.675, -2, 268)],
+    )
+    def test_decimal_ties_round_half_away_from_zero(
+        self, raw: float, multiplier: int, expected: int
+    ) -> None:
+        """1.005 is 1.00499999... in binary; the posted value follows the decimal."""
+        overrides = {"A": ReadingOverride(multiplier=multiplier)}
+
+        values = _values(_three_phase(A=raw), overrides=overrides)
+
+        assert values[SYSTEM_SLOTS["A"]] == expected
