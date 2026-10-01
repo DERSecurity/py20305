@@ -360,6 +360,17 @@ _AC_TYPE_LINE_TO_LINE_COUNT: dict[int, int] = {0: 0, 1: 1, 2: 3}
 # S1-S2 code, and per-line readings already tag split-phase L2 as phase B, so
 # split-phase totals are AB.
 _AC_TYPE_TOTAL_PHASE: dict[int, int] = {0: 128, 1: 132, 2: 224}
+#: Every slot a SIGNED_LOAD_CONVENTION MUP can register, so a re-POST can
+#: rebuild any slot registered earlier whatever this cycle's data says.
+_SPEC_BY_SLOT: dict[int, ReadingTypeSpec] = {
+    **dict(enumerate(READING_TYPE_SPECS, start=1)),
+    **{
+        _per_line_index(line, slot): spec
+        for line in (1, 2, 3)
+        for slot, spec in enumerate(_per_line_specs(line))
+    },
+    **dict((_STATE_OF_ENERGY_SPEC, *_LINE_TO_LINE_SPECS)),
+}
 _TOTAL_KEYS = frozenset({"W", "Var", "VA", "A", "WHAvail"})
 _PER_LINE_KEY = re.compile(r"^(W|Var|V|PF|VA|A)L[1-3]$")
 _NEGATED_QUANTITIES = frozenset({"W", "Var"})
@@ -395,10 +406,11 @@ def _signed_load_specs_for(
 ) -> list[tuple[int, ReadingTypeSpec]]:
     """``(mrid_index, spec)`` for a SIGNED_LOAD_CONVENTION device.
 
-    The DEFAULT set, plus each optional reading the device supplies this cycle
-    or that was registered earlier. Keeping registered readings means a MUP
-    re-POST never drops a reading that is merely absent this cycle; Rule a.4
-    writes the new MUP over the old one.
+    The DEFAULT set, plus each optional reading the device supplies this cycle,
+    plus every slot registered earlier. Keeping registered slots means a MUP
+    re-POST never drops a reading that is merely absent this cycle -- an
+    optional reading, or a per-line block whose ACType is missing -- since
+    Rule a.4 writes the new MUP over the old one.
     """
     ac_type = _ac_type(monitoring_data)
     line_to_line = _AC_TYPE_LINE_TO_LINE_COUNT.get(ac_type, 0) if ac_type is not None else 0
@@ -406,13 +418,14 @@ def _signed_load_specs_for(
         (_STATE_OF_ENERGY_SPEC, True),
         *((entry, n < line_to_line) for n, entry in enumerate(_LINE_TO_LINE_SPECS)),
     ]
-    optional = [
-        entry
-        for entry, allowed in candidates
-        if entry[0] in registered or (allowed and monitoring_data.get(entry[1].key) is not None)
-    ]
-    specs = sorted([*_all_specs_for(monitoring_data), *optional], key=lambda entry: entry[0])
-    return [(index, _signed_load_spec(spec, ac_type)) for index, spec in specs]
+    by_slot = dict(_all_specs_for(monitoring_data))
+    by_slot |= {
+        slot: spec
+        for (slot, spec), allowed in candidates
+        if allowed and monitoring_data.get(spec.key) is not None
+    }
+    by_slot |= {slot: _SPEC_BY_SLOT[slot] for slot in registered if slot in _SPEC_BY_SLOT}
+    return [(index, _signed_load_spec(spec, ac_type)) for index, spec in sorted(by_slot.items())]
 
 
 def registration_slots(
@@ -768,6 +781,7 @@ def create_meter_reading_list(
     next_update_time: int | None = None,
     stale: bool = False,
     profile: ReadingProfile = ReadingProfile.DEFAULT,
+    registered: frozenset[int] | None = None,
 ) -> MirrorMeterReadingList:
     """Create a MirrorMeterReadingList with current readings.
 
@@ -808,7 +822,9 @@ def create_meter_reading_list(
 
     Under ``SIGNED_LOAD_CONVENTION`` every reading is an instantaneous sample, so
     its duration is 0 whatever the dataQualifier, and its value is scaled from the
-    effective multiplier (see ``_signed_load_value``).
+    effective multiplier (see ``_signed_load_value``). ``registered``, when given,
+    limits it to slots the MUP has registered, so a reading whose registration
+    has not succeeded yet is held back rather than met with Rule h.3.
     """
     if timestamp is None:
         timestamp = int(time.time())
@@ -825,6 +841,8 @@ def create_meter_reading_list(
     meter_readings: list[MirrorMeterReading1] = []
     for mrid_index, spec in specs:
         if monitoring_data.get(spec.key) is None:
+            continue
+        if signed_load and registered is not None and mrid_index not in registered:
             continue
         mmr_mrid = _create_mrid(lfdi_norm, index=mrid_index)
         override = overrides.get(spec.key) if overrides else None

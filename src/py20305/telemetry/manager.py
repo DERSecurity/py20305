@@ -642,6 +642,7 @@ class TelemetryManager:
             next_update_time=next_update_time,
             stale=stale,
             profile=self._reading_profile,
+            registered=state.registered_slots,
         )
         body = to_xml(readings, server_2018_compat=self._client.server_2018_compat)
 

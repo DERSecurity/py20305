@@ -1788,3 +1788,47 @@ class TestSignedLoadRegistration:
         assert self._mup_posts(mock_client) == []
 
         await manager.shutdown()
+
+
+class TestSignedLoadFailedRepost:
+    async def test_failed_repost_does_not_post_the_unregistered_reading(
+        self, mock_client, connector_resolver, mock_connector
+    ):
+        from py20305.models.sep import MirrorMeterReadingList
+        from py20305.telemetry.mup import ReadingProfile, _create_mrid
+        from py20305.xml.serialization import from_xml
+
+        manager = TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+        )
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        async def post(href, body):
+            if href == MUP_LIST_HREF:
+                raise Sep2ProtocolError("server error", status_code=500)
+            return "/mup/device1"
+
+        mock_client.post_bytes.side_effect = post
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "WHAvail": 5000,
+        }
+        mock_client.post_bytes.reset_mock()
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        readings_bodies = [
+            call.args[1]
+            for call in mock_client.post_bytes.call_args_list
+            if call.args[0] == "/mup/device1"
+        ]
+        assert len(readings_bodies) == 1
+        posted = from_xml(readings_bodies[0], MirrorMeterReadingList)
+        mrids = {m.m_rid.value for m in posted.mirror_meter_reading}
+        assert _create_mrid(SAMPLE_LFDI.lower(), index=8).value not in mrids
+        assert _create_mrid(SAMPLE_LFDI.lower(), index=1).value in mrids
+
+        await manager.shutdown()

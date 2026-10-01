@@ -264,3 +264,24 @@ class TestOptionalReadings:
         default = registration_slots(_three_phase(), ReadingProfile.DEFAULT)
 
         assert default <= registration_slots(_three_phase(WHAvail=1), SIGNED)
+
+
+class TestRegisteredSlotsAreKept:
+    def test_per_line_slots_survive_a_cycle_without_ac_type(self) -> None:
+        registered = registration_slots(_three_phase(), SIGNED)
+        monitoring = _three_phase(WHAvail=5000)
+        del monitoring["ACType"]
+
+        slots = registration_slots(monitoring, SIGNED, registered)
+        mup = create_mup(LFDI, monitoring, 300, profile=SIGNED, registered=registered)
+
+        assert registered | {8} == slots
+        assert set(_reading_types(mup)) == slots
+
+    def test_readings_are_limited_to_registered_slots(self) -> None:
+        registered = registration_slots(_three_phase(), SIGNED)
+
+        values = _values(_three_phase(WHAvail=5000), registered=registered)
+
+        assert 8 not in values
+        assert SYSTEM_SLOTS["W"] in values
