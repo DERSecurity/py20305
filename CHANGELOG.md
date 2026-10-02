@@ -9,6 +9,39 @@ below says so explicitly.
 
 Nothing yet.
 
+## [0.9.0] - 2026-10-02
+
+### Added
+
+- **Every tagged release now carries a software bill of materials, in CycloneDX
+  1.6 and SPDX 2.3, attached as release assets (#40).** The documents name each
+  dependency with its version, PURL and license, so a consumer can run a
+  vulnerability scan against the exact set resolved when this release was
+  built instead of re-resolving the declared ranges and hoping the answer
+  matches. The release job cross-checks the tag against the version in
+  `pyproject.toml`, so a mismatch fails the build rather than publishing a
+  document labeled for a release it does not describe.
+
+- **A `telemetry.reading_profile` setting, also accepted by `TelemetryManager` and
+  `TelemetryCoordinator`; the new `signed_load_convention` profile carries the sign
+  on every MirrorMeterReading value instead of in flowDirection (#42).** Under it,
+  flowDirection is 0, active power is negative on export and reactive power
+  negative on injection, power factor takes the reactive power sign, commodity,
+  dataQualifier and kind are Not Applicable, totals carry a phase code from
+  `ACType`, current is in whole amperes, and values are scaled from the effective
+  multiplier and rounded half away from zero. It also posts line-to-line voltage
+  and State of Energy (model 713 `WHAvail`) when the device supplies them,
+  re-POSTing the MirrorUsagePoint so each new reading is registered before it is
+  posted. The default profile's output is unchanged; the SunSpec connector now
+  also reads those points under it, skipping model 713 for ten minutes after a
+  failed read.
+
+### Fixed
+
+- **A release no longer carries the "Nothing yet." placeholder into the new section (#39).** `build_changelog.py --release` folded the whole `[Unreleased]` body, placeholder included, so a release began with the placeholder and left `[Unreleased]` bare, which the 0.8.1 release had to correct by hand. The placeholder is stripped from what is folded and written back under `[Unreleased]`, and the release test now pins where it ends up.
+
+- **A release removes only the leading "Nothing yet." placeholder (#41).** The strip introduced in #39 removed every standalone placeholder line from the `[Unreleased]` body, which could have edited a hand-written entry; only the one standing first under the heading is removed now, and the release guide says so.
+
 ## [0.8.1] - 2026-09-30
 
 ### Changed
