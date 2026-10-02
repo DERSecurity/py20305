@@ -46,6 +46,7 @@ from py20305.telemetry.log_events import (
 )
 from py20305.telemetry.mup import (
     ReadingProfile,
+    ac_type_of,
     create_meter_reading_list,
     create_mup,
     registration_slots,
@@ -82,13 +83,6 @@ def _monitoring_payload(
     # contract yields when it supplies no overrides at all.
     overrides = snapshot.reading_overrides
     return values, dict(overrides) if overrides else None
-
-
-def _ac_type_of(monitoring_data: dict[str, Any]) -> int | None:
-    ac_type = monitoring_data.get("ACType")
-    if isinstance(ac_type, bool) or not isinstance(ac_type, int):
-        return None
-    return ac_type
 
 
 @dataclass
@@ -434,15 +428,14 @@ class TelemetryManager:
                 # ReadingType registered before readings for it are posted
                 # (Rule h.2); without it the server answers 400 (Rule h.3).
                 await self._post_mup(state, monitoring, overrides)
-            if not state.telemetry_blocked:
-                await self._post_readings(
-                    state,
-                    monitoring,
-                    overrides,
-                    timestamp=acquired_at,
-                    next_update_time=next_update,
-                    stale=stale,
-                )
+            await self._post_readings(
+                state,
+                monitoring,
+                overrides,
+                timestamp=acquired_at,
+                next_update_time=next_update,
+                stale=stale,
+            )
 
         # Stage 2: LogEvent POST (alarm-driven)
         await self._post_log_event(state, connector)
@@ -514,7 +507,7 @@ class TelemetryManager:
             location = await self._client.post_bytes(self._mup_list_href_source(), body)
             state.mup_posted = True
             state.registered_slots = slots
-            state.registered_ac_type = _ac_type_of(monitoring_data)
+            state.registered_ac_type = ac_type_of(monitoring_data)
             state.rejected_registration = None
 
             if location:
@@ -524,7 +517,13 @@ class TelemetryManager:
             else:
                 logger.debug("MUP posted for %s, no location header", state.lfdi[:8])
         except Sep2ProtocolError as e:
-            if e.status_code == 403:
+            if state.mup_posted and 400 <= e.status_code < 500:
+                # A re-POST of a MUP this LFDI already created. The server
+                # refused the new registration, not the device -- a 403 too,
+                # which here is not the Rule e block below -- so the registered
+                # readings keep posting and this registration is not retried.
+                state.rejected_registration = (slots, ac_type_of(monitoring_data))
+            elif e.status_code == 403:
                 # IEEE 2030.5-2023 §10.11.3 Rule e + a.4: the body's mRID
                 # already exists on the server and is owned by a different
                 # LFDI. The server treats this as a duplicate-mRID re-POST
@@ -558,8 +557,6 @@ class TelemetryManager:
                     },
                 )
                 return
-            if state.mup_posted and 400 <= e.status_code < 500:
-                state.rejected_registration = (slots, _ac_type_of(monitoring_data))
             from py20305.client.errors import compat_hint_suffix
             from py20305.diagnostics import report
 
@@ -613,7 +610,7 @@ class TelemetryManager:
         """
         if self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION:
             return False
-        ac_type = _ac_type_of(monitoring_data)
+        ac_type = ac_type_of(monitoring_data)
         slots = registration_slots(monitoring_data, self._reading_profile, state.registered_slots)
         if (slots, ac_type) == state.rejected_registration:
             return False
@@ -631,7 +628,7 @@ class TelemetryManager:
         if (
             self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION
             or state.registered_ac_type is None
-            or _ac_type_of(monitoring_data) is not None
+            or ac_type_of(monitoring_data) is not None
         ):
             return monitoring_data
         return {**monitoring_data, "ACType": state.registered_ac_type}

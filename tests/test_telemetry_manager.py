@@ -1893,9 +1893,14 @@ class TestSignedLoadAcType:
 
         await signed_manager.shutdown()
 
-    async def test_blocked_repost_posts_no_readings(
+    async def test_403_on_a_repost_does_not_block_the_device(
         self, signed_manager, mock_client, mock_connector
     ):
+        """A refused re-POST is a rejected registration, not a Rule e block.
+
+        The registered readings keep posting on this cycle and the next ones,
+        and the refused registration is not retried.
+        """
         signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
 
@@ -1911,9 +1916,20 @@ class TestSignedLoadAcType:
         }
         mock_client.post_bytes.reset_mock()
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+        assert [c.args[0] for c in mock_client.post_bytes.call_args_list] == [
+            MUP_LIST_HREF,
+            "/mup/device1",
+        ]
 
-        targets = [c.args[0] for c in mock_client.post_bytes.call_args_list]
-        assert targets == [MUP_LIST_HREF]
+        for _ in range(3):
+            mock_client.post_bytes.reset_mock()
+            await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+            assert [c.args[0] for c in mock_client.post_bytes.call_args_list] == [
+                "/mup/device1"
+            ]
+
+        state = signed_manager._devices[SAMPLE_LFDI.lower()]
+        assert state.telemetry_blocked is False
 
         await signed_manager.shutdown()
 

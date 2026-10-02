@@ -376,7 +376,8 @@ _PER_LINE_KEY = re.compile(r"^(W|Var|V|PF|VA|A)L[1-3]$")
 _NEGATED_QUANTITIES = frozenset({"W", "Var"})
 
 
-def _ac_type(monitoring_data: dict[str, Any]) -> int | None:
+def ac_type_of(monitoring_data: dict[str, Any]) -> int | None:
+    """The SunSpec 701 ``ACType`` in monitoring data, or None if absent or not an int."""
     ac_type = monitoring_data.get("ACType")
     if isinstance(ac_type, bool) or not isinstance(ac_type, int):
         return None
@@ -415,7 +416,7 @@ def _signed_load_specs_for(
     optional reading, or a per-line block whose ACType is missing -- since
     Rule a.4 writes the new MUP over the old one.
     """
-    ac_type = _ac_type(monitoring_data)
+    ac_type = ac_type_of(monitoring_data)
     line_to_line = _AC_TYPE_LINE_TO_LINE_COUNT.get(ac_type, 0) if ac_type is not None else 0
     candidates = [
         (_STATE_OF_ENERGY_SPEC, True),

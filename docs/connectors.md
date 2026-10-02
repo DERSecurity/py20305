@@ -69,7 +69,7 @@ the readings rather than posted as zero.
 | `W`, `Var`, `VA`, `A`, `PF`, `Hz`, `V` | System totals; `V` is the line-to-line average |
 | `ACType` | SunSpec model 701 enum: 0 single-phase, 1 split-phase, 2 three-phase |
 | `WL1`..`AL3` (`W`, `Var`, `V`, `PF`, `VA`, `A` per line) | Per-line values; `VL1`..`VL3` are line-to-neutral |
-| `VL1L2`, `VL2L3`, `VL3L1` | Phase-to-phase voltage |
+| `VL1L2`, `VL2L3`, `VL3L1` | Phase-to-phase voltage; posted only with `ACType` 1 (`VL1L2`) or 2 (all three) |
 | `WHAvail` | State of Energy, in Wh |
 
 Signs are a requirement on every connector, referenced to the DER as in
