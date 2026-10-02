@@ -397,6 +397,9 @@ def _signed_load_spec(spec: ReadingTypeSpec, ac_type: int | None) -> ReadingType
         data_qualifier=0,
         kind=0,
         phase=phase if spec.key in _TOTAL_KEYS else spec.phase,
+        # Whole amperes is part of the profile's specification, not a precision
+        # oversight: 2.5 A posts 3. A connector that needs tenths sets a
+        # multiplier override, which the scaling honors.
         multiplier=0 if _quantity(spec.key) == "A" else spec.multiplier,
     )
 

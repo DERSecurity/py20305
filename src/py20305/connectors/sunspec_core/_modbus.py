@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 # Readback delay when enable verification fails on first attempt (seconds)
 _MB_READBACK_DELAY = 0.5
 
+# After a failed model 713 read, how long monitoring skips it (seconds). The
+# storage model is optional to monitoring, and a block that times out would
+# otherwise cost a reconnect handshake on every cycle.
+_STORAGE_RETRY_SECONDS = 600.0
+
 # Modbus protocol exception codes (MODBUS Application Protocol, 7 Exception
 # Responses) the server device emits when a request is malformed or it can't
 # satisfy the read. We treat the following as PERMANENT for the lifetime of
@@ -417,6 +422,9 @@ class SunSpecModbusConnector:
         #: to see the gap once, not on every dispatch.
         self._unsupported_reported: set[str] = set()
         self._lock_loop: asyncio.AbstractEventLoop | None = None
+        #: Monotonic time before which monitoring skips model 713 (see
+        #: _STORAGE_RETRY_SECONDS).
+        self._storage_retry_at = 0.0
 
         if transport == "tcp":
             self._target = ss_client.SunSpecModbusClientDeviceTCP(
@@ -738,12 +746,13 @@ class SunSpecModbusConnector:
                 result[key] = value
 
         # Checked against the scanned models first, so a device without storage
-        # costs no Modbus read.
-        if self._target.models.get(713):
+        # costs no Modbus read, and skipped for a while after a failed read.
+        if self._target.models.get(713) and time.monotonic() >= self._storage_retry_at:
             try:
                 storage = self._get_model(713)
             except ConnectorConnectionError:
                 storage = None
+                self._storage_retry_at = time.monotonic() + _STORAGE_RETRY_SECONDS
             wh_avail = _cvalue_or_none(storage, "WHAvail") if storage is not None else None
             if wh_avail is not None:
                 result["WHAvail"] = wh_avail

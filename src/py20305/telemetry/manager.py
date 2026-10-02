@@ -84,6 +84,13 @@ def _monitoring_payload(
     return values, dict(overrides) if overrides else None
 
 
+def _ac_type_of(monitoring_data: dict[str, Any]) -> int | None:
+    ac_type = monitoring_data.get("ACType")
+    if isinstance(ac_type, bool) or not isinstance(ac_type, int):
+        return None
+    return ac_type
+
+
 @dataclass
 class DeviceTelemetryState:
     """Per-device telemetry tracking state."""
@@ -94,6 +101,14 @@ class DeviceTelemetryState:
     #: mRID slots the last successful MUP POST registered. Kept across a 400/404
     #: reset so the re-created MUP still registers readings absent that cycle.
     registered_slots: frozenset[int] = frozenset()
+    #: ACType the last successful MUP POST was built with. The totals' phase
+    #: code derives from it, so a cycle without ACType falls back to it rather
+    #: than re-POSTing with no phase, and a change to it re-POSTs.
+    registered_ac_type: int | None = None
+    #: Slot set and ACType of a re-POST the server refused with a 4xx. Not
+    #: retried until the registration changes again or the process restarts;
+    #: a 5xx or a connection error is retried every cycle.
+    rejected_registration: tuple[frozenset[int], int | None] | None = None
     post_rate: int = 300
     log_event_list_href: str | None = None
     der_availability_href: str | None = None
@@ -253,6 +268,8 @@ class TelemetryManager:
                 new_state.mup_posted = existing.mup_posted
                 new_state.mup_href = existing.mup_href
                 new_state.registered_slots = existing.registered_slots
+                new_state.registered_ac_type = existing.registered_ac_type
+                new_state.rejected_registration = existing.rejected_registration
                 new_state.log_event_id_counter = existing.log_event_id_counter
             # Alarm-transition state is independent of MUP registration, so it
             # carries over unconditionally: an idempotent start_metering (config
@@ -406,6 +423,7 @@ class TelemetryManager:
         # device in backoff); the next POST is the one thing we can promise.
         next_update = int(self._timebase.now()) + state.post_rate
         stale = snapshot.quality is not Quality.GOOD
+        monitoring = self._with_registered_ac_type(state, monitoring)
 
         # Stage 1: MUP creation or meter readings
         if not state.mup_posted:
@@ -416,14 +434,15 @@ class TelemetryManager:
                 # ReadingType registered before readings for it are posted
                 # (Rule h.2); without it the server answers 400 (Rule h.3).
                 await self._post_mup(state, monitoring, overrides)
-            await self._post_readings(
-                state,
-                monitoring,
-                overrides,
-                timestamp=acquired_at,
-                next_update_time=next_update,
-                stale=stale,
-            )
+            if not state.telemetry_blocked:
+                await self._post_readings(
+                    state,
+                    monitoring,
+                    overrides,
+                    timestamp=acquired_at,
+                    next_update_time=next_update,
+                    stale=stale,
+                )
 
         # Stage 2: LogEvent POST (alarm-driven)
         await self._post_log_event(state, connector)
@@ -473,8 +492,9 @@ class TelemetryManager:
     ) -> None:
         """POST MUP to server, track location and server-preferred postRate.
 
-        After posting MUP, we do NOT post readings on this cycle.
-        Readings begin on the next metering cycle.
+        The first POST of a device's MUP posts no readings that cycle; they
+        begin on the next one. A re-POST under SIGNED_LOAD_CONVENTION, made
+        when the registered set grows, is followed by that cycle's readings.
 
         IEEE B.17.1: The server MAY modify postRate to indicate its preferred
         posting rate. We read back the created MUP to honour the server's rate.
@@ -494,6 +514,8 @@ class TelemetryManager:
             location = await self._client.post_bytes(self._mup_list_href_source(), body)
             state.mup_posted = True
             state.registered_slots = slots
+            state.registered_ac_type = _ac_type_of(monitoring_data)
+            state.rejected_registration = None
 
             if location:
                 state.mup_href = location
@@ -536,6 +558,8 @@ class TelemetryManager:
                     },
                 )
                 return
+            if state.mup_posted and 400 <= e.status_code < 500:
+                state.rejected_registration = (slots, _ac_type_of(monitoring_data))
             from py20305.client.errors import compat_hint_suffix
             from py20305.diagnostics import report
 
@@ -580,15 +604,37 @@ class TelemetryManager:
     def _registration_grew(
         self, state: DeviceTelemetryState, monitoring_data: dict[str, Any]
     ) -> bool:
-        """Whether this cycle supplies a reading the posted MUP did not register.
+        """Whether the posted MUP no longer describes this cycle's readings.
 
-        Only SIGNED_LOAD_CONVENTION registers readings as they appear. DEFAULT
+        True when the cycle supplies a reading the MUP did not register, or
+        reports a different ACType, which changes the totals' phase code. Only
+        SIGNED_LOAD_CONVENTION registers readings as they appear. DEFAULT
         registers its set once, as it always has.
         """
         if self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION:
             return False
+        ac_type = _ac_type_of(monitoring_data)
         slots = registration_slots(monitoring_data, self._reading_profile, state.registered_slots)
-        return slots != state.registered_slots
+        if (slots, ac_type) == state.rejected_registration:
+            return False
+        return ac_type != state.registered_ac_type or slots != state.registered_slots
+
+    def _with_registered_ac_type(
+        self, state: DeviceTelemetryState, monitoring_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Fill a missing ACType from the one the MUP was registered with.
+
+        Under SIGNED_LOAD_CONVENTION the totals' phase code and the per-line
+        block both derive from ACType, so a cycle that omits it must not
+        re-POST the MUP as if the device had none.
+        """
+        if (
+            self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION
+            or state.registered_ac_type is None
+            or _ac_type_of(monitoring_data) is not None
+        ):
+            return monitoring_data
+        return {**monitoring_data, "ACType": state.registered_ac_type}
 
     async def _readback_post_rate(
         self,

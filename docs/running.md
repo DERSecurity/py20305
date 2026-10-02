@@ -86,6 +86,14 @@ specifies. A server exposing no MirrorUsagePointList stops the readings only —
 the DER resources are a separate conversation and are still PUT — and the client
 says so once rather than failing a cycle forever.
 
+`reading_profile` sets how the readings are encoded. `default` is the
+historical encoding. `signed_load_convention` carries the sign on every value
+(flowDirection 0), with active power negative on export and reactive power
+negative on injection, leaves commodity, dataQualifier and kind Not Applicable,
+and adds line-to-line voltage and State of Energy readings when the device
+supplies them. It is read at startup: a change alters the units and sign of
+readings already on the server, so it takes a restart.
+
 Rediscovery re-reads every path. A server that moves its resources, or that
 brings the MirrorUsagePoint function set online only after the client
 connected, is picked up without a restart.

@@ -379,6 +379,15 @@ class TelemetryConfig(_Strict):
         gt=0,
         description="How often DERSettings is PUT, when it has changed",
     )
+    reading_profile: Literal["default", "signed_load_convention"] = Field(
+        default="default",
+        description=(
+            "How MirrorMeterReadings are encoded. 'signed_load_convention' carries the "
+            "sign on each value (flowDirection 0) with export and reactive power "
+            "injection negative, and adds line-to-line voltage and State of Energy "
+            "readings when the device supplies them. Applied at startup."
+        ),
+    )
 
 
 class LoggingConfig(_Strict):

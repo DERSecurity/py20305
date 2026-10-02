@@ -1832,3 +1832,155 @@ class TestSignedLoadFailedRepost:
         assert _create_mrid(SAMPLE_LFDI.lower(), index=1).value in mrids
 
         await manager.shutdown()
+
+
+class TestSignedLoadAcType:
+    """The totals' phase code must not follow a cycle that lacks ACType."""
+
+    @pytest.fixture
+    def signed_manager(self, mock_client, connector_resolver):
+        from py20305.telemetry.mup import ReadingProfile
+
+        return TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+        )
+
+    @staticmethod
+    def _last_mup_power_phase(mock_client):
+        from py20305.models.sep import MirrorUsagePoint
+        from py20305.xml.serialization import from_xml
+
+        bodies = [
+            c.args[1] for c in mock_client.post_bytes.call_args_list if c.args[0] == MUP_LIST_HREF
+        ]
+        mup = from_xml(bodies[-1], MirrorUsagePoint)
+        power = next(m for m in mup.mirror_meter_reading if m.description == "Real Power")
+        return power.reading_type.phase.value if power.reading_type.phase else None
+
+    async def test_repost_without_ac_type_keeps_the_registered_phase(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        base = {**mock_connector.fetch_monitoring.return_value, "ACType": 2}
+        mock_connector.fetch_monitoring.return_value = base
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        later = {k: v for k, v in base.items() if k != "ACType"} | {"WHAvail": 5000}
+        mock_connector.fetch_monitoring.return_value = later
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert self._last_mup_power_phase(mock_client) == 224
+
+        await signed_manager.shutdown()
+
+    async def test_ac_type_appearing_later_reposts_with_its_phase(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+        assert self._last_mup_power_phase(mock_client) is None
+
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "ACType": 0,
+        }
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert self._last_mup_power_phase(mock_client) == 128
+
+        await signed_manager.shutdown()
+
+    async def test_blocked_repost_posts_no_readings(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        async def post(href, body):
+            if href == MUP_LIST_HREF:
+                raise Sep2ProtocolError("forbidden", status_code=403)
+            return "/mup/device1"
+
+        mock_client.post_bytes.side_effect = post
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "WHAvail": 5000,
+        }
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        targets = [c.args[0] for c in mock_client.post_bytes.call_args_list]
+        assert targets == [MUP_LIST_HREF]
+
+        await signed_manager.shutdown()
+
+
+class TestSignedLoadRejectedRepost:
+    @pytest.fixture
+    def signed_manager(self, mock_client, connector_resolver):
+        from py20305.telemetry.mup import ReadingProfile
+
+        return TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+        )
+
+    @staticmethod
+    def _rejecting(status_code):
+        async def post(href, body):
+            if href == MUP_LIST_HREF:
+                raise Sep2ProtocolError("rejected", status_code=status_code)
+            return "/mup/device1"
+
+        return post
+
+    async def _register_then_grow(self, manager, mock_client, mock_connector, status_code):
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        mock_client.post_bytes.side_effect = self._rejecting(status_code)
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "WHAvail": 5000,
+        }
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        mock_client.post_bytes.reset_mock()
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        return [c.args[0] for c in mock_client.post_bytes.call_args_list]
+
+    async def test_4xx_rejection_is_not_retried(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        targets = await self._register_then_grow(signed_manager, mock_client, mock_connector, 405)
+
+        assert targets == ["/mup/device1"]
+
+        await signed_manager.shutdown()
+
+    async def test_5xx_failure_is_retried(self, signed_manager, mock_client, mock_connector):
+        targets = await self._register_then_grow(signed_manager, mock_client, mock_connector, 503)
+
+        assert targets == [MUP_LIST_HREF, "/mup/device1"]
+
+        await signed_manager.shutdown()
+
+    async def test_a_further_change_retries_after_a_rejection(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        await self._register_then_grow(signed_manager, mock_client, mock_connector, 405)
+
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "ACType": 2,
+            "VL1L2": 240.0,
+        }
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert [c.args[0] for c in mock_client.post_bytes.call_args_list][0] == MUP_LIST_HREF
+
+        await signed_manager.shutdown()
