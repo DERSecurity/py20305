@@ -217,6 +217,20 @@ class TestTelemetryDefaults:
         assert telemetry.der_capability_poll_rate_seconds == 86400
         assert telemetry.der_settings_poll_rate_seconds == 60
 
+    def test_the_reading_profile_is_the_historical_encoding(self) -> None:
+        assert ClientConfig.model_validate(MINIMAL).telemetry.reading_profile == "default"
+
+    def test_the_signed_load_convention_profile_is_accepted(self) -> None:
+        data = {**MINIMAL, "telemetry": {"reading_profile": "signed_load_convention"}}
+
+        telemetry = ClientConfig.model_validate(data).telemetry
+
+        assert telemetry.reading_profile == "signed_load_convention"
+
+    def test_an_unknown_reading_profile_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ClientConfig.model_validate({**MINIMAL, "telemetry": {"reading_profile": "other"}})
+
     @pytest.mark.parametrize(
         "field",
         ["post_rate_seconds", "der_capability_poll_rate_seconds", "der_settings_poll_rate_seconds"],

@@ -388,6 +388,25 @@ class TestRediscoveryIsWhatRefreshesState:
             await coordinator.shutdown()
 
     @pytest.mark.asyncio
+    async def test_the_configured_reading_profile_reaches_the_manager(self, tmp_path):
+        from py20305.cli import _start_telemetry
+        from py20305.telemetry import ReadingProfile
+
+        client, config = _client(tmp_path)
+        telemetry = config.telemetry.model_copy(
+            update={"reading_profile": "signed_load_convention"}
+        )
+        config = config.model_copy(update={"telemetry": telemetry})
+
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None
+        try:
+            assert coordinator.telemetry is not None
+            assert coordinator.telemetry._reading_profile is ReadingProfile.SIGNED_LOAD_CONVENTION
+        finally:
+            await coordinator.shutdown()
+
+    @pytest.mark.asyncio
     async def test_the_api_sees_a_metering_manager_created_later(self, tmp_path):
         """It was handed None at startup and would hold it for the process."""
         from py20305.api import ClientAPIService

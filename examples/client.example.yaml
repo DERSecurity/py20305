@@ -166,6 +166,7 @@ connection:
 #   post_rate_seconds: 300
 #   der_capability_poll_rate_seconds: 86400
 #   der_settings_poll_rate_seconds: 60
+#   reading_profile: default   # or signed_load_convention
 
 # forwarders:
 #   mqtt:

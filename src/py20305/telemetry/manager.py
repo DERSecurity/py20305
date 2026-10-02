@@ -44,7 +44,13 @@ from py20305.telemetry.log_events import (
     extract_alarm_status,
     unmapped_alarm_bits,
 )
-from py20305.telemetry.mup import create_meter_reading_list, create_mup
+from py20305.telemetry.mup import (
+    ReadingProfile,
+    ac_type_of,
+    create_meter_reading_list,
+    create_mup,
+    registration_slots,
+)
 from py20305.xml.serialization import to_xml
 
 if TYPE_CHECKING:
@@ -86,6 +92,17 @@ class DeviceTelemetryState:
     lfdi: str
     mup_posted: bool = False
     mup_href: str | None = None
+    #: mRID slots the last successful MUP POST registered. Kept across a 400/404
+    #: reset so the re-created MUP still registers readings absent that cycle.
+    registered_slots: frozenset[int] = frozenset()
+    #: ACType the last successful MUP POST was built with. The totals' phase
+    #: code derives from it, so a cycle without ACType falls back to it rather
+    #: than re-POSTing with no phase, and a change to it re-POSTs.
+    registered_ac_type: int | None = None
+    #: Slot set and ACType of a re-POST the server refused with a 4xx. Not
+    #: retried until the registration changes again or the process restarts;
+    #: a 5xx or a connection error is retried every cycle.
+    rejected_registration: tuple[frozenset[int], int | None] | None = None
     post_rate: int = 300
     log_event_list_href: str | None = None
     der_availability_href: str | None = None
@@ -147,6 +164,7 @@ class TelemetryManager:
         is_provisioned: Callable[[str], bool] | None = None,
         source: MeasurementSource | None = None,
         device_telemetry: DeviceTelemetryEmitter | None = None,
+        reading_profile: ReadingProfile = ReadingProfile.DEFAULT,
     ) -> None:
         """Initialize the TelemetryManager.
 
@@ -182,8 +200,12 @@ class TelemetryManager:
                 passed — the metering reads of the source constructed here; a
                 caller passing its own ``source`` configures that source's
                 reporting there instead. Optional and disabled by default.
+            reading_profile: How MirrorMeterReadings are encoded, for every
+                device. Fixed for the manager's lifetime: a change of profile
+                changes units and sign on existing mRIDs, so it is a restart.
         """
         self._client = client
+        self._reading_profile = reading_profile
         # Server timebase for telemetry timestamp defaults. isinstance guard
         # keeps AsyncMock clients in tests (whose .timebase is a Mock)
         # falling back to an identity timebase; production Sep2Client always
@@ -239,6 +261,9 @@ class TelemetryManager:
             if existing.mup_posted:
                 new_state.mup_posted = existing.mup_posted
                 new_state.mup_href = existing.mup_href
+                new_state.registered_slots = existing.registered_slots
+                new_state.registered_ac_type = existing.registered_ac_type
+                new_state.rejected_registration = existing.rejected_registration
                 new_state.log_event_id_counter = existing.log_event_id_counter
             # Alarm-transition state is independent of MUP registration, so it
             # carries over unconditionally: an idempotent start_metering (config
@@ -392,11 +417,17 @@ class TelemetryManager:
         # device in backoff); the next POST is the one thing we can promise.
         next_update = int(self._timebase.now()) + state.post_rate
         stale = snapshot.quality is not Quality.GOOD
+        monitoring = self._with_registered_ac_type(state, monitoring)
 
         # Stage 1: MUP creation or meter readings
         if not state.mup_posted:
             await self._post_mup(state, monitoring, overrides)
         else:
+            if self._registration_grew(state, monitoring):
+                # A reading first supplied after the MUP was posted needs its
+                # ReadingType registered before readings for it are posted
+                # (Rule h.2); without it the server answers 400 (Rule h.3).
+                await self._post_mup(state, monitoring, overrides)
             await self._post_readings(
                 state,
                 monitoring,
@@ -454,18 +485,30 @@ class TelemetryManager:
     ) -> None:
         """POST MUP to server, track location and server-preferred postRate.
 
-        After posting MUP, we do NOT post readings on this cycle.
-        Readings begin on the next metering cycle.
+        The first POST of a device's MUP posts no readings that cycle; they
+        begin on the next one. A re-POST under SIGNED_LOAD_CONVENTION, made
+        when the registered set grows, is followed by that cycle's readings.
 
         IEEE B.17.1: The server MAY modify postRate to indicate its preferred
         posting rate. We read back the created MUP to honour the server's rate.
         """
-        mup = create_mup(state.lfdi, monitoring_data, state.post_rate, overrides)
+        slots = registration_slots(monitoring_data, self._reading_profile, state.registered_slots)
+        mup = create_mup(
+            state.lfdi,
+            monitoring_data,
+            state.post_rate,
+            overrides,
+            profile=self._reading_profile,
+            registered=state.registered_slots,
+        )
         body = to_xml(mup, server_2018_compat=self._client.server_2018_compat)
 
         try:
             location = await self._client.post_bytes(self._mup_list_href_source(), body)
             state.mup_posted = True
+            state.registered_slots = slots
+            state.registered_ac_type = ac_type_of(monitoring_data)
+            state.rejected_registration = None
 
             if location:
                 state.mup_href = location
@@ -474,7 +517,13 @@ class TelemetryManager:
             else:
                 logger.debug("MUP posted for %s, no location header", state.lfdi[:8])
         except Sep2ProtocolError as e:
-            if e.status_code == 403:
+            if state.mup_posted and 400 <= e.status_code < 500:
+                # A re-POST of a MUP this LFDI already created. The server
+                # refused the new registration, not the device -- a 403 too,
+                # which here is not the Rule e block below -- so the registered
+                # readings keep posting and this registration is not retried.
+                state.rejected_registration = (slots, ac_type_of(monitoring_data))
+            elif e.status_code == 403:
                 # IEEE 2030.5-2023 §10.11.3 Rule e + a.4: the body's mRID
                 # already exists on the server and is owned by a different
                 # LFDI. The server treats this as a duplicate-mRID re-POST
@@ -549,6 +598,41 @@ class TelemetryManager:
                 exc_info=True,
             )
 
+    def _registration_grew(
+        self, state: DeviceTelemetryState, monitoring_data: dict[str, Any]
+    ) -> bool:
+        """Whether the posted MUP no longer describes this cycle's readings.
+
+        True when the cycle supplies a reading the MUP did not register, or
+        reports a different ACType, which changes the totals' phase code. Only
+        SIGNED_LOAD_CONVENTION registers readings as they appear. DEFAULT
+        registers its set once, as it always has.
+        """
+        if self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION:
+            return False
+        ac_type = ac_type_of(monitoring_data)
+        slots = registration_slots(monitoring_data, self._reading_profile, state.registered_slots)
+        if (slots, ac_type) == state.rejected_registration:
+            return False
+        return ac_type != state.registered_ac_type or slots != state.registered_slots
+
+    def _with_registered_ac_type(
+        self, state: DeviceTelemetryState, monitoring_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Fill a missing ACType from the one the MUP was registered with.
+
+        Under SIGNED_LOAD_CONVENTION the totals' phase code and the per-line
+        block both derive from ACType, so a cycle that omits it must not
+        re-POST the MUP as if the device had none.
+        """
+        if (
+            self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION
+            or state.registered_ac_type is None
+            or ac_type_of(monitoring_data) is not None
+        ):
+            return monitoring_data
+        return {**monitoring_data, "ACType": state.registered_ac_type}
+
     async def _readback_post_rate(
         self,
         state: DeviceTelemetryState,
@@ -600,6 +684,8 @@ class TelemetryManager:
             post_rate=state.post_rate,
             next_update_time=next_update_time,
             stale=stale,
+            profile=self._reading_profile,
+            registered=state.registered_slots,
         )
         body = to_xml(readings, server_2018_compat=self._client.server_2018_compat)
 

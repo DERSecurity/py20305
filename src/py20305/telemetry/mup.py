@@ -9,9 +9,12 @@ VA/A per line; Hz is grid-wide and stays system-only).
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from decimal import ROUND_HALF_UP, Decimal
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from py20305.models.sep import (
@@ -36,6 +39,7 @@ from py20305.models.sep import (
     VersionType,
 )
 from py20305.telemetry.scaling import (
+    FLOW_NOT_APPLICABLE,
     ScaledReading,
     scale_a,
     scale_hz,
@@ -300,6 +304,183 @@ def _per_line_index(line: int, slot: int) -> int:
     return _PER_LINE_INDEX_BASE + (line - 1) * _PER_LINE_SLOT_COUNT + slot
 
 
+class ReadingProfile(StrEnum):
+    """How a device's MirrorMeterReadings are encoded.
+
+    ``DEFAULT`` is the historical encoding. ``SIGNED_LOAD_CONVENTION`` carries
+    the sign on every value (flowDirection 0) using the load convention --
+    active power negative on export, reactive power negative when the DER
+    injects -- with commodity, dataQualifier and kind left Not Applicable, and
+    adds line-to-line voltage and State of Energy readings when the device
+    supplies them.
+    """
+
+    DEFAULT = "default"
+    SIGNED_LOAD_CONVENTION = "signed_load_convention"
+
+
+# SIGNED_LOAD_CONVENTION only. The slots sit outside every DEFAULT slot, so a
+# device switched between profiles keeps all of its existing mRIDs.
+_STATE_OF_ENERGY_SPEC: tuple[int, ReadingTypeSpec] = (
+    8,
+    ReadingTypeSpec(
+        key="WHAvail",
+        description="State of Energy",
+        commodity=0,
+        data_qualifier=0,
+        kind=0,
+        uom=72,
+        multiplier=0,
+    ),
+)
+_LINE_TO_LINE_SPECS: tuple[tuple[int, ReadingTypeSpec], ...] = tuple(
+    (
+        slot,
+        ReadingTypeSpec(
+            key=key,
+            description=description,
+            commodity=0,
+            data_qualifier=0,
+            kind=0,
+            uom=29,
+            multiplier=-1,
+            phase=phase,
+        ),
+    )
+    for slot, key, description, phase in (
+        (28, "VL1L2", "Voltage L1-L2", 132),
+        (29, "VL2L3", "Voltage L2-L3", 66),
+        (30, "VL3L1", "Voltage L3-L1", 40),
+    )
+)
+# Line-to-line readings a device can have, by SunSpec ACType: split-phase has
+# only L1-L2.
+_AC_TYPE_LINE_TO_LINE_COUNT: dict[int, int] = {0: 0, 1: 1, 2: 3}
+# Phase code for the aggregate readings, by SunSpec ACType. IEEE 2030.5 has no
+# S1-S2 code, and per-line readings already tag split-phase L2 as phase B, so
+# split-phase totals are AB.
+_AC_TYPE_TOTAL_PHASE: dict[int, int] = {0: 128, 1: 132, 2: 224}
+#: Every slot a SIGNED_LOAD_CONVENTION MUP can register, so a re-POST can
+#: rebuild any slot registered earlier whatever this cycle's data says.
+_SPEC_BY_SLOT: dict[int, ReadingTypeSpec] = {
+    **dict(enumerate(READING_TYPE_SPECS, start=1)),
+    **{
+        _per_line_index(line, slot): spec
+        for line in (1, 2, 3)
+        for slot, spec in enumerate(_per_line_specs(line))
+    },
+    **dict((_STATE_OF_ENERGY_SPEC, *_LINE_TO_LINE_SPECS)),
+}
+_TOTAL_KEYS = frozenset({"W", "Var", "VA", "A", "WHAvail"})
+_PER_LINE_KEY = re.compile(r"^(W|Var|V|PF|VA|A)L[1-3]$")
+_NEGATED_QUANTITIES = frozenset({"W", "Var"})
+
+
+def ac_type_of(monitoring_data: dict[str, Any]) -> int | None:
+    """The SunSpec 701 ``ACType`` in monitoring data, or None if absent or not an int."""
+    ac_type = monitoring_data.get("ACType")
+    if isinstance(ac_type, bool) or not isinstance(ac_type, int):
+        return None
+    return ac_type
+
+
+def _quantity(key: str) -> str:
+    """The system key a per-line key measures (``"VarL2"`` -> ``"Var"``)."""
+    match = _PER_LINE_KEY.match(key)
+    return match.group(1) if match else key
+
+
+def _signed_load_spec(spec: ReadingTypeSpec, ac_type: int | None) -> ReadingTypeSpec:
+    phase = _AC_TYPE_TOTAL_PHASE.get(ac_type) if ac_type is not None else None
+    return replace(
+        spec,
+        commodity=0,
+        data_qualifier=0,
+        kind=0,
+        phase=phase if spec.key in _TOTAL_KEYS else spec.phase,
+        # Whole amperes is part of the profile's specification, not a precision
+        # oversight: 2.5 A posts 3. A connector that needs tenths sets a
+        # multiplier override, which the scaling honors.
+        multiplier=0 if _quantity(spec.key) == "A" else spec.multiplier,
+    )
+
+
+def _signed_load_specs_for(
+    monitoring_data: dict[str, Any], registered: frozenset[int]
+) -> list[tuple[int, ReadingTypeSpec]]:
+    """``(mrid_index, spec)`` for a SIGNED_LOAD_CONVENTION device.
+
+    The DEFAULT set, plus each optional reading the device supplies this cycle,
+    plus every slot registered earlier. Keeping registered slots means a MUP
+    re-POST never drops a reading that is merely absent this cycle -- an
+    optional reading, or a per-line block whose ACType is missing -- since
+    Rule a.4 writes the new MUP over the old one.
+    """
+    ac_type = ac_type_of(monitoring_data)
+    line_to_line = _AC_TYPE_LINE_TO_LINE_COUNT.get(ac_type, 0) if ac_type is not None else 0
+    candidates = [
+        (_STATE_OF_ENERGY_SPEC, True),
+        *((entry, n < line_to_line) for n, entry in enumerate(_LINE_TO_LINE_SPECS)),
+    ]
+    by_slot = dict(_all_specs_for(monitoring_data))
+    by_slot |= {
+        slot: spec
+        for (slot, spec), allowed in candidates
+        if allowed and monitoring_data.get(spec.key) is not None
+    }
+    by_slot |= {slot: _SPEC_BY_SLOT[slot] for slot in registered if slot in _SPEC_BY_SLOT}
+    return [(index, _signed_load_spec(spec, ac_type)) for index, spec in sorted(by_slot.items())]
+
+
+def registration_slots(
+    monitoring_data: dict[str, Any],
+    profile: ReadingProfile,
+    registered: frozenset[int] = frozenset(),
+) -> frozenset[int]:
+    """The mRID slots a MUP built now would register.
+
+    Under SIGNED_LOAD_CONVENTION the set grows when an optional reading first
+    appears, which is the signal to re-POST the MUP so the new mRID arrives
+    with its ReadingType (Rule h.2) instead of meeting Rule h.3.
+    """
+    if profile is ReadingProfile.SIGNED_LOAD_CONVENTION:
+        specs = _signed_load_specs_for(monitoring_data, registered)
+    else:
+        specs = _all_specs_for(monitoring_data)
+    return frozenset(index for index, _ in specs)
+
+
+def _scale_half_away(raw: float, multiplier: int) -> int:
+    """``raw x 10^-multiplier`` rounded half away from zero, in decimal.
+
+    Scaling the float directly misrounds decimal ties: 1.005 is stored as
+    1.00499..., so x100 rounds to 100. ``str`` gives the shortest decimal that
+    round-trips, which is the value the device reported.
+    """
+    scaled = Decimal(str(raw)).scaleb(-multiplier)
+    return int(scaled.to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def _signed_load_value(
+    spec: ReadingTypeSpec, monitoring_data: dict[str, Any], posted: dict[str, int]
+) -> int:
+    """Scale a SIGNED_LOAD_CONVENTION value from the effective multiplier.
+
+    Connectors report W and var DER-referenced (positive for generation and
+    for injection), so both are negated. PF takes the sign of the var posted
+    with it -- negative when the DER injects -- and stays an unsigned
+    magnitude when that var is missing. Everything else is a magnitude.
+    """
+    scaled = _scale_half_away(monitoring_data[spec.key], spec.multiplier)
+    quantity = _quantity(spec.key)
+    if quantity in _NEGATED_QUANTITIES:
+        return -scaled
+    if quantity == "PF":
+        var = posted.get("Var" + spec.key[2:])
+        return -abs(scaled) if var is not None and var < 0 else abs(scaled)
+    return abs(scaled)
+
+
 def _line_count_for(monitoring_data: dict[str, Any]) -> int:
     """How many distinct AC lines does the device advertise?
 
@@ -531,6 +712,9 @@ def create_mup(
     monitoring_data: dict[str, Any],
     post_rate: int,
     overrides: dict[str, ReadingOverride] | None = None,
+    *,
+    profile: ReadingProfile = ReadingProfile.DEFAULT,
+    registered: frozenset[int] = frozenset(),
 ) -> MirrorUsagePoint:
     """Create a MirrorUsagePoint with system + per-line MirrorMeterReadings.
 
@@ -546,6 +730,10 @@ def create_mup(
         overrides: Optional per-key ReadingType overrides from the connector
               (see ``BaseConnector.reading_overrides``); fields left unset keep
               the standard ReadingType metadata.
+        profile: How the readings are encoded (see :class:`ReadingProfile`).
+        registered: Slots registered by an earlier POST of this MUP. Under
+              SIGNED_LOAD_CONVENTION their optional readings are kept even
+              when absent from ``monitoring_data``.
 
     Returns:
         MirrorUsagePoint with system + per-line meter readings.
@@ -555,11 +743,21 @@ def create_mup(
     # Create MUP mRID (index 0)
     mup_mrid = _create_mrid(lfdi_norm, index=0)
 
+    signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
+    specs = (
+        _signed_load_specs_for(monitoring_data, registered)
+        if signed_load
+        else _all_specs_for(monitoring_data)
+    )
     meter_readings: list[MirrorMeterReading1] = []
-    for mrid_index, spec in _all_specs_for(monitoring_data):
-        scaled = _scaled_for(spec, monitoring_data)
+    for mrid_index, spec in specs:
         override = overrides.get(spec.key) if overrides else None
-        reading_type = _create_reading_type(_effective_spec(spec, override), scaled.flow_direction)
+        flow_direction = (
+            FLOW_NOT_APPLICABLE
+            if signed_load
+            else _scaled_for(spec, monitoring_data).flow_direction
+        )
+        reading_type = _create_reading_type(_effective_spec(spec, override), flow_direction)
         mmr_mrid = _create_mrid(lfdi_norm, index=mrid_index)
         mmr = MirrorMeterReading1(
             m_rid=mmr_mrid,
@@ -593,6 +791,8 @@ def create_meter_reading_list(
     post_rate: int = 300,
     next_update_time: int | None = None,
     stale: bool = False,
+    profile: ReadingProfile = ReadingProfile.DEFAULT,
+    registered: frozenset[int] | None = None,
 ) -> MirrorMeterReadingList:
     """Create a MirrorMeterReadingList with current readings.
 
@@ -630,39 +830,64 @@ def create_meter_reading_list(
     optional in the MUP and updates), and mRIDs are deterministic from
     ``(lfdi, slot_index, pen)`` so a quantity that resumes reporting later matches
     its registered ReadingType (Rule h.1).
+
+    Under ``SIGNED_LOAD_CONVENTION`` every reading is an instantaneous sample, so
+    its duration is 0 whatever the dataQualifier, and its value is scaled from the
+    effective multiplier (see ``_signed_load_value``). ``registered``, when given,
+    limits it to slots the MUP has registered, so a reading whose registration
+    has not succeeded yet is held back rather than met with Rule h.3.
     """
     if timestamp is None:
         timestamp = int(time.time())
 
     lfdi_norm = lfdi.lower()
 
+    signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
+    specs = (
+        _signed_load_specs_for(monitoring_data, frozenset())
+        if signed_load
+        else _all_specs_for(monitoring_data)
+    )
+    posted: dict[str, int] = {}
     meter_readings: list[MirrorMeterReading1] = []
-    for mrid_index, spec in _all_specs_for(monitoring_data):
+    for mrid_index, spec in specs:
         if monitoring_data.get(spec.key) is None:
             continue
-        scaled = _scaled_for(spec, monitoring_data)
+        if signed_load and registered is not None and mrid_index not in registered:
+            continue
         mmr_mrid = _create_mrid(lfdi_norm, index=mrid_index)
         override = overrides.get(spec.key) if overrides else None
         # Optional per-cycle quality the connector attached to this sample.
         per_cycle_quality = monitoring_data.get(f"{spec.key}__quality")
 
-        # timePeriod duration: an interval reading (Average/Maximum/Minimum)
-        # covers a window, and CSIP-AUS requires that window to match the MUP
-        # postRate, so its duration is post_rate; an instantaneous reading is a
-        # point in time -> duration 0. Use the effective dataQualifier (a
-        # connector override can change it, e.g. print_demo reports W as Maximum).
-        # getattr guards against a buggy in-process connector returning a
-        # non-ReadingOverride value (the manager only checks the top-level map).
-        override_dq = getattr(override, "data_qualifier", None) if override is not None else None
-        eff_dq = override_dq if override_dq is not None else spec.data_qualifier
-        duration = 0 if eff_dq == _DATA_QUALIFIER_INSTANTANEOUS else post_rate
+        if signed_load:
+            # Var precedes PF in slot order, system and per-line, so the sign
+            # PF takes from it is already in `posted`.
+            value = _signed_load_value(_effective_spec(spec, override), monitoring_data, posted)
+            posted[spec.key] = value
+            duration = 0
+        else:
+            value = _scaled_for(spec, monitoring_data).value
+            # timePeriod duration: an interval reading (Average/Maximum/Minimum)
+            # covers a window, and CSIP-AUS requires that window to match the MUP
+            # postRate, so its duration is post_rate; an instantaneous reading is a
+            # point in time -> duration 0. Use the effective dataQualifier (a
+            # connector override can change it, e.g. print_demo reports W as
+            # Maximum). getattr guards against a buggy in-process connector
+            # returning a non-ReadingOverride value (the manager only checks the
+            # top-level map).
+            override_dq = (
+                getattr(override, "data_qualifier", None) if override is not None else None
+            )
+            eff_dq = override_dq if override_dq is not None else spec.data_qualifier
+            duration = 0 if eff_dq == _DATA_QUALIFIER_INSTANTANEOUS else post_rate
         reading = Reading1(
             quality_flags=_resolve_quality_flags(override, per_cycle_quality, stale=stale),
             time_period=DateTimeInterval(
                 duration=duration,
                 start=TimeType(value=timestamp),
             ),
-            value=scaled.value,
+            value=value,
         )
 
         # IEEE 10.11.3 rule n): ReadingType SHALL NOT be included in

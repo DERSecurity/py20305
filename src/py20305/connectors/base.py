@@ -134,7 +134,20 @@ class BaseConnector:
     # ------------------------------------------------------------------
 
     async def fetch_monitoring(self) -> dict[str, Any]:
-        """Return raw, unscaled power telemetry."""
+        """Return raw, unscaled power telemetry.
+
+        Signs are referenced to the DER and are a requirement, not a hint:
+        ``W`` SHALL be positive for generation and negative for absorption, and
+        ``Var`` positive for reactive power injection (over-excited) and negative
+        for absorption (under-excited). This is the SunSpec model 701 convention.
+        The ``SIGNED_LOAD_CONVENTION`` reading profile negates both, so a
+        connector reporting another convention posts the wrong sign.
+
+        Beyond the keys below, a connector may supply per-line keys (``WL1``,
+        ``VarL2``, ...), ``ACType`` (SunSpec 701 enum), phase-to-phase voltages
+        (``VL1L2``, ``VL2L3``, ``VL3L1``) and State of Energy in Wh
+        (``WHAvail``). Absent or ``None`` means not measured.
+        """
         return {
             "W": None,
             "Var": None,

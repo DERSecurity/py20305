@@ -101,6 +101,8 @@ def _make_mock_target():
         for line in (1, 2, 3):
             for prefix in ("WL", "VarL", "VL", "PFL", "VAL", "AL"):
                 setattr(model, f"{prefix}{line}", MagicMock(cvalue=None))
+        for key in ("VL1L2", "VL2L3", "VL3L1"):
+            setattr(model, key, MagicMock(cvalue=None))
 
         # Nameplate / settings (model 702) -- connector reads .value and scale factor points
         # Watt-rated points
@@ -237,6 +239,86 @@ class TestSunSpecFetch:
         assert "WL2" in result
         assert "WL3" not in result
         assert "VL3" not in result
+
+    @pytest.mark.asyncio
+    async def test_fetch_monitoring_omits_line_to_line_when_unpopulated(self, sunspec_connector):
+        result = await sunspec_connector.fetch_monitoring()
+
+        assert not {"VL1L2", "VL2L3", "VL3L1"} & result.keys()
+
+    @pytest.mark.asyncio
+    async def test_fetch_monitoring_line_to_line_does_not_create_a_line_block(
+        self, sunspec_connector
+    ):
+        """Phase-to-phase voltages alone must not make a line look populated."""
+        model = sunspec_connector._target.models[701][0]
+        model.VL1L2 = MagicMock(cvalue=240.4)
+        model.VL2L3 = MagicMock(cvalue=241.0)
+        model.VL3L1 = MagicMock(cvalue=239.6)
+
+        result = await sunspec_connector.fetch_monitoring()
+
+        assert (result["VL1L2"], result["VL2L3"], result["VL3L1"]) == (240.4, 241.0, 239.6)
+        assert "WL1" not in result
+        assert "VL1" not in result
+
+    @pytest.mark.asyncio
+    async def test_fetch_monitoring_reads_state_of_energy_from_model_713(
+        self, sunspec_connector
+    ):
+        storage = MagicMock()
+        storage.WHAvail = MagicMock(cvalue=9800)
+        sunspec_connector._target.models[713] = [storage]
+
+        result = await sunspec_connector.fetch_monitoring()
+
+        assert result["WHAvail"] == 9800
+
+    @pytest.mark.asyncio
+    async def test_fetch_monitoring_without_model_713_has_no_state_of_energy(
+        self, sunspec_connector
+    ):
+        result = await sunspec_connector.fetch_monitoring()
+
+        assert "WHAvail" not in result
+
+    @pytest.mark.asyncio
+    async def test_fetch_monitoring_survives_a_failed_model_713_read(self, sunspec_connector):
+        storage = MagicMock()
+        storage.read = MagicMock(side_effect=ConnectionError("timed out"))
+        sunspec_connector._target.models[713] = [storage]
+
+        result = await sunspec_connector.fetch_monitoring()
+
+        assert "WHAvail" not in result
+        assert result["W"] == 42
+
+    @pytest.mark.asyncio
+    async def test_a_failed_model_713_read_is_not_retried_until_the_interval_passes(
+        self, sunspec_connector
+    ):
+        from py20305.connectors.sunspec_core import _modbus
+
+        storage = MagicMock()
+        storage.read = MagicMock(side_effect=ConnectionError("timed out"))
+        storage.WHAvail = MagicMock(cvalue=9800)
+        sunspec_connector._target.models[713] = [storage]
+        clock = [1000.0]
+
+        with patch.object(_modbus.time, "monotonic", side_effect=lambda: clock[0]):
+            await sunspec_connector.fetch_monitoring()
+            attempts = storage.read.call_count
+
+            clock[0] += _modbus._STORAGE_RETRY_SECONDS - 1
+            await sunspec_connector.fetch_monitoring()
+            assert storage.read.call_count == attempts
+
+            storage.read.side_effect = None
+            clock[0] += 2
+            result = await sunspec_connector.fetch_monitoring()
+
+        assert storage.read.call_count > attempts
+        assert result["WHAvail"] == 9800
 
     def test_lock_rebinds_when_event_loop_changes(self, sunspec_connector):
         """A connector reused across event loops must NOT raise the

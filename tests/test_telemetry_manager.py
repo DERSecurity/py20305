@@ -1684,3 +1684,319 @@ class TestManagerReadsAreReported:
         mock_client.put_bytes.assert_called_once()
 
         await manager.shutdown()
+
+
+class TestSignedLoadRegistration:
+    """SIGNED_LOAD_CONVENTION re-POSTs the MUP when a new reading appears."""
+
+    @pytest.fixture
+    def signed_manager(self, mock_client, connector_resolver):
+        from py20305.telemetry.mup import ReadingProfile
+
+        return TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+        )
+
+    @staticmethod
+    def _mup_posts(mock_client):
+        from py20305.models.sep import MirrorUsagePoint
+        from py20305.xml.serialization import from_xml
+
+        return [
+            from_xml(call.args[1], MirrorUsagePoint)
+            for call in mock_client.post_bytes.call_args_list
+            if call.args[0] == MUP_LIST_HREF
+        ]
+
+    @staticmethod
+    def _descriptions(mup):
+        return {m.description for m in mup.mirror_meter_reading}
+
+    @staticmethod
+    def _monitoring(**extra):
+        return {
+            "W": 1000.0,
+            "Var": 200.0,
+            "Hz": 60.0,
+            "V": 240.0,
+            "PF": 0.98,
+            "VA": 1020.0,
+            "A": 4.25,
+            "ACType": 2,
+            **extra,
+        }
+
+    async def test_new_reading_reposts_mup_before_readings(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        mock_connector.fetch_monitoring.return_value = self._monitoring()
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        targets = [call.args[0] for call in mock_client.post_bytes.call_args_list]
+        assert targets == [MUP_LIST_HREF, "/mup/device1"]
+        assert "State of Energy" in self._descriptions(self._mup_posts(mock_client)[0])
+
+        await signed_manager.shutdown()
+
+    async def test_repost_happens_once(self, signed_manager, mock_client, mock_connector):
+        mock_connector.fetch_monitoring.return_value = self._monitoring()
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert self._mup_posts(mock_client) == []
+
+        await signed_manager.shutdown()
+
+    async def test_repost_keeps_a_reading_absent_this_cycle(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        # State of Energy drops out in the same cycle a line-to-line voltage appears.
+        mock_connector.fetch_monitoring.return_value = self._monitoring(VL1L2=240.0)
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        descriptions = self._descriptions(self._mup_posts(mock_client)[0])
+        assert {"State of Energy", "Voltage L1-L2"} <= descriptions
+
+        await signed_manager.shutdown()
+
+    async def test_default_profile_never_reposts(self, manager, mock_client, mock_connector):
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        mock_client.post_bytes.reset_mock()
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert self._mup_posts(mock_client) == []
+
+        await manager.shutdown()
+
+
+class TestSignedLoadFailedRepost:
+    async def test_failed_repost_does_not_post_the_unregistered_reading(
+        self, mock_client, connector_resolver, mock_connector
+    ):
+        from py20305.models.sep import MirrorMeterReadingList
+        from py20305.telemetry.mup import ReadingProfile, _create_mrid
+        from py20305.xml.serialization import from_xml
+
+        manager = TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+        )
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        async def post(href, body):
+            if href == MUP_LIST_HREF:
+                raise Sep2ProtocolError("server error", status_code=500)
+            return "/mup/device1"
+
+        mock_client.post_bytes.side_effect = post
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "WHAvail": 5000,
+        }
+        mock_client.post_bytes.reset_mock()
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        readings_bodies = [
+            call.args[1]
+            for call in mock_client.post_bytes.call_args_list
+            if call.args[0] == "/mup/device1"
+        ]
+        assert len(readings_bodies) == 1
+        posted = from_xml(readings_bodies[0], MirrorMeterReadingList)
+        mrids = {m.m_rid.value for m in posted.mirror_meter_reading}
+        assert _create_mrid(SAMPLE_LFDI.lower(), index=8).value not in mrids
+        assert _create_mrid(SAMPLE_LFDI.lower(), index=1).value in mrids
+
+        await manager.shutdown()
+
+
+class TestSignedLoadAcType:
+    """The totals' phase code must not follow a cycle that lacks ACType."""
+
+    @pytest.fixture
+    def signed_manager(self, mock_client, connector_resolver):
+        from py20305.telemetry.mup import ReadingProfile
+
+        return TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+        )
+
+    @staticmethod
+    def _last_mup_power_phase(mock_client):
+        from py20305.models.sep import MirrorUsagePoint
+        from py20305.xml.serialization import from_xml
+
+        bodies = [
+            c.args[1] for c in mock_client.post_bytes.call_args_list if c.args[0] == MUP_LIST_HREF
+        ]
+        mup = from_xml(bodies[-1], MirrorUsagePoint)
+        power = next(m for m in mup.mirror_meter_reading if m.description == "Real Power")
+        return power.reading_type.phase.value if power.reading_type.phase else None
+
+    async def test_repost_without_ac_type_keeps_the_registered_phase(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        base = {**mock_connector.fetch_monitoring.return_value, "ACType": 2}
+        mock_connector.fetch_monitoring.return_value = base
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        later = {k: v for k, v in base.items() if k != "ACType"} | {"WHAvail": 5000}
+        mock_connector.fetch_monitoring.return_value = later
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert self._last_mup_power_phase(mock_client) == 224
+
+        await signed_manager.shutdown()
+
+    async def test_ac_type_appearing_later_reposts_with_its_phase(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+        assert self._last_mup_power_phase(mock_client) is None
+
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "ACType": 0,
+        }
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert self._last_mup_power_phase(mock_client) == 128
+
+        await signed_manager.shutdown()
+
+    async def test_403_on_a_repost_does_not_block_the_device(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        """A refused re-POST is a rejected registration, not a Rule e block.
+
+        The registered readings keep posting on this cycle and the next ones,
+        and the refused registration is not retried.
+        """
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        async def post(href, body):
+            if href == MUP_LIST_HREF:
+                raise Sep2ProtocolError("forbidden", status_code=403)
+            return "/mup/device1"
+
+        mock_client.post_bytes.side_effect = post
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "WHAvail": 5000,
+        }
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+        assert [c.args[0] for c in mock_client.post_bytes.call_args_list] == [
+            MUP_LIST_HREF,
+            "/mup/device1",
+        ]
+
+        for _ in range(3):
+            mock_client.post_bytes.reset_mock()
+            await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+            assert [c.args[0] for c in mock_client.post_bytes.call_args_list] == [
+                "/mup/device1"
+            ]
+
+        state = signed_manager._devices[SAMPLE_LFDI.lower()]
+        assert state.telemetry_blocked is False
+
+        await signed_manager.shutdown()
+
+
+class TestSignedLoadRejectedRepost:
+    @pytest.fixture
+    def signed_manager(self, mock_client, connector_resolver):
+        from py20305.telemetry.mup import ReadingProfile
+
+        return TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+        )
+
+    @staticmethod
+    def _rejecting(status_code):
+        async def post(href, body):
+            if href == MUP_LIST_HREF:
+                raise Sep2ProtocolError("rejected", status_code=status_code)
+            return "/mup/device1"
+
+        return post
+
+    async def _register_then_grow(self, manager, mock_client, mock_connector, status_code):
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        mock_client.post_bytes.side_effect = self._rejecting(status_code)
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "WHAvail": 5000,
+        }
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        mock_client.post_bytes.reset_mock()
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        return [c.args[0] for c in mock_client.post_bytes.call_args_list]
+
+    async def test_4xx_rejection_is_not_retried(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        targets = await self._register_then_grow(signed_manager, mock_client, mock_connector, 405)
+
+        assert targets == ["/mup/device1"]
+
+        await signed_manager.shutdown()
+
+    async def test_5xx_failure_is_retried(self, signed_manager, mock_client, mock_connector):
+        targets = await self._register_then_grow(signed_manager, mock_client, mock_connector, 503)
+
+        assert targets == [MUP_LIST_HREF, "/mup/device1"]
+
+        await signed_manager.shutdown()
+
+    async def test_a_further_change_retries_after_a_rejection(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        await self._register_then_grow(signed_manager, mock_client, mock_connector, 405)
+
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "ACType": 2,
+            "VL1L2": 240.0,
+        }
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert [c.args[0] for c in mock_client.post_bytes.call_args_list][0] == MUP_LIST_HREF
+
+        await signed_manager.shutdown()
