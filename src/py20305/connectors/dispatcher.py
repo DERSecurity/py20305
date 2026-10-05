@@ -82,6 +82,11 @@ class ConnectorDispatcher:
         self._gate = AllowAllCommands() if command_gate is None else command_gate
         self._commands = NullCommandObserver() if command_observer is None else command_observer
         self._telemetry = telemetry
+        # Devices already reported as having no connector. A server can list a
+        # device this process has no connector for, and every control aimed at
+        # it reaches the lookup below, so without this the same warning is
+        # logged once per control for as long as the device stays listed.
+        self._missing_connector_reported: set[str] = set()
 
     @property
     def telemetry(self) -> DeviceTelemetryEmitter | None:
@@ -133,17 +138,27 @@ class ConnectorDispatcher:
         has already expanded a server-side EndDevice href into a list of
         local sub-device LFDIs and we skip the href→LFDI step.
         """
-        from py20305.diagnostics import report
+        from py20305.diagnostics import report, resolve
 
+        dedup_key = f"no_connector:{lfdi}"
         proxy = self._registry.get_connector(lfdi)
         if proxy is not None:
+            if lfdi in self._missing_connector_reported:
+                # The device has a connector now: clear the standing warning,
+                # and report again if it ever loses the connector.
+                self._missing_connector_reported.discard(lfdi)
+                resolve(dedup_key)
             return await proxy.aresolve()  # type: ignore[no-any-return]
 
+        if lfdi in self._missing_connector_reported:
+            logger.debug("No connector found for LFDI %s (already reported)", lfdi)
+            return None
+        self._missing_connector_reported.add(lfdi)
         report(
             "warnings",
-            f"No connector found for LFDI {lfdi}",
+            f"No connector found for LFDI {lfdi}; controls for this device are not applied",
             source="dispatcher",
-            dedup_key=f"no_connector:{lfdi}",
+            dedup_key=dedup_key,
             details={"lfdi": lfdi},
         )
         return None
