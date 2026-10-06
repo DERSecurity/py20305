@@ -9,6 +9,76 @@ below says so explicitly.
 
 Nothing yet.
 
+## [0.10.0] - 2026-10-06
+
+### Changed
+
+- **A command origin is any string, and an application names its own (#44).**
+  `apply_operation`, `CommandGate.may_command`, `CommandObserver.record_command`
+  and `CommandRecord.origin` took a `CommandOrigin`, a closed list, so an
+  application that put another command interface in front of the same devices had
+  to have that interface added to this package before it could issue a command.
+  They now take a `str`. The dispatcher hands the origin to the gate and the
+  observer and prints it in diagnostics, and does nothing else with it, so nothing
+  here has to learn an interface's name first. `CommandOrigin` remains, holding the
+  origins this package produces itself, and its members are strings, so existing
+  calls that pass one are unchanged.
+
+  A gate or an observer written against the old signatures needs its `origin`
+  parameter annotated `str`. Compare origins with `==`: an origin that arrives as a
+  plain string is equal to a member with the same value and is not the same
+  object. A gate should deny an origin it does not recognize, so that a mistyped
+  name fails closed.
+
+- **Server-advertised poll rates are no longer capped at 7200 s (#45).** Every pollRate above
+  two hours used to be cut to 7200 s, so a server asking for a daily Time poll was polled 12
+  times as often. A rate is now honored however long it is, so a consumer that relied on
+  never waiting more than two hours between polls waits as long as the server says. A rate
+  over a day is logged as a warning naming the resource, so a resource that stops refreshing
+  has a stated reason. The safety-net poll for a subscribed resource,
+  `max(900 s, interval)`, stretches with it. The 10 s lower bound is unchanged.
+
+### Removed
+
+- **`CommandOrigin.LOCAL_API` and `CommandOrigin.SUNSPEC` are removed (#44).**
+  Neither is an origin this package produces: both named interfaces of an
+  application built on it, listed here only because the list was closed. With an
+  origin now any string, an application passes its own name for each interface it
+  has. Replace `CommandOrigin.LOCAL_API` with `"local_api"` and
+  `CommandOrigin.SUNSPEC` with `"sunspec"` to keep recorded origins reading as they
+  did, or choose new names and use them in the gate and the observer too.
+
+- **`MAX_POLL_RATE` is removed from `py20305.client.poll_rate` (#45).** It held the 7200 s cap
+  that no longer exists, and importing it now fails. Nothing replaces it; code that read it
+  to bound its own waits should use the rate the server advertised.
+
+### Fixed
+
+- **A device with no connector is reported once, not once per control (#43).** A server
+  can list a device this process has no connector for, and every control aimed at it
+  reached the connector lookup, which logged `No connector found for LFDI ...` each
+  time. The dispatcher now reports the condition when it first sees it, clears the
+  standing diagnostic if the device later gains a connector, and reports again only if
+  the device then loses it. The message now also says that controls for the device are
+  not applied.
+
+- **Meter readings are posted at the postRate the server returns on the MirrorUsagePoint
+  (#45).** The rate was read back after the MUP POST but never reached the posting loop or
+  the device read cadence, so both stayed at the EndDevice or configured rate (300 s by
+  default), and a rediscovery reset the stored rate as well. Both now follow the server's
+  rate. Because that rate now sets how often the device is read, a server cannot push it
+  below 30 s, nor below the rate the client itself posted with if that is shorter, so a
+  server echoing a client's own short rate is left alone. A warning is logged when the
+  minimum applies. A postRate of 0 is ignored, and a failed readback is logged as a
+  warning.
+
+  **The Time resource is polled at its own pollRate (#45).** The Time poll used the
+  DeviceCapability rate. It now runs at the shortest pollRate any Time resource advertises,
+  global or per-FSA, since one poll refreshes them all. A Time resource advertising 0 is
+  left out rather than switching off the poll the others need, and the DeviceCapability rate
+  applies only when no Time resource gives a usable rate. The connectivity heartbeat, which
+  also GETs Time, is unaffected.
+
 ## [0.9.0] - 2026-10-02
 
 ### Added

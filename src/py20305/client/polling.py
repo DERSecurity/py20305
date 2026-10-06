@@ -91,6 +91,10 @@ class PollScheduler:
         # Used by the heartbeat baseline poll to decide whether a
         # suppressed key is overdue for its safety-net run.
         self._last_run: dict[str, float] = {}
+        # Read on every iteration rather than captured by the loop, so
+        # set_interval can retune a key from inside its own callback, where
+        # rescheduling would cancel the task running that callback.
+        self._intervals: dict[str, int] = {}
         # Whether the safety-net heartbeat for suppressed keys is on.
         # Default: enabled. Operators can disable via subscription config
         # if they want strict IEEE 2030.5 §8.9.3.4 rule (r) compliance
@@ -122,11 +126,22 @@ class PollScheduler:
         # Both cases violate the contract that the heartbeat clock starts
         # at schedule time.
         self._last_run[key] = time.monotonic()
+        self._intervals[key] = interval
 
         self._tasks[key] = asyncio.create_task(
-            self._poll_loop(key, interval, callback),
+            self._poll_loop(key, callback),
             name=f"poll-{key}",
         )
+
+    def set_interval(self, key: str, interval: int) -> None:
+        """Change ``key``'s interval, taking effect from its next wait.
+
+        A wait already in progress runs out at the old interval, so a caller
+        outside the key's own callback that shortens it waits out the old one
+        first. A key that is not scheduled is ignored.
+        """
+        if key in self._intervals:
+            self._intervals[key] = interval
 
     async def run_exclusive(self, key: str, callback: Callable[[], Awaitable[None]]) -> None:
         """Run ``callback`` under ``key``'s lock, outside the periodic schedule.
@@ -165,11 +180,11 @@ class PollScheduler:
     async def _poll_loop(
         self,
         key: str,
-        interval: int,
         callback: Callable[[], Awaitable[None]],
     ) -> None:
         lock = self._locks[key]
         while not self._shutdown.is_set():
+            interval = self._intervals[key]
             suppressed = key in self._suppressed
             heartbeat = suppressed and self._heartbeat_due(key, interval)
             if suppressed and not heartbeat:
@@ -249,7 +264,7 @@ class PollScheduler:
                             logger.info("Poll %s: recovered", key)
 
             try:
-                await asyncio.wait_for(self._shutdown.wait(), timeout=float(interval))
+                await asyncio.wait_for(self._shutdown.wait(), timeout=float(self._intervals[key]))
                 # shutdown was set
                 return
             except TimeoutError:

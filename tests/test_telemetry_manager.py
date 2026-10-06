@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import re
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -276,6 +277,126 @@ class TestMeteringCycle:
         state = manager.get_device_state(SAMPLE_LFDI)
         assert state.mup_posted is True
         assert state.post_rate == 300  # Unchanged
+
+        await manager.shutdown()
+
+
+    @pytest.mark.asyncio
+    async def test_readback_post_rate_retunes_schedule_and_acquisition(
+        self, manager, mock_client, mock_connector
+    ):
+        """The adopted postRate drives the posting loop, not just the state."""
+        server_mup = MagicMock()
+        server_mup.post_rate = 30
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        with (
+            patch.object(manager._scheduler, "set_interval") as set_interval,
+            patch.object(manager._source, "declare") as declare,
+        ):
+            await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        set_interval.assert_called_once_with(f"metering_{SAMPLE_LFDI.lower()}", 30)
+        declare.assert_called_once_with(SAMPLE_LFDI.lower(), 30.0)
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_readback_post_rate_is_floored(
+        self, manager, mock_client, mock_connector, caplog
+    ):
+        """The adopted rate sets how often the device is read; 1 s is not taken as given."""
+        server_mup = MagicMock()
+        server_mup.post_rate = 1
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        with (
+            caplog.at_level(logging.WARNING),
+            patch.object(manager._scheduler, "set_interval") as set_interval,
+        ):
+            await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 30
+        set_interval.assert_called_once_with(f"metering_{SAMPLE_LFDI.lower()}", 30)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("postRate" in m for m in warnings)
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_readback_echo_of_a_fast_client_rate_is_kept(
+        self, manager, mock_client, mock_connector, caplog
+    ):
+        """A server echoing the client's own sub-minimum rate is agreeing with it."""
+        server_mup = MagicMock()
+        server_mup.post_rate = 5
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=5)
+        with (
+            caplog.at_level(logging.WARNING),
+            patch.object(manager._scheduler, "set_interval") as set_interval,
+        ):
+            await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 5
+        set_interval.assert_not_called()
+        assert not [r for r in caplog.records if "postRate" in r.getMessage()]
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_readback_never_faster_than_the_client_chose(
+        self, manager, mock_client, mock_connector
+    ):
+        """Below the client's own sub-minimum rate, the client's rate is the floor."""
+        server_mup = MagicMock()
+        server_mup.post_rate = 3
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=5)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 5
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_readback_non_positive_post_rate_ignored(
+        self, manager, mock_client, mock_connector
+    ):
+        """A postRate of 0 would spin the loop; keep the current rate."""
+        server_mup = MagicMock()
+        server_mup.post_rate = 0
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 300
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_restart_keeps_server_post_rate(self, manager, mock_client, mock_connector):
+        """A start_metering re-call does not fall back to the caller's rate.
+
+        The MUP is not re-POSTed on a re-call, so its postRate is not read back
+        again; the rate adopted the first time has to carry over.
+        """
+        server_mup = MagicMock()
+        server_mup.post_rate = 30
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        with patch.object(manager._scheduler, "schedule") as schedule:
+            manager.start_metering(SAMPLE_LFDI, post_rate=300)
+
+        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 30
+        assert schedule.call_args[0][1] == 30
 
         await manager.shutdown()
 
@@ -1930,6 +2051,45 @@ class TestSignedLoadAcType:
 
         state = signed_manager._devices[SAMPLE_LFDI.lower()]
         assert state.telemetry_blocked is False
+
+        await signed_manager.shutdown()
+
+
+class TestSignedLoadRepostAdoptsRate:
+    @pytest.fixture
+    def signed_manager(self, mock_client, connector_resolver):
+        from py20305.telemetry.mup import ReadingProfile
+
+        return TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+        )
+
+    async def test_readings_after_repost_advertise_adopted_rate(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        """A rate adopted on a re-POST governs that cycle's nextUpdateTime."""
+        now = 1_700_000_000
+        signed_manager._timebase.now = MagicMock(return_value=float(now))
+        mock_client.get = AsyncMock(return_value=MagicMock(post_rate=300))
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        mock_client.get = AsyncMock(return_value=MagicMock(post_rate=30))
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "WHAvail": 5000,
+        }
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        targets = [c.args[0] for c in mock_client.post_bytes.call_args_list]
+        assert targets == [MUP_LIST_HREF, "/mup/device1"]
+        body = mock_client.post_bytes.call_args_list[1].args[1].decode()
+        advertised = {int(v) for v in re.findall(r"nextUpdateTime>(\d+)<", body)}
+        assert advertised == {now + 30}
 
         await signed_manager.shutdown()
 
