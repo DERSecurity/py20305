@@ -27,20 +27,25 @@ from typing import Any, Protocol, runtime_checkable
 
 
 class CommandOrigin(StrEnum):
-    """Where a command entered the system.
+    """The origins this package produces itself.
 
-    The two external origins are command interfaces. The two internal
-    ones are not external commands at all -- they are the client reasserting
-    state it already owns -- but they change the device just as visibly, and
-    leaving them unrecorded is what makes a setpoint appear to move on its own.
+    An origin says where a command entered the system, and it is a label: any
+    string. Everything that takes one -- the dispatcher, :class:`CommandGate`,
+    :class:`CommandObserver`, :class:`CommandRecord` -- carries it through
+    without interpreting it. So an application that puts another interface in
+    front of the same devices names that interface's origin itself, and passes
+    the string. Nothing here has to learn the name first, and which interfaces
+    an application has is not something this package should have to list.
+
+    These three are the exception, because the writes are made here: an IEEE
+    2030.5 control, and the two cases where the client reasserts state it
+    already owns. Those two are not external commands at all, but they change
+    the device just as visibly, and leaving them unrecorded is what makes a
+    setpoint appear to move on its own. The members are strings, so a gate or
+    an observer compares and stores them like any other origin.
     """
 
     IEEE2030_5 = "ieee2030_5"
-    LOCAL_API = "local_api"
-    #: A SunSpec Modbus master writing a control register. Its own origin because
-    #: "who moved this setpoint" is the question the record exists to answer, and
-    #: a second command protocol is exactly when that stops being obvious.
-    SUNSPEC = "sunspec"
     #: DdercTracker reapplying DefaultDERControl on the fallback path after an
     #: event completes. The classic "my setpoint reverted and nothing says why".
     DDERC_REAPPLY = "dderc_reapply"
@@ -73,7 +78,9 @@ class CommandRecord:
     #: What was sent, verbatim. Curve modes carry point lists here; nothing in
     #: this layer interprets the shape.
     params: Mapping[str, Any]
-    origin: CommandOrigin
+    #: Where the command entered: one of :class:`CommandOrigin`, or whatever
+    #: the application calls the interface that issued it.
+    origin: str
     #: Wall-clock epoch seconds at which the write was issued. Compared against
     #: an observation's read-start time to decide whether that observation could
     #: possibly reflect this command.
@@ -99,7 +106,7 @@ class CommandObserver(Protocol):
         control: str,
         params: Mapping[str, Any],
         *,
-        origin: CommandOrigin,
+        origin: str,
         at: float,
         error: str | None = None,
     ) -> None:
@@ -134,7 +141,7 @@ class NullCommandObserver:
         control: str,
         params: Mapping[str, Any],
         *,
-        origin: CommandOrigin,
+        origin: str,
         at: float,
         error: str | None = None,
     ) -> None:
@@ -162,8 +169,16 @@ class CommandGate(Protocol):
     points that way.
     """
 
-    def may_command(self, device: str, origin: CommandOrigin) -> bool:
-        """Whether ``origin`` holds the command role for ``device``."""
+    def may_command(self, device: str, origin: str) -> bool:
+        """Whether ``origin`` holds the command role for ``device``.
+
+        Deny an origin you do not recognize. An origin is a string the caller
+        names, so nothing upstream of this method rejects one that no interface
+        owns: a mistyped name, or a write path added without one, arrives here
+        looking like any other. An implementation that answers only for the
+        origins it knows, and refuses the rest, is what makes that a refused
+        write. One that permits by default makes it a command.
+        """
         ...
 
 
@@ -173,9 +188,16 @@ class AllowAllCommands:
     A consumer with a single command interface, or a test concerned with the
     write rather than with who was allowed to make it, behaves exactly as it did
     before the gate existed.
+
+    Everything includes an origin nothing claims. With this gate a mistyped
+    origin commands like a correct one, and the only trace is the name in the
+    audit record. That is the right trade for one interface, where there is no
+    second commander for a wrong name to be mistaken for. An application with
+    more than one should wire a gate of its own, and leaving this one in place
+    is then a decision to check nothing.
     """
 
-    def may_command(self, device: str, origin: CommandOrigin) -> bool:
+    def may_command(self, device: str, origin: str) -> bool:
         """Always True."""
         return True
 
