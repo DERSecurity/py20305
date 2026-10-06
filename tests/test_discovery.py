@@ -302,6 +302,66 @@ async def test_poll_rate_default_when_none():
 
 
 @pytest.mark.asyncio
+async def test_time_poll_rate_is_the_time_resources_own():
+    """Time carries its own pollRate; the DeviceCapability rate does not apply."""
+    tm = _make_time()
+    tm.poll_rate = 86400
+    client = _MockClient({"/dcap": _make_dcap(poll_rate=120, edev_href=None), "/tm": tm})
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.poll_rates["time"] == 86400
+
+
+@pytest.mark.asyncio
+async def test_time_poll_rate_without_global_time_is_the_shortest_fsa_rate():
+    """One poll refreshes every FSA Time, so it runs at the most demanding rate."""
+    edev = _make_edev("/edev/1")
+    edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    fsa1 = _make_fsa("/fsa/1", derp_list_href="/fsa/1/derp", time_href="/fsa/1/tm")
+    fsa2 = _make_fsa("/fsa/2", derp_list_href="/fsa/2/derp", time_href="/fsa/2/tm")
+    tm1, tm2 = _make_time(), _make_time()
+    tm1.poll_rate = 3600
+    tm2.poll_rate = 1800
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(time_href=None, poll_rate=120),
+            "/edev": _make_edev_list(edev),
+            "/edev/1/fsa": _make_fsa_list(fsa1, fsa2),
+            "/fsa/1/derp": _make_derp_list(_make_derp("/derp/1")),
+            "/fsa/2/derp": _make_derp_list(_make_derp("/derp/2")),
+            "/fsa/1/tm": tm1,
+            "/fsa/2/tm": tm2,
+        }
+    )
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.poll_rates["time"] == 1800
+
+
+@pytest.mark.asyncio
+async def test_time_poll_rate_falls_back_to_dcap_when_no_time_was_read():
+    """An FSA Time endpoint down at discovery still gets polled, at the dcap rate."""
+    edev = _make_edev("/edev/1")
+    edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    fsa = _make_fsa("/fsa/1", derp_list_href="/fsa/1/derp", time_href="/fsa/1/tm")
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(time_href=None, poll_rate=120),
+            "/edev": _make_edev_list(edev),
+            "/edev/1/fsa": _make_fsa_list(fsa),
+            "/fsa/1/derp": _make_derp_list(_make_derp("/derp/1")),
+            "/fsa/1/tm": Sep2ProtocolError("not found", status_code=404),
+        }
+    )
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.poll_rates["time"] == 120
+
+
+@pytest.mark.asyncio
 async def test_clears_previous_state():
     """Discovery clears existing state before running."""
     state = DiscoveredState()

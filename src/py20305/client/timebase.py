@@ -146,8 +146,8 @@ class ServerTimebase:
         """Derive the staleness threshold from the cadence Time is actually polled at.
 
         A fixed hour is wrong on a server that advertises a slow pollRate: the
-        Time poll inherits the DeviceCapability rate, which may legitimately be
-        up to ``MAX_POLL_RATE`` (7200s), and a healthy per-FSA observation is
+        Time poll runs at the Time resource's own pollRate, which is not capped
+        and may legitimately be a day, and a healthy per-FSA observation is
         then older than an hour for most of the interval between two successful
         refreshes. Falling back there would abandon §9.2.3 specificity on a
         deployment where nothing has failed. Ignored when the operator set an

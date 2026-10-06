@@ -362,8 +362,8 @@ class TestStaleFsaFallback:
 class TestStaleThresholdFollowsThePollRate:
     """A fixed hour retires healthy scopes on a slowly-polled server.
 
-    The Time poll inherits the DeviceCapability pollRate, which may legitimately
-    be up to ``MAX_POLL_RATE`` (7200s). A per-FSA observation is at its oldest
+    The Time poll runs at the Time resource's own pollRate, which is not capped
+    and may legitimately be a day. A per-FSA observation is at its oldest
     just before the next successful refresh, so a threshold shorter than the
     poll interval drops §9.2.3 specificity on a deployment where nothing failed
     -- while the connectivity heartbeat keeps the global scope looking fresh.

@@ -455,7 +455,7 @@ async def discover(
     if time_href:
         state.time_href = time_href
         state.time = await client.get(time_href, Time)
-        # Note: Time resource doesn't have its own pollRate, uses dcap rate
+        state.poll_rates["time"] = normalize_poll_rate(state.time.poll_rate, resource_key="time")
         observe_time_resource(client.timebase, state.time, href=time_href)
 
     # 3. SelfDevice (optional): the server's own device description. Used by
@@ -698,18 +698,23 @@ async def discover(
             None, resource_key="derp", default=dcap_rate or DEFAULT_POLL_RATE
         )
 
-    # Set poll rate for Time resource (uses dcap rate as Time has no poll_rate attribute).
-    # Either scope is reason enough to schedule it: a server may publish no
-    # DeviceCapability TimeLink while its FSAs each publish one, and gating on the
-    # global href alone left that deployment with a per-FSA observation frozen at
-    # discovery -- the offset event classification actually reads. The advertised
-    # hrefs are what gate it, not the resources successfully read: an FSA Time
-    # endpoint that was down during discovery still needs the poll that retries
-    # it, and gating on the read would have scheduled nothing at all.
+    # Without a global Time resource, the Time poll runs at the shortest pollRate of
+    # the per-FSA Time resources read, since one poll refreshes them all, and at the
+    # dcap rate when none could be read. Either scope is reason enough to schedule
+    # it: a server may publish no DeviceCapability TimeLink while its FSAs each
+    # publish one, and gating on the global href alone left that deployment with a
+    # per-FSA observation frozen at discovery -- the offset event classification
+    # actually reads. The advertised hrefs are what gate it, not the resources
+    # successfully read: an FSA Time endpoint that was down during discovery still
+    # needs the poll that retries it, and gating on the read would have scheduled
+    # nothing at all.
     if (state.time_href or state.fsa_time_hrefs) and "time" not in state.poll_rates:
         dcap_rate = state.poll_rates.get("dcap")
+        fsa_rates = [t.poll_rate for _, t in state.fsa_time.values() if t.poll_rate is not None]
         state.poll_rates["time"] = normalize_poll_rate(
-            None, resource_key="time", default=dcap_rate or DEFAULT_POLL_RATE
+            min(fsa_rates, default=None),
+            resource_key="time",
+            default=dcap_rate or DEFAULT_POLL_RATE,
         )
 
     logger.info(

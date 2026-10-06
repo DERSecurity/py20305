@@ -2,7 +2,6 @@
 
 from py20305.client.poll_rate import (
     DEFAULT_POLL_RATE,
-    MAX_POLL_RATE,
     MIN_POLL_RATE,
     normalize_poll_rate,
 )
@@ -28,8 +27,9 @@ def test_below_min_clamps_up():
     assert normalize_poll_rate(1) == MIN_POLL_RATE
 
 
-def test_above_max_clamps_down():
-    assert normalize_poll_rate(10000) == MAX_POLL_RATE
+def test_slow_rate_is_not_capped():
+    """A server may ask for slow polling; the client does not poll faster."""
+    assert normalize_poll_rate(86400) == 86400
 
 
 def test_in_range_unchanged():
@@ -38,7 +38,3 @@ def test_in_range_unchanged():
 
 def test_at_min_boundary():
     assert normalize_poll_rate(MIN_POLL_RATE) == MIN_POLL_RATE
-
-
-def test_at_max_boundary():
-    assert normalize_poll_rate(MAX_POLL_RATE) == MAX_POLL_RATE
