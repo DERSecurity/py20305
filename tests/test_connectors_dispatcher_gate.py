@@ -27,6 +27,10 @@ from py20305.connectors.errors import ConnectorError
 
 LFDI = "deafbeefdeafbeefdeafbeefdeafbeefdeafbeef"
 
+#: An origin of the application's own: the name it gives an interface this
+#: package has never heard of.
+REGISTER_SERVER = "register_server"
+
 
 def _registry_for(connector: BaseConnector) -> Mock:
     registry = Mock()
@@ -45,13 +49,13 @@ def _registry_for(connector: BaseConnector) -> Mock:
 class _Gate:
     """Denies one origin, permits the rest, and records what it was asked."""
 
-    def __init__(self, denied: CommandOrigin) -> None:
+    def __init__(self, denied: str) -> None:
         self.denied = denied
-        self.asked: list[tuple[str, CommandOrigin]] = []
+        self.asked: list[tuple[str, str]] = []
 
-    def may_command(self, device: str, origin: CommandOrigin) -> bool:
+    def may_command(self, device: str, origin: str) -> bool:
         self.asked.append((device, origin))
-        return origin is not self.denied
+        return origin != self.denied
 
 
 class _Implements(BaseConnector):
@@ -121,7 +125,7 @@ class TestApplyOperation:
         dispatcher = _dispatcher(connector)
 
         await dispatcher.apply_operation(
-            LFDI, "fixed_w", {"WSetEna": 1, "WSet": 50.0}, origin=CommandOrigin.SUNSPEC
+            LFDI, "fixed_w", {"WSetEna": 1, "WSet": 50.0}, origin=REGISTER_SERVER
         )
 
         assert connector.seen == [{"WSetEna": 1, "WSet": 50.0}]
@@ -134,7 +138,7 @@ class TestApplyOperation:
 
         with pytest.raises(ConnectorError, match="does not implement update_fixed_w"):
             await dispatcher.apply_operation(
-                LFDI, "fixed_w", {"WSetEna": 1}, origin=CommandOrigin.SUNSPEC
+                LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER
             )
 
     @pytest.mark.asyncio
@@ -142,7 +146,7 @@ class TestApplyOperation:
         dispatcher = _dispatcher(_Implements())
 
         with pytest.raises(ConnectorError, match="no connector for LFDI"):
-            await dispatcher.apply_operation("ab" * 20, "fixed_w", {}, origin=CommandOrigin.SUNSPEC)
+            await dispatcher.apply_operation("ab" * 20, "fixed_w", {}, origin=REGISTER_SERVER)
 
 
 class TestCommandGate:
@@ -154,16 +158,16 @@ class TestCommandGate:
         quietly would have it report success for a write that never happened --
         a protocol server would acknowledge its client for nothing."""
         connector = _Implements()
-        gate = _Gate(CommandOrigin.SUNSPEC)
+        gate = _Gate(REGISTER_SERVER)
         dispatcher = _dispatcher(connector, gate)
 
         with pytest.raises(CommandNotPermittedError, match="may not command"):
             await dispatcher.apply_operation(
-                LFDI, "fixed_w", {"WSetEna": 1}, origin=CommandOrigin.SUNSPEC
+                LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER
             )
 
         assert connector.seen == []
-        assert (LFDI, CommandOrigin.SUNSPEC) in gate.asked
+        assert (LFDI, REGISTER_SERVER) in gate.asked
 
     @pytest.mark.asyncio
     async def test_a_refused_server_control_is_dropped_not_raised(self) -> None:
@@ -183,7 +187,7 @@ class TestCommandGate:
         is no device here to hold it over. Denying would drop writes for an href
         that resolves to a connector but not to an LFDI."""
         connector = _Implements()
-        gate = _Gate(CommandOrigin.SUNSPEC)
+        gate = _Gate(REGISTER_SERVER)
         dispatcher = ConnectorDispatcher(
             _registry_for(connector),
             lfdi_resolver=lambda _href: None,
@@ -195,7 +199,7 @@ class TestCommandGate:
             "update_fixed_w",
             {"WSetEna": 1},
             lfdi=None,
-            origin=CommandOrigin.SUNSPEC,
+            origin=REGISTER_SERVER,
             label="/edev/1",
         )
 
@@ -208,7 +212,7 @@ class TestCommandGate:
         dispatcher = _dispatcher(connector, _Gate(CommandOrigin.IEEE2030_5))
 
         await dispatcher.apply_operation(
-            LFDI, "fixed_w", {"WSetEna": 1}, origin=CommandOrigin.SUNSPEC
+            LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER
         )
 
         assert len(connector.seen) == 1
@@ -223,12 +227,12 @@ class TestCommandGate:
             _registry_for(connector),
             lfdi_resolver=lambda _href: LFDI,
             command_observer=observer,
-            command_gate=_Gate(CommandOrigin.SUNSPEC),
+            command_gate=_Gate(REGISTER_SERVER),
         )
 
         with pytest.raises(CommandNotPermittedError):
             await dispatcher.apply_operation(
-                LFDI, "fixed_w", {"WSetEna": 1}, origin=CommandOrigin.SUNSPEC
+                LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER
             )
 
         observer.record_command.assert_not_called()
@@ -254,7 +258,94 @@ class TestCommandGate:
         dispatcher = ConnectorDispatcher(_registry_for(connector), lfdi_resolver=lambda _href: LFDI)
 
         await dispatcher.apply_operation(
-            LFDI, "fixed_w", {"WSetEna": 1}, origin=CommandOrigin.SUNSPEC
+            LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER
         )
 
         assert len(connector.seen) == 1
+
+
+class TestAnOriginIsALabel:
+    """An origin is a string the caller chooses, carried through untouched.
+
+    The package lists the origins it produces and no others. An application
+    that fronts the same devices with an interface of its own names that
+    interface itself, and nothing here has to learn the name first.
+    """
+
+    def test_the_package_lists_only_the_origins_it_produces(self) -> None:
+        """An IEEE 2030.5 control, and the two times the client reasserts its
+        own state. An application's interfaces are not this package's to list."""
+        assert {origin.value for origin in CommandOrigin} == {
+            "ieee2030_5",
+            "dderc_reapply",
+            "comms_loss",
+        }
+
+    @pytest.mark.asyncio
+    async def test_an_applications_own_origin_reaches_the_gate_and_the_record(self) -> None:
+        observer = Mock()
+        connector = _Implements()
+        gate = _Gate("nobody")
+        dispatcher = ConnectorDispatcher(
+            _registry_for(connector),
+            lfdi_resolver=lambda _href: LFDI,
+            command_observer=observer,
+            command_gate=gate,
+        )
+
+        await dispatcher.apply_operation(LFDI, "fixed_w", {"WSetEna": 1}, origin="plant_controller")
+
+        assert gate.asked == [(LFDI, "plant_controller")]
+        assert observer.record_command.call_args.kwargs["origin"] == "plant_controller"
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_names_the_origin_as_the_caller_gave_it(self) -> None:
+        dispatcher = _dispatcher(_Implements(), _Gate("plant_controller"))
+
+        with pytest.raises(CommandNotPermittedError, match="^plant_controller may not command"):
+            await dispatcher.apply_operation(LFDI, "fixed_w", {}, origin="plant_controller")
+
+    @pytest.mark.asyncio
+    async def test_a_gate_sees_the_packages_own_origins_as_strings(self) -> None:
+        """So one comparison serves both kinds: a gate holding ``"comms_loss"``
+        as a plain string denies the package's own comms-loss clear."""
+        connector = _Implements()
+        gate = _Gate("comms_loss")
+        dispatcher = _dispatcher(connector, gate)
+
+        await dispatcher.clear_control_by_lfdi(LFDI)
+
+        assert connector.seen == []
+        assert gate.asked == [(LFDI, "comms_loss")]
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_control_is_reported_with_the_origin_as_plain_text(
+        self, monkeypatch
+    ) -> None:
+        """The diagnostic is read by people and serialized by whatever shows it,
+        so it carries the name, not an enumeration member."""
+        from py20305 import diagnostics
+        from py20305.diagnostics import DiagnosticsStore
+
+        fresh = DiagnosticsStore()
+        monkeypatch.setattr(diagnostics, "_store", fresh)
+        dispatcher = _dispatcher(_Implements(), _Gate(CommandOrigin.COMMS_LOSS))
+
+        await dispatcher.clear_control_by_lfdi(LFDI)
+
+        (entry,) = [e for e in fresh.snapshot()["warnings"] if "may not command" in e["message"]]
+        assert entry["message"].startswith("comms_loss may not command")
+        assert type(entry["details"]["origin"]) is str
+
+    def test_a_record_holds_whatever_origin_it_was_given(self) -> None:
+        from py20305.commands import CommandRecord, CommandStatus
+
+        record = CommandRecord(
+            control="p_lim",
+            params={},
+            origin="plant_controller",
+            commanded_at=1.0,
+            status=CommandStatus.UNCONFIRMED,
+        )
+
+        assert record.origin == "plant_controller"

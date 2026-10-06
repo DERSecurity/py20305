@@ -35,7 +35,7 @@ class ControlDispatcher(Protocol):
         dderc: DefaultDercontrol,
         curves: list[Dercurve1],
         *,
-        origin: CommandOrigin = CommandOrigin.DDERC_REAPPLY,
+        origin: str = CommandOrigin.DDERC_REAPPLY,
     ) -> None:
         """Apply default DER control (DDERC fallback) to a device.
 
@@ -72,7 +72,7 @@ class ControlDispatcher(Protocol):
         dderc: DefaultDercontrol,
         curves: list[Dercurve1],
         *,
-        origin: CommandOrigin = CommandOrigin.DDERC_REAPPLY,
+        origin: str = CommandOrigin.DDERC_REAPPLY,
     ) -> None:
         """Apply DDERC directly to a device identified by LFDI."""
         ...
@@ -121,7 +121,7 @@ class NullDispatcher:
         dderc: DefaultDercontrol,
         curves: list[Dercurve1],
         *,
-        origin: CommandOrigin = CommandOrigin.DDERC_REAPPLY,
+        origin: str = CommandOrigin.DDERC_REAPPLY,
     ) -> None:
         pass
 
@@ -145,7 +145,7 @@ class NullDispatcher:
         dderc: DefaultDercontrol,
         curves: list[Dercurve1],
         *,
-        origin: CommandOrigin = CommandOrigin.DDERC_REAPPLY,
+        origin: str = CommandOrigin.DDERC_REAPPLY,
     ) -> None:
         pass
 
