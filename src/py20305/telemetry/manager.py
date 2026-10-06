@@ -421,10 +421,6 @@ class TelemetryManager:
         # The acquisition instant, carried into the server timebase rather
         # than read from it. A second now() call would reintroduce post time.
         acquired_at = int(snapshot.last_success + self._timebase.offset())
-        # Post cadence, not acquisition cadence -- see create_meter_reading_list.
-        # The planner may read sooner (a tighter consumer) or much later (a
-        # device in backoff); the next POST is the one thing we can promise.
-        next_update = int(self._timebase.now()) + state.post_rate
         stale = snapshot.quality is not Quality.GOOD
         monitoring = self._with_registered_ac_type(state, monitoring)
 
@@ -437,6 +433,12 @@ class TelemetryManager:
                 # ReadingType registered before readings for it are posted
                 # (Rule h.2); without it the server answers 400 (Rule h.3).
                 await self._post_mup(state, monitoring, overrides)
+            # Post cadence, not acquisition cadence -- see
+            # create_meter_reading_list. The planner may read sooner (a tighter
+            # consumer) or much later (a device in backoff); the next POST is
+            # the one thing we can promise. Taken after any re-POST above, whose
+            # readback may have changed post_rate.
+            next_update = int(self._timebase.now()) + state.post_rate
             await self._post_readings(
                 state,
                 monitoring,

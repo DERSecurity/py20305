@@ -1993,6 +1993,45 @@ class TestSignedLoadAcType:
         await signed_manager.shutdown()
 
 
+class TestSignedLoadRepostAdoptsRate:
+    @pytest.fixture
+    def signed_manager(self, mock_client, connector_resolver):
+        from py20305.telemetry.mup import ReadingProfile
+
+        return TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+        )
+
+    async def test_readings_after_repost_advertise_adopted_rate(
+        self, signed_manager, mock_client, mock_connector
+    ):
+        """A rate adopted on a re-POST governs that cycle's nextUpdateTime."""
+        now = 1_700_000_000
+        signed_manager._timebase.now = MagicMock(return_value=float(now))
+        mock_client.get = AsyncMock(return_value=MagicMock(post_rate=300))
+        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        mock_client.get = AsyncMock(return_value=MagicMock(post_rate=30))
+        mock_connector.fetch_monitoring.return_value = {
+            **mock_connector.fetch_monitoring.return_value,
+            "WHAvail": 5000,
+        }
+        mock_client.post_bytes.reset_mock()
+        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        targets = [c.args[0] for c in mock_client.post_bytes.call_args_list]
+        assert targets == [MUP_LIST_HREF, "/mup/device1"]
+        body = mock_client.post_bytes.call_args_list[1].args[1].decode()
+        advertised = {int(v) for v in re.findall(r"nextUpdateTime>(\d+)<", body)}
+        assert advertised == {now + 30}
+
+        await signed_manager.shutdown()
+
+
 class TestSignedLoadRejectedRepost:
     @pytest.fixture
     def signed_manager(self, mock_client, connector_resolver):
