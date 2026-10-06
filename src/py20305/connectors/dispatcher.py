@@ -169,7 +169,7 @@ class ConnectorDispatcher:
         derc: Dercontrol1,
         curves: list[Dercurve1],
         *,
-        origin: CommandOrigin = CommandOrigin.IEEE2030_5,
+        origin: str = CommandOrigin.IEEE2030_5,
     ) -> None:
         """Apply a DERControl's settings to a device."""
         connector = await self._resolve_connector(device_href)
@@ -188,7 +188,7 @@ class ConnectorDispatcher:
         derc: Dercontrol1,
         curves: list[Dercurve1],
         *,
-        origin: CommandOrigin = CommandOrigin.IEEE2030_5,
+        origin: str = CommandOrigin.IEEE2030_5,
     ) -> None:
         """Apply a DERControl directly to a device identified by LFDI."""
         connector = await self._resolve_connector_by_lfdi(lfdi)
@@ -204,7 +204,7 @@ class ConnectorDispatcher:
         *,
         lfdi: str | None,
         device_href: str | None,
-        origin: CommandOrigin = CommandOrigin.IEEE2030_5,
+        origin: str = CommandOrigin.IEEE2030_5,
     ) -> None:
         if connector is None:
             return
@@ -253,7 +253,7 @@ class ConnectorDispatcher:
         params: dict[str, Any],
         *,
         lfdi: str | None,
-        origin: CommandOrigin,
+        origin: str,
         label: str,
         connector: BaseConnector | None = None,
     ) -> bool:
@@ -331,7 +331,7 @@ class ConnectorDispatcher:
         control: str,
         params: dict[str, Any],
         *,
-        origin: CommandOrigin,
+        origin: str,
     ) -> None:
         """Apply one named control to one device by LFDI, and record it.
 
@@ -362,7 +362,7 @@ class ConnectorDispatcher:
         )
         if not applied:
             raise CommandNotPermittedError(
-                f"{origin.value} may not command {lfdi}: another interface holds the "
+                f"{origin} may not command {lfdi}: another interface holds the "
                 f"command role, so {control!r} was not applied"
             )
 
@@ -372,7 +372,7 @@ class ConnectorDispatcher:
         dderc: DefaultDercontrol,
         curves: list[Dercurve1],
         *,
-        origin: CommandOrigin = CommandOrigin.DDERC_REAPPLY,
+        origin: str = CommandOrigin.DDERC_REAPPLY,
     ) -> None:
         """Apply default DER control (DDERC fallback) to a device."""
         connector = await self._resolve_connector(device_href)
@@ -391,7 +391,7 @@ class ConnectorDispatcher:
         dderc: DefaultDercontrol,
         curves: list[Dercurve1],
         *,
-        origin: CommandOrigin = CommandOrigin.DDERC_REAPPLY,
+        origin: str = CommandOrigin.DDERC_REAPPLY,
     ) -> None:
         """Apply default DER control directly to a device identified by LFDI."""
         connector = await self._resolve_connector_by_lfdi(lfdi)
@@ -407,7 +407,7 @@ class ConnectorDispatcher:
         *,
         lfdi: str | None,
         device_href: str | None,
-        origin: CommandOrigin = CommandOrigin.DDERC_REAPPLY,
+        origin: str = CommandOrigin.DDERC_REAPPLY,
     ) -> None:
         if connector is None:
             return
@@ -544,7 +544,7 @@ class ConnectorDispatcher:
             )
 
     @staticmethod
-    def _report_not_commanding(lfdi: str, control: str, origin: CommandOrigin) -> None:
+    def _report_not_commanding(lfdi: str, control: str, origin: str) -> None:
         """Surface a write refused because its origin does not command the device.
 
         Reported rather than raised: a 2030.5 server posting events to a device
@@ -557,11 +557,11 @@ class ConnectorDispatcher:
 
         report(
             "warnings",
-            f"{origin.value} may not command {lfdi[:8]}: another interface holds "
+            f"{origin} may not command {lfdi[:8]}: another interface holds "
             f"the command role. '{control}' was not applied.",
             source="dispatcher",
-            dedup_key=f"not-commanding-{origin.value}-{lfdi}",
-            details={"device": lfdi, "origin": origin.value, "control": control},
+            dedup_key=f"not-commanding-{origin}-{lfdi}",
+            details={"device": lfdi, "origin": str(origin), "control": control},
         )
 
     @staticmethod

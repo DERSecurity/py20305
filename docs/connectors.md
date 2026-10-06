@@ -147,13 +147,37 @@ which control it wants — a protocol server serving register writes, for instan
 ```python
 await dispatcher.apply_operation(
     lfdi, "p_lim", {"p_lim_mode_enable": 1, "p_lim_w": 80.0},
-    origin=CommandOrigin.SUNSPEC,
+    origin="register_server",
 )
 ```
 
 It goes through the same funnel, so everything an event-driven write gets applies:
 the command is recorded with its origin, and a failure is recorded as rejected and
 re-raised. Reaching a connector directly would bypass both.
+
+### Naming an origin
+
+An origin is a string, and the caller chooses it. The dispatcher hands it to the
+gate and to the observer and prints it in diagnostics, and does nothing else with
+it, so an application's own interfaces need no entry anywhere in this package.
+Pick one name per interface and use it in all three places: the call above, your
+`CommandGate`, and whatever reads the audit trail.
+
+`CommandOrigin` holds only the origins this package produces: `IEEE2030_5` for a
+control from the utility server, `DDERC_REAPPLY` for a default control reapplied
+when an event ends, and `COMMS_LOSS` for the fallback on a loss of
+communications. They are strings too, so a gate compares them like any other:
+
+```python
+def may_command(self, device: str, origin: str) -> bool:
+    if origin in (CommandOrigin.DDERC_REAPPLY, CommandOrigin.COMMS_LOSS):
+        origin = CommandOrigin.IEEE2030_5      # the same interface acting
+    return self.commander_for(device) == origin
+```
+
+Deny an origin your gate does not recognize. A new write path should have to say
+who owns it, and a mistyped name then fails closed where it would otherwise
+command.
 
 Unlike a server-issued control, a refusal here raises
 `CommandNotPermittedError`. This caller named one control and has somewhere to
@@ -172,14 +196,15 @@ and pass it as `command_gate`:
 
 ```python
 class OneCommanderPerDevice:
-    def may_command(self, device: str, origin: CommandOrigin) -> bool:
+    def may_command(self, device: str, origin: str) -> bool:
         return self.commander_for(device) == origin
 ```
 
 Which interface holds authority is the application's concern, not this package's,
 so the dependency points that way — as it does for `CommandObserver`. Omitted,
 every origin may command everything, which is right for a single-interface
-consumer.
+consumer. That includes an origin nothing claims, so with no gate a mistyped
+name commands like a correct one.
 
 A refused *server-issued* control is reported through `diagnostics` and dropped
 rather than raised: an interface posting to a device another one commands is a
