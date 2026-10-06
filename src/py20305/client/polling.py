@@ -134,7 +134,12 @@ class PollScheduler:
         )
 
     def set_interval(self, key: str, interval: int) -> None:
-        """Change ``key``'s interval, taking effect from its next wait."""
+        """Change ``key``'s interval, taking effect from its next wait.
+
+        A wait already in progress runs out at the old interval, so a caller
+        outside the key's own callback that shortens it waits out the old one
+        first. A key that is not scheduled is ignored.
+        """
         if key in self._intervals:
             self._intervals[key] = interval
 

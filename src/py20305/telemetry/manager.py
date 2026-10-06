@@ -21,6 +21,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from py20305.client.errors import Sep2ConnectionError, Sep2ProtocolError
+from py20305.client.poll_rate import MIN_POLL_RATE
 from py20305.client.polling import PollScheduler
 from py20305.client.timebase import ServerTimebase
 from py20305.connectors.base import ConnectorError
@@ -661,20 +662,31 @@ class TelemetryManager:
             return
         if mup.post_rate is None or mup.post_rate <= 0:
             return
-        state.server_post_rate = mup.post_rate
-        if mup.post_rate == state.post_rate:
+        # The adopted rate also sets how often the device is read, so it gets
+        # the floor poll rates have: a device behind a slow serial link is the
+        # thing least able to absorb a server asking for one post a second.
+        rate = max(MIN_POLL_RATE, mup.post_rate)
+        if rate != mup.post_rate:
+            logger.warning(
+                "Server postRate for %s is %d s; posting every %d s, the minimum",
+                state.lfdi[:8],
+                mup.post_rate,
+                rate,
+            )
+        state.server_post_rate = rate
+        if rate == state.post_rate:
             return
         logger.info(
             "Server adjusted postRate for %s: %d -> %d",
             state.lfdi[:8],
             state.post_rate,
-            mup.post_rate,
+            rate,
         )
-        state.post_rate = mup.post_rate
+        state.post_rate = rate
         # Readings are both acquired and posted on this cadence; changing
         # only state.post_rate would leave both running at the old rate.
-        self._source.declare(state.lfdi, float(mup.post_rate))
-        self._scheduler.set_interval(f"metering_{state.lfdi}", mup.post_rate)
+        self._source.declare(state.lfdi, float(rate))
+        self._scheduler.set_interval(f"metering_{state.lfdi}", rate)
 
     async def _post_readings(
         self,

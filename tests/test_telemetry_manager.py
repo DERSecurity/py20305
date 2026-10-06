@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -298,6 +299,29 @@ class TestMeteringCycle:
 
         set_interval.assert_called_once_with(f"metering_{SAMPLE_LFDI.lower()}", 30)
         declare.assert_called_once_with(SAMPLE_LFDI.lower(), 30.0)
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_readback_post_rate_is_floored(
+        self, manager, mock_client, mock_connector, caplog
+    ):
+        """The adopted rate sets how often the device is read; 1 s is not taken as given."""
+        server_mup = MagicMock()
+        server_mup.post_rate = 1
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        with (
+            caplog.at_level(logging.WARNING),
+            patch.object(manager._scheduler, "set_interval") as set_interval,
+        ):
+            await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 10
+        set_interval.assert_called_once_with(f"metering_{SAMPLE_LFDI.lower()}", 10)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("postRate" in m for m in warnings)
 
         await manager.shutdown()
 

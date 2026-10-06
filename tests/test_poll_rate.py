@@ -1,5 +1,7 @@
 """Tests for poll rate normalization."""
 
+import logging
+
 from py20305.client.poll_rate import (
     DEFAULT_POLL_RATE,
     MIN_POLL_RATE,
@@ -38,3 +40,16 @@ def test_in_range_unchanged():
 
 def test_at_min_boundary():
     assert normalize_poll_rate(MIN_POLL_RATE) == MIN_POLL_RATE
+
+
+def test_rate_over_a_day_is_honored_with_a_warning(caplog):
+    """No ceiling, but a resource polled less than daily should not go quiet unexplained."""
+    with caplog.at_level(logging.WARNING, logger="py20305.client.poll_rate"):
+        assert normalize_poll_rate(4_294_967_295, resource_key="derc") == 4_294_967_295
+    assert any("derc" in r.getMessage() and "4294967295" in r.getMessage() for r in caplog.records)
+
+
+def test_daily_rate_does_not_warn(caplog):
+    with caplog.at_level(logging.WARNING, logger="py20305.client.poll_rate"):
+        assert normalize_poll_rate(86_400, resource_key="time") == 86_400
+    assert not caplog.records

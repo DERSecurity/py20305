@@ -455,7 +455,6 @@ async def discover(
     if time_href:
         state.time_href = time_href
         state.time = await client.get(time_href, Time)
-        state.poll_rates["time"] = normalize_poll_rate(state.time.poll_rate, resource_key="time")
         observe_time_resource(client.timebase, state.time, href=time_href)
 
     # 3. SelfDevice (optional): the server's own device description. Used by
@@ -480,6 +479,7 @@ async def discover(
     edev_list_href = _extract_href(dcap.end_device_list_link)
     if not edev_list_href:
         logger.warning("No EndDeviceListLink in DeviceCapability")
+        _set_time_poll_rate(state)
         return
 
     edev_pages = await client.get_list(edev_list_href, EndDeviceList)
@@ -698,24 +698,7 @@ async def discover(
             None, resource_key="derp", default=dcap_rate or DEFAULT_POLL_RATE
         )
 
-    # Without a global Time resource, the Time poll runs at the shortest pollRate of
-    # the per-FSA Time resources read, since one poll refreshes them all, and at the
-    # dcap rate when none could be read. Either scope is reason enough to schedule
-    # it: a server may publish no DeviceCapability TimeLink while its FSAs each
-    # publish one, and gating on the global href alone left that deployment with a
-    # per-FSA observation frozen at discovery -- the offset event classification
-    # actually reads. The advertised hrefs are what gate it, not the resources
-    # successfully read: an FSA Time endpoint that was down during discovery still
-    # needs the poll that retries it, and gating on the read would have scheduled
-    # nothing at all.
-    if (state.time_href or state.fsa_time_hrefs) and "time" not in state.poll_rates:
-        dcap_rate = state.poll_rates.get("dcap")
-        fsa_rates = [t.poll_rate for _, t in state.fsa_time.values() if t.poll_rate is not None]
-        state.poll_rates["time"] = normalize_poll_rate(
-            min(fsa_rates, default=None),
-            resource_key="time",
-            default=dcap_rate or DEFAULT_POLL_RATE,
-        )
+    _set_time_poll_rate(state)
 
     logger.info(
         "Discovery complete: %d devices, %d programs",
@@ -1128,3 +1111,34 @@ async def refresh_der_programs(client: Sep2Client, state: DiscoveredState) -> li
         len(removed),
     )
     return removed
+
+
+def _set_time_poll_rate(state: DiscoveredState) -> None:
+    """Schedule the Time poll at the shortest rate any Time resource asked for.
+
+    One poll refreshes the global Time and every per-FSA Time, so it runs as
+    often as the most demanding of them. A Time resource advertising 0 asks for
+    no polling of itself; it does not switch off the poll the others need, so it
+    is left out. With no usable rate -- or no Time resource read -- the dcap rate
+    applies.
+
+    Either scope is reason enough to schedule it: a server may publish no
+    DeviceCapability TimeLink while its FSAs each publish one, and gating on the
+    global href alone left that deployment with a per-FSA observation frozen at
+    discovery -- the offset event classification actually reads. The advertised
+    hrefs are what gate it, not the resources successfully read: an FSA Time
+    endpoint that was down during discovery still needs the poll that retries
+    it.
+    """
+    if not (state.time_href or state.fsa_time_hrefs):
+        return
+    asked = [t.poll_rate for _, t in state.fsa_time.values()]
+    if state.time is not None:
+        asked.append(state.time.poll_rate)
+    rates = [rate for rate in asked if rate is not None and rate > 0]
+    dcap_rate = state.poll_rates.get("dcap")
+    state.poll_rates["time"] = normalize_poll_rate(
+        min(rates, default=None),
+        resource_key="time",
+        default=dcap_rate or DEFAULT_POLL_RATE,
+    )
