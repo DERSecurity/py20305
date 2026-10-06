@@ -104,6 +104,10 @@ class DeviceTelemetryState:
     #: a 5xx or a connection error is retried every cycle.
     rejected_registration: tuple[frozenset[int], int | None] | None = None
     post_rate: int = 300
+    #: postRate read back from the created MUP (B.17.1). It outranks the
+    #: ``post_rate`` a later ``start_metering`` passes in, since the MUP is
+    #: not re-POSTed and its rate is not read back again.
+    server_post_rate: int | None = None
     log_event_list_href: str | None = None
     der_availability_href: str | None = None
     log_event_id_counter: int = 0
@@ -264,6 +268,9 @@ class TelemetryManager:
                 new_state.registered_slots = existing.registered_slots
                 new_state.registered_ac_type = existing.registered_ac_type
                 new_state.rejected_registration = existing.rejected_registration
+                if existing.server_post_rate is not None:
+                    new_state.server_post_rate = existing.server_post_rate
+                    new_state.post_rate = existing.server_post_rate
                 new_state.log_event_id_counter = existing.log_event_id_counter
             # Alarm-transition state is independent of MUP registration, so it
             # carries over unconditionally: an idempotent start_metering (config
@@ -284,14 +291,16 @@ class TelemetryManager:
         # The planner acquires on this cadence; the metering cycle reads what
         # it stored. Declared as post_rate so a default deployment sees the
         # same device poll rate it did before acquisition was decoupled.
-        self._source.declare(lfdi_norm, float(post_rate))
+        self._source.declare(lfdi_norm, float(new_state.post_rate))
         callback: Callable[[], Awaitable[None]] = partial(self._metering_cycle, lfdi_norm)
         self._scheduler.schedule(
             f"metering_{lfdi_norm}",
-            post_rate,
+            new_state.post_rate,
             callback,
         )
-        logger.info("Started metering for device %s at %ds interval", lfdi_norm[:8], post_rate)
+        logger.info(
+            "Started metering for device %s at %ds interval", lfdi_norm[:8], new_state.post_rate
+        )
 
     def stop_metering(self, lfdi: str) -> None:
         """Stop metering for a device.
@@ -641,16 +650,29 @@ class TelemetryManager:
         """GET the created MUP and adopt server-preferred postRate if changed."""
         try:
             mup = await self._client.get(mup_href, MirrorUsagePoint)
-            if mup.post_rate is not None and mup.post_rate != state.post_rate:
-                logger.info(
-                    "Server adjusted postRate for %s: %d -> %d",
-                    state.lfdi[:8],
-                    state.post_rate,
-                    mup.post_rate,
-                )
-                state.post_rate = mup.post_rate
         except Exception:
-            logger.debug("Could not read back MUP postRate for %s", state.lfdi[:8])
+            logger.warning(
+                "Could not read back MUP postRate for %s; posting every %ds",
+                state.lfdi[:8],
+                state.post_rate,
+            )
+            return
+        if mup.post_rate is None or mup.post_rate <= 0:
+            return
+        state.server_post_rate = mup.post_rate
+        if mup.post_rate == state.post_rate:
+            return
+        logger.info(
+            "Server adjusted postRate for %s: %d -> %d",
+            state.lfdi[:8],
+            state.post_rate,
+            mup.post_rate,
+        )
+        state.post_rate = mup.post_rate
+        # Readings are both acquired and posted on this cadence; changing
+        # only state.post_rate would leave both running at the old rate.
+        self._source.declare(state.lfdi, float(mup.post_rate))
+        self._scheduler.set_interval(f"metering_{state.lfdi}", mup.post_rate)
 
     async def _post_readings(
         self,

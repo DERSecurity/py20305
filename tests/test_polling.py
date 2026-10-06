@@ -88,6 +88,23 @@ async def test_replace_key():
 
 
 @pytest.mark.asyncio
+async def test_set_interval_from_callback_applies_to_next_wait():
+    """A callback can retune its own key without cancelling the running task."""
+    calls: list[int] = []
+    scheduler = PollScheduler()
+
+    async def cb() -> None:
+        calls.append(1)
+        scheduler.set_interval("x", 0 if len(calls) < 3 else 60)
+
+    scheduler.schedule("x", interval=60, callback=cb)
+    await asyncio.sleep(0.1)
+    await scheduler.cancel_all()
+
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
 async def test_callback_exception_does_not_stop_polling():
     """An exception in a callback doesn't kill the poll loop."""
     calls: list[int] = []

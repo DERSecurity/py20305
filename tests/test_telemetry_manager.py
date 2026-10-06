@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -276,6 +276,65 @@ class TestMeteringCycle:
         state = manager.get_device_state(SAMPLE_LFDI)
         assert state.mup_posted is True
         assert state.post_rate == 300  # Unchanged
+
+        await manager.shutdown()
+
+
+    @pytest.mark.asyncio
+    async def test_readback_post_rate_retunes_schedule_and_acquisition(
+        self, manager, mock_client, mock_connector
+    ):
+        """The adopted postRate drives the posting loop, not just the state."""
+        server_mup = MagicMock()
+        server_mup.post_rate = 30
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        with (
+            patch.object(manager._scheduler, "set_interval") as set_interval,
+            patch.object(manager._source, "declare") as declare,
+        ):
+            await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        set_interval.assert_called_once_with(f"metering_{SAMPLE_LFDI.lower()}", 30)
+        declare.assert_called_once_with(SAMPLE_LFDI.lower(), 30.0)
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_readback_non_positive_post_rate_ignored(
+        self, manager, mock_client, mock_connector
+    ):
+        """A postRate of 0 would spin the loop; keep the current rate."""
+        server_mup = MagicMock()
+        server_mup.post_rate = 0
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 300
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_restart_keeps_server_post_rate(self, manager, mock_client, mock_connector):
+        """A start_metering re-call does not fall back to the caller's rate.
+
+        The MUP is not re-POSTed on a re-call, so its postRate is not read back
+        again; the rate adopted the first time has to carry over.
+        """
+        server_mup = MagicMock()
+        server_mup.post_rate = 30
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        with patch.object(manager._scheduler, "schedule") as schedule:
+            manager.start_metering(SAMPLE_LFDI, post_rate=300)
+
+        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 30
+        assert schedule.call_args[0][1] == 30
 
         await manager.shutdown()
 
