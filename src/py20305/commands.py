@@ -170,7 +170,15 @@ class CommandGate(Protocol):
     """
 
     def may_command(self, device: str, origin: str) -> bool:
-        """Whether ``origin`` holds the command role for ``device``."""
+        """Whether ``origin`` holds the command role for ``device``.
+
+        Deny an origin you do not recognize. An origin is a string the caller
+        names, so nothing upstream of this method rejects one that no interface
+        owns: a mistyped name, or a write path added without one, arrives here
+        looking like any other. An implementation that answers only for the
+        origins it knows, and refuses the rest, is what makes that a refused
+        write. One that permits by default makes it a command.
+        """
         ...
 
 
@@ -180,6 +188,13 @@ class AllowAllCommands:
     A consumer with a single command interface, or a test concerned with the
     write rather than with who was allowed to make it, behaves exactly as it did
     before the gate existed.
+
+    Everything includes an origin nothing claims. With this gate a mistyped
+    origin commands like a correct one, and the only trace is the name in the
+    audit record. That is the right trade for one interface, where there is no
+    second commander for a wrong name to be mistaken for. An application with
+    more than one should wire a gate of its own, and leaving this one in place
+    is then a decision to check nothing.
     """
 
     def may_command(self, device: str, origin: str) -> bool:

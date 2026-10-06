@@ -203,7 +203,8 @@ class OneCommanderPerDevice:
 Which interface holds authority is the application's concern, not this package's,
 so the dependency points that way — as it does for `CommandObserver`. Omitted,
 every origin may command everything, which is right for a single-interface
-consumer.
+consumer. That includes an origin nothing claims, so with no gate a mistyped
+name commands like a correct one.
 
 A refused *server-issued* control is reported through `diagnostics` and dropped
 rather than raised: an interface posting to a device another one commands is a
