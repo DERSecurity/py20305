@@ -21,7 +21,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from py20305.client.errors import Sep2ConnectionError, Sep2ProtocolError
-from py20305.client.poll_rate import MIN_POLL_RATE
 from py20305.client.polling import PollScheduler
 from py20305.client.timebase import ServerTimebase
 from py20305.connectors.base import ConnectorError
@@ -60,6 +59,11 @@ if TYPE_CHECKING:
     from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
 
 logger = logging.getLogger(__name__)
+
+#: Fastest postRate a server can impose through the MirrorUsagePoint. The rate
+#: also sets how often the device is read, so it is held well above the poll-rate
+#: minimum. A client that posts faster by its own configuration keeps its rate.
+MIN_POST_RATE = 30
 
 
 def _monitoring_payload(
@@ -662,10 +666,13 @@ class TelemetryManager:
             return
         if mup.post_rate is None or mup.post_rate <= 0:
             return
-        # The adopted rate also sets how often the device is read, so it gets
-        # the floor poll rates have: a device behind a slow serial link is the
-        # thing least able to absorb a server asking for one post a second.
-        rate = max(MIN_POLL_RATE, mup.post_rate)
+        # The adopted rate also sets how often the device is read, so a server
+        # cannot push it below MIN_POST_RATE: a device behind a slow serial link
+        # is the thing least able to absorb a server asking for one post a
+        # second. The floor never rises above the rate this client posted with,
+        # so a server echoing a client's own short rate is agreeing with it.
+        floor = min(MIN_POST_RATE, state.post_rate)
+        rate = max(floor, mup.post_rate)
         if rate != mup.post_rate:
             logger.warning(
                 "Server postRate for %s is %d s; posting every %d s, the minimum",

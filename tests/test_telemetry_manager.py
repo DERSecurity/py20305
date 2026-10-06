@@ -318,10 +318,48 @@ class TestMeteringCycle:
         ):
             await manager._metering_cycle(SAMPLE_LFDI.lower())
 
-        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 10
-        set_interval.assert_called_once_with(f"metering_{SAMPLE_LFDI.lower()}", 10)
+        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 30
+        set_interval.assert_called_once_with(f"metering_{SAMPLE_LFDI.lower()}", 30)
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert any("postRate" in m for m in warnings)
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_readback_echo_of_a_fast_client_rate_is_kept(
+        self, manager, mock_client, mock_connector, caplog
+    ):
+        """A server echoing the client's own sub-minimum rate is agreeing with it."""
+        server_mup = MagicMock()
+        server_mup.post_rate = 5
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=5)
+        with (
+            caplog.at_level(logging.WARNING),
+            patch.object(manager._scheduler, "set_interval") as set_interval,
+        ):
+            await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 5
+        set_interval.assert_not_called()
+        assert not [r for r in caplog.records if "postRate" in r.getMessage()]
+
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_readback_never_faster_than_the_client_chose(
+        self, manager, mock_client, mock_connector
+    ):
+        """Below the client's own sub-minimum rate, the client's rate is the floor."""
+        server_mup = MagicMock()
+        server_mup.post_rate = 3
+        mock_client.get = AsyncMock(return_value=server_mup)
+
+        manager.start_metering(SAMPLE_LFDI, post_rate=5)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert manager.get_device_state(SAMPLE_LFDI).post_rate == 5
 
         await manager.shutdown()
 

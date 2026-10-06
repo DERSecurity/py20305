@@ -66,9 +66,11 @@ Nothing yet.
   (#45).** The rate was read back after the MUP POST but never reached the posting loop or
   the device read cadence, so both stayed at the EndDevice or configured rate (300 s by
   default), and a rediscovery reset the stored rate as well. Both now follow the server's
-  rate. Because that rate now sets how often the device is read, it is held to the same 10 s
-  minimum as poll rates, with a warning when it applies. A postRate of 0 is ignored, and a
-  failed readback is logged as a warning.
+  rate. Because that rate now sets how often the device is read, a server cannot push it
+  below 30 s, nor below the rate the client itself posted with if that is shorter, so a
+  server echoing a client's own short rate is left alone. A warning is logged when the
+  minimum applies. A postRate of 0 is ignored, and a failed readback is logged as a
+  warning.
 
   **The Time resource is polled at its own pollRate (#45).** The Time poll used the
   DeviceCapability rate. It now runs at the shortest pollRate any Time resource advertises,
