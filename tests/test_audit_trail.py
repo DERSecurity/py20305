@@ -678,8 +678,11 @@ class TestLifecycleRecords:
         await site.processor.process_controls("/derp/0")
 
         (partial,) = [
-            r for r in site.forwarder.audit_records("der_event") if r["to_state"] == "superseded"
+            r for r in site.forwarder.audit_records("der_event") if "superseded_lfdis" in r
         ]
+        assert (partial["from_state"], partial["to_state"]) == ("active", "active"), (
+            "a partial supersession is not a transition"
+        )
         assert partial["event_mrid"] == HEX_2
         assert partial["superseded_by"] == HEX_1
         assert partial["superseded_lfdis"] == [LFDI_1.hex()]
@@ -866,12 +869,14 @@ class TestLifecycleRecords:
         await site.processor.process_controls("/derp/0")
 
         (partial,) = [
-            r for r in site.forwarder.audit_records("der_event") if r["to_state"] == "superseded"
+            r for r in site.forwarder.audit_records("der_event") if "superseded_lfdis" in r
         ]
         assert partial["superseded_lfdis"] == [local_a.lower(), local_b.lower()]
         assert set(partial["superseded_modes"]) == {local_a.lower(), local_b.lower()}
         active = next(
-            r for r in site.forwarder.audit_records("der_event") if r["to_state"] == "active"
+            r
+            for r in site.forwarder.audit_records("der_event")
+            if r["to_state"] == "active" and "superseded_lfdis" not in r
         )
         assert active["lfdis"] == [local_a.lower(), local_b.lower()]
         await site.processor.shutdown()

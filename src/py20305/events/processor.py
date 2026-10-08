@@ -772,12 +772,14 @@ class EventProcessor:
             program_devices = device_map.get(superseded.program_href, set())
             fully = bool(program_devices) and superseded.superseded_devices >= program_devices
             if newly_superseded and not fully:
-                # The event keeps running on its other devices, so its state
-                # does not change; the record says which part was taken over.
+                # Not a transition: the event keeps running on its other
+                # devices, so the record leaves its state where it was and
+                # says which part was taken over.
+                current = "opted_out" if superseded.opted_out else superseded.state.value
                 self._audit_transition(
                     superseded,
-                    superseded.state.value,
-                    "superseded",
+                    current,
+                    current,
                     partial(self._audit_supersession, superseded, result.superseding_mrid, True),
                 )
             if fully:

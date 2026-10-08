@@ -261,10 +261,12 @@ An event record is published once per transition, never per poll:
 - An event opted out during loss of communications is no longer in force, so
   any later record for it, such as a cancellation, has `from_state:
   opted_out`.
-- A `superseded` record carries `superseded_by`. When the supersession covers
-  only some devices or modes, it also carries `superseded_lfdis` and
-  `superseded_modes`, and the event's state does not change. Under a group
-  lookup these name the program's local devices.
+- A whole supersession is the transition to `superseded`, with
+  `superseded_by`. A partial one, where another event takes over only some
+  devices or modes, is not a transition: its record has `from_state` equal to
+  `to_state`, the event's current state, and carries `superseded_by`,
+  `superseded_lfdis` and `superseded_modes`. Under a group lookup these name
+  the program's local devices.
 - LFDIs are lowercase hex throughout.
 
 A DefaultDERControl is not an event and produces no lifecycle record; its
