@@ -53,6 +53,8 @@ class ForwarderManager:
         self._forwarder_id: str | None = None
         self._source_host: str | None = None
         self._events_dropped_not_running = 0
+        #: Events not handed to a forwarder whose start failed, by forwarder.
+        self._events_dropped_by_failed: dict[str, int] = {}
 
     @property
     def running(self) -> bool:
@@ -267,6 +269,15 @@ class ForwarderManager:
             return
 
         for forwarder in self._forwarders:
+            if forwarder in self._failed:
+                # It would drop the event without a word, and the manager
+                # reports itself running; this count is what explains the gap
+                # a sequence-checking consumer sees while a broker is down.
+                name = forwarder.name
+                self._events_dropped_by_failed[name] = (
+                    self._events_dropped_by_failed.get(name, 0) + 1
+                )
+                continue
             try:
                 forwarder.queue_event(event)
             except Exception as e:
@@ -296,6 +307,7 @@ class ForwarderManager:
             "forwarder_count": len(self._forwarders),
             "client_lfdi": self._client_lfdi,
             "events_dropped_not_running": self._events_dropped_not_running,
+            "events_dropped_by_failed_forwarder": dict(self._events_dropped_by_failed),
             "forwarders": {f.name: f.get_statistics() for f in self._forwarders},
         }
 

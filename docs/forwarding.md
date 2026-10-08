@@ -242,7 +242,13 @@ An event record is published once per transition, never per poll:
 - `effective_start` and `effective_duration` are after randomization, and
   `at` is on the server's timebase.
 - An `active` record is published once dispatch has finished, so
-  `applied_lfdis` and `rejected_lfdis` are final.
+  `applied_lfdis` and `rejected_lfdis` are final. They name the devices the
+  control was written to. Under a group lookup, where one server EndDevice
+  stands for several local devices, they list the local devices one by one, so
+  a partial failure shows here even though the server is told the event started.
+- An event opted out during loss of communications is no longer in force, so
+  any later record for it, such as a cancellation, has `from_state:
+  opted_out`.
 - A `superseded` record carries `superseded_by`. When the supersession covers
   only some devices or modes, it also carries `superseded_lfdis` and
   `superseded_modes`, and the event keeps running in `from_state` on the rest.
@@ -270,9 +276,11 @@ already passed.
 ### Telling a complete trail from an incomplete one
 
 Delivery is best-effort, as for every stream on this transport: a full queue
-drops its oldest entry, and a stopped forwarder drops what it is given. Both
-are counted in the forwarder's statistics (`messages_dropped`,
-`events_dropped_not_running`).
+drops its oldest entry, and a stopped forwarder drops what it is given. Each is
+counted in the forwarder's statistics: `messages_dropped` for a full queue,
+`events_dropped_not_running` while the whole transport is stopped, and
+`events_dropped_by_failed_forwarder`, per forwarder, while one whose broker was
+unreachable at start has not yet reconnected.
 
 Every audit record, and every write while `audit` is on, carries `boot_id`, a
 random identifier per process start, and `seq`, one counter per process across

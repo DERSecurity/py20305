@@ -878,6 +878,8 @@ class EventProcessor:
             failure = await self._dispatch_one(
                 mrid_short, dev_href, self._dispatcher.apply_control(dev_href, record.derc, curves)
             )
+            outcome = record.applied_lfdis if failure is None else record.rejected_lfdis
+            outcome.add(self._lfdi_or_href(dev_href))
             if on_result is not None:
                 await on_result(dev_href, failure)
             return dev_href, failure
@@ -972,6 +974,8 @@ class EventProcessor:
                 for lfdi in local_lfdis
             ]
         )
+        for lfdi, failure in zip(local_lfdis, failures, strict=True):
+            (record.applied_lfdis if failure is None else record.rejected_lfdis).add(lfdi)
         failed = [f for f in failures if f is not None]
         aggregate = failed[0] if len(failed) == len(failures) else None
         if failed and aggregate is None:
@@ -1046,14 +1050,16 @@ class EventProcessor:
         """Record an event going active, once its dispatch has settled.
 
         Emitted after the per-device outcomes are in, not at the state change,
-        so the applied and rejected lists are final.
+        so the applied and rejected lists are final. They are the devices the
+        control was written to, not the server's EndDevices: under a group
+        lookup those differ, and a partial failure is visible only here.
         """
         self._audit_transition(
             record,
             from_state,
             EventState.ACTIVE.value,
-            applied_lfdis=self._lfdis_for_hrefs(record.applied_devices),
-            rejected_lfdis=self._lfdis_for_hrefs(record.rejected_devices),
+            applied_lfdis=list(record.applied_lfdis),
+            rejected_lfdis=list(record.rejected_lfdis),
         )
 
     def _audit_transition(
@@ -1070,6 +1076,10 @@ class EventProcessor:
         """
         if not self._audit.enabled:
             return
+        if record.opted_out and to_state != "opted_out":
+            # An opted-out event keeps its stored state, so supersession and
+            # classification see it unchanged. Its trail has left that state.
+            from_state = "opted_out"
         try:
             self._audit.event_transition(
                 event_mrid=record.mrid,

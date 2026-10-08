@@ -665,13 +665,16 @@ class CsipClient:
         )
         logger.warning("Entering loss-of-communications mode (silent for %ds)", elapsed)
         self._comms_loss_simulated = simulated
+        # Taken before the fallbacks run: reverting a large fleet takes time,
+        # and the mode was entered when it was flagged, not when that finished.
+        entered_at = self._timebase.now()
         opted_out = await self._event_processor.enter_comms_loss()
         self._audit.comms_loss(
             transition="entered",
             elapsed_seconds=elapsed,
             threshold=self._comms_loss_seconds,
             simulated=simulated,
-            at=self._timebase.now(),
+            at=entered_at,
             opted_out_mrids=opted_out,
         )
 

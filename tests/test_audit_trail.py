@@ -165,15 +165,18 @@ class Site:
         comms_loss: CommsLossState | None = None,
         failing: set[bytes] | None = None,
         group_lookup: Any = None,
+        local: list[bytes] | None = None,
     ) -> None:
         self.forwarder = RecordingForwarder()
         self.sequence = AuditSequence()
         self.connectors: dict[str, PrintDemoConnector] = {}
-        for edev in state.end_devices.values():
+        # ``local`` are devices behind a group lookup: the server never names
+        # them, and only the dispatcher's by-LFDI path reaches them.
+        for lfdi in [edev.lfdi for edev in state.end_devices.values()] + (local or []):
             connector = PrintDemoConnector()
-            if edev.lfdi in (failing or set()):
+            if lfdi in (failing or set()):
                 connector.update_p_lim = AsyncMock(side_effect=RuntimeError("register locked"))  # type: ignore[method-assign]
-            self.connectors[edev.lfdi.hex()] = connector
+            self.connectors[lfdi.hex()] = connector
         hrefs = {href: edev.lfdi.hex() for href, edev in state.end_devices.items()}
 
         registry = Mock()
@@ -642,6 +645,51 @@ class TestLifecycleRecords:
         await site.processor.shutdown()
 
     @pytest.mark.asyncio
+    async def test_grouped_devices_are_reported_one_by_one(self):
+        """Under a group lookup the server sees one EndDevice and one outcome. The
+        record names the devices actually written to, and a partial failure
+        stays visible though the server is told the event started."""
+        now = int(time.time())
+        local_ok, local_bad = bytes([0x0C]) * 20, bytes([0x0D]) * 20
+        site = Site(
+            _state([_derc(0x01, start=now - 10)]),
+            local=[local_ok, local_bad],
+            failing={local_bad},
+            group_lookup=lambda _href: [local_ok.hex(), local_bad.hex()],
+        )
+
+        await site.processor.process_controls("/derp/1")
+
+        active = site.forwarder.audit_records("der_event")[-1]
+        assert active["to_state"] == "active"
+        assert active["applied_lfdis"] == [local_ok.hex()]
+        assert active["rejected_lfdis"] == [local_bad.hex()]
+        assert LFDI_1.hex() not in active["applied_lfdis"], (
+            "the aggregate is not a device written to"
+        )
+        await site.processor.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_an_opted_out_event_leaves_from_opted_out(self):
+        """Its stored state stays active, but its trail does not."""
+        now = int(time.time())
+        comms = CommsLossState()
+        state = _state([_derc(0x01, start=now - 10)], dderc=_dderc())
+        site = Site(state, comms_loss=comms)
+        await site.processor.process_controls("/derp/1")
+        comms.active = True
+        await site.processor.enter_comms_loss()
+
+        state.der_programs["/derp/1"].der_controls = [_derc(0x01, start=now - 10, current_status=2)]
+        await site.processor.process_controls("/derp/1")
+
+        assert site.transitions()[-2:] == [
+            (HEX_1, "active", "opted_out"),
+            (HEX_1, "opted_out", "cancelled"),
+        ]
+        await site.processor.shutdown()
+
+    @pytest.mark.asyncio
     async def test_a_repoll_of_an_unchanged_event_emits_nothing(self):
         now = int(time.time())
         site = Site(_state([_derc(0x01, start=now + 100)]))
@@ -682,6 +730,22 @@ class TestCommsLossRecords:
         assert (record["elapsed_seconds"], record["threshold"]) == (1000, 900)
         assert record["simulated"] is False
         assert record["opted_out_mrids"] == [HEX_1]
+
+    @pytest.mark.asyncio
+    async def test_entry_is_timed_when_flagged_not_when_the_fallbacks_finish(self):
+        client, forwarder = self._client()
+        clock = [5000.0]
+        client._timebase.now = lambda *_a, **_k: clock[0]  # type: ignore[method-assign]
+
+        async def slow_fleet() -> list[bytes]:
+            clock[0] += 120.0
+            return []
+
+        with patch.object(client._event_processor, "enter_comms_loss", side_effect=slow_fleet):
+            await client._enter_comms_loss(1000)
+
+        (record,) = forwarder.audit_records("comms_loss")
+        assert record["at"] == 5000.0
 
     @pytest.mark.asyncio
     async def test_clear_reports_the_resume_boundary(self):
@@ -758,6 +822,42 @@ class TestSequence:
 
         assert manager.get_statistics()["events_dropped_not_running"] == 1
         assert [r["seq"] for r in recording.audit_records()] == [2]
+
+    @pytest.mark.asyncio
+    async def test_a_forwarder_whose_broker_was_down_counts_what_it_missed(self):
+        """The manager runs while a forwarder it holds failed to start. What
+        that forwarder would have silently dropped is counted against it."""
+
+        class Unreachable(RecordingForwarder):
+            name = "unreachable"
+            fail = True
+
+            async def start(self) -> None:
+                if self.fail:
+                    raise ConnectionRefusedError("broker down")
+
+            async def stop(self) -> None:
+                pass
+
+        down = Unreachable()
+        manager = ForwarderManager()
+        manager.add_forwarder(down)  # type: ignore[arg-type]
+        await manager.start()
+        emitter = AuditEmitter(manager, AuditConfig(enabled=True), sequence=AuditSequence())
+
+        def entered() -> None:
+            emitter.comms_loss(
+                transition="entered", elapsed_seconds=1, threshold=1, simulated=False, at=0.0
+            )
+
+        entered()
+        down.fail = False
+        await manager.retry_failed()
+        entered()
+
+        stats = manager.get_statistics()
+        assert stats["events_dropped_by_failed_forwarder"] == {"unreachable": 1}
+        assert [r["seq"] for r in down.audit_records()] == [2]
 
     def test_a_full_queue_drops_and_counts_and_leaves_a_gap(self):
         forwarder = MQTTForwarder(MQTTForwarderConfig(endpoint="broker", port=1883), queue_size=2)
