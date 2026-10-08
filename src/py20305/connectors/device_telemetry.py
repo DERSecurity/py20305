@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from py20305.forwarders.audit import PROCESS_SEQUENCE, AuditSequence, mrid_hex
+from py20305.forwarders.audit import AuditSequence, mrid_hex
 from py20305.forwarders.base import EventFrame
 from py20305.forwarders.config import PROTOCOL_MESSAGE_TOPIC_SUFFIX, AuditConfig
 from py20305.forwarders.types import (
@@ -185,12 +185,13 @@ class DeviceTelemetryEmitter:
             client_id: Identifier recorded as the forwarding system.
             audit: The audit trail switch. When on, writes are published even
                 with telemetry off, and each carries a ``boot_id`` and ``seq``.
-            sequence: The audit counter. Defaults to the process's own.
+            sequence: The audit counter. Defaults to one of its own; pass the
+                client's (``client.audit.sequence``) to share its stream.
         """
         self._forwarder = forwarder
         self._config = config
         self._audit = audit if audit is not None else AuditConfig()
-        self._sequence = sequence if sequence is not None else PROCESS_SEQUENCE
+        self._sequence = sequence if sequence is not None else AuditSequence()
         self._forwarder_id = client_id or ""
         #: The client's own advertised host, used as the endpoint on
         #: whichever side of the exchange it sits. Empty until configured.
@@ -229,6 +230,7 @@ class DeviceTelemetryEmitter:
         client_id: str | None = None,
         source_host: str | None = None,
         audit: AuditConfig | None = None,
+        sequence: AuditSequence | None = None,
     ) -> None:
         """Apply operator configuration after construction.
 
@@ -238,10 +240,15 @@ class DeviceTelemetryEmitter:
             source_host: The client's own advertised host, reported as its
                 endpoint on whichever side of the exchange it sits.
             audit: The audit trail switch. Left as it was when omitted.
+            sequence: The client's audit counter (``client.audit.sequence``),
+                so writes number in the same stream as its lifecycle records.
+                Left as it was when omitted.
         """
         self._config = config
         if audit is not None:
             self._audit = audit
+        if sequence is not None:
+            self._sequence = sequence
         if client_id is not None:
             self._forwarder_id = client_id
         if source_host is not None:

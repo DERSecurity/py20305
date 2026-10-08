@@ -331,6 +331,9 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
     if config.forwarders is not None:
         client.audit.attach_forwarder(forwarder)
         client.audit.configure(config.forwarders.audit, client_id=own_lfdi)
+        if telemetry is not None:
+            # One counter for the client's writes and its lifecycle records.
+            telemetry.configure(config.forwarders.device_telemetry, sequence=client.audit.sequence)
 
     # Connection telemetry: the client's own connection outcomes, on their own
     # topic. Attached through the observer seam so the client stays ignorant

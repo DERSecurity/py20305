@@ -17,6 +17,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # transport.
 PROTOCOL_MESSAGE_TOPIC_SUFFIX = "out/2030-5-raw"
 
+#: Topic measured device state is published on, relative to the topic base.
+TELEMETRY_TOPIC_SUFFIX = "out/telemetry"
+
 
 class _StrictForwarderModel(BaseModel):
     """Base for the forwarder models: an unknown key is an error.
@@ -291,6 +294,7 @@ class ForwarderConfig(_StrictForwarderModel):
             "protocol messages": PROTOCOL_MESSAGE_TOPIC_SUFFIX,
             "device_telemetry": self.device_telemetry.topic_suffix or PROTOCOL_MESSAGE_TOPIC_SUFFIX,
             "connection_telemetry": self.connection_telemetry.topic_suffix,
+            "measured device state": TELEMETRY_TOPIC_SUFFIX,
         }
         for name, other in others.items():
             if topic == other:

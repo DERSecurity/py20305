@@ -22,7 +22,7 @@ from py20305.forwarders.base import (
     MessageFrame,
     TelemetryFrame,
 )
-from py20305.forwarders.config import PROTOCOL_MESSAGE_TOPIC_SUFFIX
+from py20305.forwarders.config import PROTOCOL_MESSAGE_TOPIC_SUFFIX, TELEMETRY_TOPIC_SUFFIX
 
 if TYPE_CHECKING:
     from py20305.forwarders.config import MQTTForwarderConfig
@@ -402,7 +402,7 @@ class MQTTForwarder(AbstractForwarder):
         # Its own topic rather than a shared one with a type marker inside: a
         # subscriber that wants only measurements, or only capture, should be able
         # to say so at the broker instead of filtering every message on arrival.
-        telemetry_topic = f"{self._config.topic_base}/out/telemetry"
+        telemetry_topic = f"{self._config.topic_base}/{TELEMETRY_TOPIC_SUFFIX}"
 
         while self._running or self._buffered():
             try:

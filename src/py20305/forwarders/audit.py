@@ -12,9 +12,9 @@ index stores every field as a field and an audit query hits one small index.
 
 Delivery is best-effort, as for every stream on this transport. What this
 module adds is the ability to tell a complete trail from an incomplete one:
-every record carries ``boot_id`` and ``seq``, one counter per process shared
-with the device-write records, so a gap in ``seq`` marks a lost record and a
-new ``boot_id`` marks a restart.
+every record carries ``boot_id`` and ``seq``, one counter per client shared
+with that client's device-write records, so a gap in ``seq`` marks a lost
+record and a new ``boot_id`` marks a restart.
 
 Nothing here may raise into event processing. A trail that can stop a control
 from being applied is worse than no trail.
@@ -49,11 +49,22 @@ def mrid_hex(mrid: bytes | None) -> str | None:
     return mrid.hex().upper() if mrid is not None else None
 
 
-class AuditSequence:
-    """The process's audit counter: a random ``boot_id`` and a rising ``seq``.
+def _lfdi(value: str) -> str:
+    """An LFDI as lowercase hex, whatever case the host or the server used.
 
-    One instance per process is the point -- the device-write and lifecycle
-    records share it, so a single gap check covers both streams.
+    The records join on these, so two spellings of one device would read as two
+    devices.
+    """
+    return value.lower()
+
+
+class AuditSequence:
+    """One client's audit counter: a random ``boot_id`` and a rising ``seq``.
+
+    Shared by that client's device-write and lifecycle records, so a single gap
+    check covers both streams. One per client rather than per process: two
+    clients interleaving on one counter would each show a gap at every other
+    record, which reads as loss.
     """
 
     def __init__(self) -> None:
@@ -65,11 +76,6 @@ class AuditSequence:
     def stamp(self) -> dict[str, Any]:
         """The next ``boot_id`` and ``seq`` pair. Each call consumes a number."""
         return {"boot_id": self.boot_id, "seq": next(self._counter)}
-
-
-#: The process-wide sequence. Emitters use it unless handed another, which
-#: only tests do.
-PROCESS_SEQUENCE = AuditSequence()
 
 
 class AuditEmitter:
@@ -94,7 +100,7 @@ class AuditEmitter:
         self._forwarder = forwarder
         self._config = config if config is not None else AuditConfig()
         self._client_id = client_id or ""
-        self._sequence = sequence if sequence is not None else PROCESS_SEQUENCE
+        self._sequence = sequence if sequence is not None else AuditSequence()
         #: Records that failed to build or queue, by kind. A trail that
         #: stopped working must not look like a client with nothing to report.
         self.emit_failures: dict[str, int] = {}
@@ -103,6 +109,12 @@ class AuditEmitter:
     def enabled(self) -> bool:
         """Whether records will actually be published."""
         return self._config.enabled and self._forwarder is not None
+
+    @property
+    def sequence(self) -> AuditSequence:
+        """This client's counter. Hand it to the client's device telemetry
+        emitter so device writes number in the same stream."""
+        return self._sequence
 
     def attach_forwarder(self, forwarder: ForwarderManager | None) -> None:
         """Point the emitter at the transport once one exists."""
@@ -139,14 +151,18 @@ class AuditEmitter:
             program_href: The program the event belongs to.
             from_state: The state before, or ``None`` for an event first seen.
             to_state: ``scheduled``, ``active``, ``completed``, ``cancelled``,
-                ``superseded`` or ``opted_out``.
+                ``superseded``, ``opted_out``, ``expired`` (already over when
+                first received) or ``skipped`` (inside a loss-of-communications
+                window the client opted out of).
             effective_start: Start after randomization, epoch seconds.
             effective_duration: Duration after randomization, seconds.
             primacy: The program's primacy.
             lfdis: The devices the event targets.
             at: When the transition happened, on the server's timebase.
-            applied_lfdis: On ``active``, the devices the control reached.
-            rejected_lfdis: On ``active``, the devices that refused it.
+            applied_lfdis: On ``active``, the devices whose dispatch returned
+                without error -- what was reported to the server as started.
+            rejected_lfdis: On ``active``, the devices whose dispatch failed or
+                missed the activation deadline.
             superseded_by: On ``superseded``, the superseding event.
             superseded_lfdis: On a partial supersession, the devices it covers.
             superseded_modes: On a partial supersession, the modes per device.
@@ -163,20 +179,20 @@ class AuditEmitter:
                 "effective_start": effective_start,
                 "effective_duration": effective_duration,
                 "primacy": primacy,
-                "lfdis": sorted(lfdis),
+                "lfdis": sorted(_lfdi(x) for x in lfdis),
                 "at": at,
             }
             if applied_lfdis is not None:
-                record["applied_lfdis"] = sorted(applied_lfdis)
+                record["applied_lfdis"] = sorted(_lfdi(x) for x in applied_lfdis)
             if rejected_lfdis is not None:
-                record["rejected_lfdis"] = sorted(rejected_lfdis)
+                record["rejected_lfdis"] = sorted(_lfdi(x) for x in rejected_lfdis)
             if superseded_by is not None:
                 record["superseded_by"] = mrid_hex(superseded_by)
             if superseded_lfdis is not None:
-                record["superseded_lfdis"] = sorted(superseded_lfdis)
+                record["superseded_lfdis"] = sorted(_lfdi(x) for x in superseded_lfdis)
             if superseded_modes is not None:
                 record["superseded_modes"] = {
-                    dev: sorted(modes) for dev, modes in superseded_modes.items()
+                    _lfdi(dev): sorted(modes) for dev, modes in superseded_modes.items()
                 }
             self._publish(record)
         except Exception:
@@ -186,22 +202,29 @@ class AuditEmitter:
         self,
         *,
         transition: str,
-        elapsed_seconds: int,
         threshold: int,
         simulated: bool,
         at: float,
-        opted_out_mrids: list[bytes] | None = None,
+        elapsed_seconds: int | None = None,
+        duration_seconds: int | None = None,
         resume_after: int | None = None,
     ) -> None:
-        """Record entering or leaving loss-of-communications mode.
+        """Record a step into or out of loss-of-communications mode.
+
+        Published in the order things happen: ``entered`` before any event is
+        opted out, ``recovering`` once contact returns and before the schedule
+        is polled again, ``cleared`` once the mode ends. A recovery that fails
+        is retried, so ``recovering`` can repeat before one ``cleared``.
 
         Args:
-            transition: ``entered`` or ``cleared``.
-            elapsed_seconds: Upstream silence when the transition happened.
+            transition: ``entered``, ``recovering`` or ``cleared``.
             threshold: The configured silence threshold.
             simulated: Whether an operator-triggered simulation caused it.
             at: When it happened, on the server's timebase.
-            opted_out_mrids: On ``entered``, the events opted out.
+            elapsed_seconds: On ``entered``, how long the server had been
+                silent.
+            duration_seconds: On ``recovering`` and ``cleared``, how long the
+                client had been in the mode.
             resume_after: On ``cleared``, the epoch after which the schedule
                 resumes, when the opted-out window has not yet passed.
         """
@@ -211,20 +234,60 @@ class AuditEmitter:
             record: dict[str, Any] = {
                 "kind": "comms_loss",
                 "transition": transition,
-                "elapsed_seconds": elapsed_seconds,
                 "threshold": threshold,
                 "simulated": simulated,
                 "at": at,
             }
-            if opted_out_mrids is not None:
-                record["opted_out_mrids"] = sorted(
-                    h for h in (mrid_hex(m) for m in opted_out_mrids) if h is not None
-                )
+            if transition == "entered":
+                record["elapsed_seconds"] = elapsed_seconds
+            else:
+                record["duration_seconds"] = duration_seconds
             if transition == "cleared":
                 record["resume_after"] = resume_after
             self._publish(record)
         except Exception:
             self._failed("comms_loss")
+
+    def late_dispatch(
+        self,
+        *,
+        event_mrid: bytes,
+        lfdi: str,
+        applied: bool,
+        at: float,
+        error: str | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        """Record how a dispatch that missed the activation deadline ended.
+
+        The ``active`` record lists such a device as rejected, because that is
+        what the server was told. The apply carries on regardless, and this is
+        the record of whether it then reached the device.
+
+        Args:
+            event_mrid: The event whose control it was.
+            lfdi: The device, or its href where no LFDI is known.
+            applied: Whether the apply finished without error.
+            at: When it finished, on the server's timebase.
+            error: The failure, when it failed.
+            error_type: The failure's exception class name.
+        """
+        if not self.enabled:
+            return
+        try:
+            record: dict[str, Any] = {
+                "kind": "late_dispatch",
+                "event_mrid": mrid_hex(event_mrid),
+                "lfdi": _lfdi(lfdi),
+                "applied": applied,
+                "at": at,
+            }
+            if error is not None:
+                record["error"] = error[:512]
+                record["error_type"] = error_type
+            self._publish(record)
+        except Exception:
+            self._failed("late_dispatch")
 
     def _publish(self, record: dict[str, Any]) -> None:
         assert self._forwarder is not None  # guarded by `enabled`

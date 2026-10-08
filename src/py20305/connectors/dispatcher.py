@@ -297,6 +297,27 @@ class ConnectorDispatcher:
         if lfdi:
             if not self._gate.may_command(lfdi, origin):
                 self._report_not_commanding(lfdi, control, origin)
+                # Recorded as a write that did not happen: an event's activation
+                # still reports the device as started -- the refusal honors the
+                # configuration rather than failing the event -- so without this
+                # the trail would show a device as applied with nothing written.
+                if self._telemetry is not None:
+                    self._telemetry.record_write(
+                        label,
+                        control,
+                        params,
+                        connector=(
+                            connector
+                            if connector is not None
+                            else getattr(method, "__self__", None)
+                        ),
+                        lfdi=lfdi,
+                        error=f"{origin} does not hold the command role for this device",
+                        error_type="refused",
+                        origin=origin,
+                        applied_mrid=applied_mrid,
+                        cause_mrid=cause_mrid,
+                    )
                 return False
         else:
             # Deliberately ungated: authority is held per device, and there is no

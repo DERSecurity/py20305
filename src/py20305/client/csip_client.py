@@ -234,6 +234,9 @@ class CsipClient:
         #: Whether the current comms-loss episode was a simulation, so the
         #: clear record attributes it the same way the entry record did.
         self._comms_loss_simulated = False
+        #: Monotonic time the current comms-loss episode began, for how long it
+        #: lasted. Monotonic because the server timebase can move under it.
+        self._comms_loss_entered_monotonic: float | None = None
         self._event_processor = EventProcessor(
             self._http,
             self._state,
@@ -665,18 +668,23 @@ class CsipClient:
         )
         logger.warning("Entering loss-of-communications mode (silent for %ds)", elapsed)
         self._comms_loss_simulated = simulated
-        # Taken before the fallbacks run: reverting a large fleet takes time,
-        # and the mode was entered when it was flagged, not when that finished.
-        entered_at = self._timebase.now()
-        opted_out = await self._event_processor.enter_comms_loss()
+        self._comms_loss_entered_monotonic = time.monotonic()
+        # Recorded before any event is opted out, so the record that explains
+        # the opt-outs and the fallback writes comes ahead of them in the trail,
+        # and is not lost if reverting the fleet fails part way.
         self._audit.comms_loss(
             transition="entered",
             elapsed_seconds=elapsed,
             threshold=self._comms_loss_seconds,
             simulated=simulated,
-            at=entered_at,
-            opted_out_mrids=opted_out,
+            at=self._timebase.now(),
         )
+        await self._event_processor.enter_comms_loss()
+
+    def _comms_loss_duration(self) -> int:
+        """Whole seconds in loss-of-communications mode so far, or 0 if unknown."""
+        started = self._comms_loss_entered_monotonic
+        return int(time.monotonic() - started) if started is not None else 0
 
     async def _recover_from_comms_loss(self) -> None:
         """Recover once communications are restored.
@@ -686,6 +694,15 @@ class CsipClient:
         opted-out event via the resume-after boundary, then clears the mode.
         """
         logger.info("Communications restored -- recovering from loss-of-communications mode")
+        # Before the re-poll, whose records it explains. Repeats if this
+        # recovery fails and the next probe tick tries again.
+        self._audit.comms_loss(
+            transition="recovering",
+            duration_seconds=self._comms_loss_duration(),
+            threshold=self._comms_loss_seconds,
+            simulated=self._comms_loss_simulated,
+            at=self._timebase.now(),
+        )
         # 1. In-band self-reregistration, only when the server no longer
         #    lists our EndDevice: some head-ends remove EndDevices during an
         #    outage and expect re-registration, while others retain them and
@@ -731,15 +748,15 @@ class CsipClient:
         boundary = self._comms_loss.resume_after_epoch
         if boundary is not None and int(self._timebase.now()) > boundary:
             self._comms_loss.resume_after_epoch = None
-        lce = self._http.last_contact_epoch
         self._audit.comms_loss(
             transition="cleared",
-            elapsed_seconds=int(time.time() - lce) if lce is not None else 0,
+            duration_seconds=self._comms_loss_duration(),
             threshold=self._comms_loss_seconds,
             simulated=self._comms_loss_simulated,
             at=self._timebase.now(),
             resume_after=self._comms_loss.resume_after_epoch,
         )
+        self._comms_loss_entered_monotonic = None
         logger.info(
             "Loss-of-communications mode cleared%s",
             (
