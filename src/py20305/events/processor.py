@@ -39,7 +39,7 @@ from py20305.json_form import (
     serialize_default_der_control,
     serialize_der_control,
 )
-from py20305.models.sep.sep import Dercontrol1
+from py20305.models.sep.sep import DefaultDercontrol, Dercontrol1
 
 logger = logging.getLogger(__name__)
 
@@ -1239,11 +1239,19 @@ class EventProcessor:
         # Cache the lookup per target so a mid-await groups rebuild can't
         # change the fan-out width between the build and attribution loops.
         if dderc_targets:
-            # default_dercontrol is guaranteed non-None by _best_dderc_program_for_device
-            plans: list[tuple[str, bytes, DerProgramState, list[str] | None]] = [
-                (dev_href, lfdi, best_prog, self._group_local_lfdis(best_prog.href))
-                for dev_href, lfdi, best_prog in dderc_targets
-            ]
+            plans: list[
+                tuple[str, bytes, DerProgramState, list[str] | None, DefaultDercontrol]
+            ] = []
+            for dev_href, lfdi, best_prog in dderc_targets:
+                # Taken before any await, and both sent and recorded from here.
+                # A refresh during dispatch can replace the program's default,
+                # and recording the replacement would have the next pass skip a
+                # default the device never received.
+                dderc = best_prog.default_dercontrol
+                assert dderc is not None  # guaranteed by _best_dderc_program_for_device
+                plans.append(
+                    (dev_href, lfdi, best_prog, self._group_local_lfdis(best_prog.href), dderc)
+                )
             # Both reasons land on the same DDERC write, and they read very
             # differently in an audit trail: "an event ended so the default came
             # back" versus "the upstream went away so we fell to the planning
@@ -1253,12 +1261,12 @@ class EventProcessor:
                 CommandOrigin.COMMS_LOSS if self._comms_loss.active else CommandOrigin.DDERC_REAPPLY
             )
             coros: list[Coroutine[Any, Any, None]] = []
-            for dev_href, _, best_prog, local_lfdis in plans:
+            for dev_href, _, best_prog, local_lfdis, dderc in plans:
                 if local_lfdis is not None:
                     coros.extend(
                         self._dispatcher.apply_default_control_by_lfdi(
                             lfdi,
-                            best_prog.default_dercontrol,  # type: ignore[arg-type]
+                            dderc,
                             best_prog.der_curves,
                             origin=origin,
                         )
@@ -1268,7 +1276,7 @@ class EventProcessor:
                     coros.append(
                         self._dispatcher.apply_default_control(
                             dev_href,
-                            best_prog.default_dercontrol,  # type: ignore[arg-type]
+                            dderc,
                             best_prog.der_curves,
                             origin=origin,
                         )
@@ -1279,7 +1287,7 @@ class EventProcessor:
             # per dderc_target); collapse per-fan-out results down to one
             # success per target so the tracker isn't double-recorded.
             idx = 0
-            for dev_href, lfdi, best_prog, local_lfdis in plans:
+            for dev_href, lfdi, best_prog, local_lfdis, dderc in plans:
                 n = len(local_lfdis) if local_lfdis is not None else 1
                 target_results = results[idx : idx + n]
                 idx += n
@@ -1294,8 +1302,11 @@ class EventProcessor:
                         failure,
                     )
                 else:
+                    # The default's mRID, not the ended event's: the
+                    # initial-default pass compares against it to skip a
+                    # default that is already in place.
                     self._dderc_tracker.record_application(
-                        lfdi, best_prog.href, record.mrid, best_prog.primacy
+                        lfdi, best_prog.href, dderc.m_rid.value, best_prog.primacy
                     )
 
         if clear_targets:

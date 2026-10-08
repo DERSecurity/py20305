@@ -684,6 +684,73 @@ class TestProcessControlsDdercFallback:
         await proc.shutdown()
 
     @pytest.mark.asyncio
+    async def test_the_next_poll_does_not_write_the_fallback_default_again(
+        self, shutdown: asyncio.Event
+    ):
+        """The fallback records the default it applied, so the initial-default
+        pass on the next poll sees it already in place. Recording the ended
+        event's mRID instead made the first poll after each event's end take
+        the default for a new one and write it to the device a second time.
+        """
+        now = int(time.time())
+        derc = _make_derc(0x01, start=now - 3600, duration=3610)
+        state = _setup_state(der_controls=[derc], dderc=_make_dderc())
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, shutdown)
+        await proc.process_controls("/derp/1")
+        await proc._on_completion(proc._store.get(derc.m_rid.value))
+        assert dispatcher.apply_default_control.await_count == 1
+
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/1")
+
+        assert dispatcher.apply_default_control.await_count == 1
+
+        # A default the server actually changed is still applied.
+        state.der_programs["/derp/1"].default_dercontrol = DefaultDercontrol(
+            m_rid=MRidtype(value=b"\x21" * 16), dercontrol_base=DercontrolBase()
+        )
+        await proc.process_controls("/derp/1")
+        assert dispatcher.apply_default_control.await_count == 2
+
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_default_replaced_during_the_fallback_is_still_applied(
+        self, shutdown: asyncio.Event
+    ):
+        """The tracker records the default that was sent, not the program's
+        default once dispatch returns. A refresh that replaces the default while
+        the fallback is in flight must leave the replacement to be applied."""
+        now = int(time.time())
+        derc = _make_derc(0x01, start=now - 3600, duration=3610)
+        state = _setup_state(der_controls=[derc], dderc=_make_dderc())
+        replacement = DefaultDercontrol(
+            m_rid=MRidtype(value=bytes([0x21]) * 16), dercontrol_base=DercontrolBase()
+        )
+        sent: list[bytes] = []
+
+        async def refreshed_mid_dispatch(_href, dderc, _curves, **_kw):
+            sent.append(dderc.m_rid.value)
+            state.der_programs["/derp/1"].default_dercontrol = replacement
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        dispatcher.apply_default_control.side_effect = refreshed_mid_dispatch
+        proc = EventProcessor(http, state, dispatcher, shutdown)
+        await proc.process_controls("/derp/1")
+        await proc._on_completion(proc._store.get(derc.m_rid.value))
+
+        await proc.process_controls("/derp/1")
+
+        assert sent == [bytes([0x20]) * 16, bytes([0x21]) * 16], "the replacement was never applied"
+
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
     async def test_no_dderc_does_not_clear_control(self, shutdown: asyncio.Event):
         """When no DDERC exists, the aggregator should not send any commands."""
         now = int(time.time())
