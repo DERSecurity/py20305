@@ -1294,8 +1294,14 @@ class EventProcessor:
                         failure,
                     )
                 else:
+                    # The default's mRID, not the ended event's: the
+                    # initial-default pass compares against it to skip a
+                    # default that is already in place.
                     self._dderc_tracker.record_application(
-                        lfdi, best_prog.href, record.mrid, best_prog.primacy
+                        lfdi,
+                        best_prog.href,
+                        best_prog.default_dercontrol.m_rid.value,  # type: ignore[union-attr]
+                        best_prog.primacy,
                     )
 
         if clear_targets:
