@@ -36,20 +36,27 @@ class ControlDispatcher(Protocol):
         curves: list[Dercurve1],
         *,
         origin: str = CommandOrigin.DDERC_REAPPLY,
+        cause_mrid: bytes | None = None,
     ) -> None:
         """Apply default DER control (DDERC fallback) to a device.
 
         ``origin`` says why the default is being applied -- an event ending and
         an upstream outage land on the same write and read very differently in
-        an audit trail.
+        an audit trail. ``cause_mrid`` names the event whose end brought the
+        default back, or ``None`` when no single event did.
         """
         ...
 
     async def clear_control(
         self,
         device_href: str,
+        *,
+        cause_mrid: bytes | None = None,
     ) -> None:
-        """Clear active control from a device."""
+        """Clear active control from a device.
+
+        ``cause_mrid`` names the event whose opt-out led to the clear.
+        """
         ...
 
     async def apply_control_by_lfdi(
@@ -73,6 +80,7 @@ class ControlDispatcher(Protocol):
         curves: list[Dercurve1],
         *,
         origin: str = CommandOrigin.DDERC_REAPPLY,
+        cause_mrid: bytes | None = None,
     ) -> None:
         """Apply DDERC directly to a device identified by LFDI."""
         ...
@@ -80,6 +88,8 @@ class ControlDispatcher(Protocol):
     async def clear_control_by_lfdi(
         self,
         lfdi: str,
+        *,
+        cause_mrid: bytes | None = None,
     ) -> None:
         """Clear active control from a device identified by LFDI.
 
@@ -122,12 +132,15 @@ class NullDispatcher:
         curves: list[Dercurve1],
         *,
         origin: str = CommandOrigin.DDERC_REAPPLY,
+        cause_mrid: bytes | None = None,
     ) -> None:
         pass
 
     async def clear_control(
         self,
         device_href: str,
+        *,
+        cause_mrid: bytes | None = None,
     ) -> None:
         pass
 
@@ -146,12 +159,15 @@ class NullDispatcher:
         curves: list[Dercurve1],
         *,
         origin: str = CommandOrigin.DDERC_REAPPLY,
+        cause_mrid: bytes | None = None,
     ) -> None:
         pass
 
     async def clear_control_by_lfdi(
         self,
         lfdi: str,
+        *,
+        cause_mrid: bytes | None = None,
     ) -> None:
         pass
 

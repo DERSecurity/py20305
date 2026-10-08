@@ -52,6 +52,7 @@ class ForwarderManager:
         self._client_lfdi: str | None = None
         self._forwarder_id: str | None = None
         self._source_host: str | None = None
+        self._events_dropped_not_running = 0
 
     @property
     def running(self) -> bool:
@@ -259,6 +260,9 @@ class ForwarderManager:
             event: Event frame to route
         """
         if not self._running:
+            # Counted: an audit consumer sees the loss as a sequence gap, and
+            # an operator needs a number on this side that explains it.
+            self._events_dropped_not_running += 1
             logger.debug("ForwarderManager not running, dropping event")
             return
 
@@ -291,6 +295,7 @@ class ForwarderManager:
             "running": self._running,
             "forwarder_count": len(self._forwarders),
             "client_lfdi": self._client_lfdi,
+            "events_dropped_not_running": self._events_dropped_not_running,
             "forwarders": {f.name: f.get_statistics() for f in self._forwarders},
         }
 

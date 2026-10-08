@@ -210,6 +210,9 @@ class ConnectorDispatcher:
             return
 
         label = lfdi or device_href or "<unknown>"
+        # An event's own activation: what was written and what caused it are
+        # the same event.
+        derc_mrid = derc.m_rid.value
         translations = translate_controls(derc.dercontrol_base, curves)
         logger.debug(
             "Applying control to %s via %s (%d mode(s))",
@@ -229,7 +232,14 @@ class ConnectorDispatcher:
             if method is not None:
                 logger.debug("  %s.%s(%s)", connector.connector_name, method_name, params)
                 await self._apply_one(
-                    method, method_name, params, lfdi=lfdi, origin=origin, label=label
+                    method,
+                    method_name,
+                    params,
+                    lfdi=lfdi,
+                    origin=origin,
+                    label=label,
+                    applied_mrid=derc_mrid,
+                    cause_mrid=derc_mrid,
                 )
             elif reason == BY_DESIGN:
                 # This connector has no register for the mode and never claimed
@@ -256,6 +266,8 @@ class ConnectorDispatcher:
         origin: str,
         label: str,
         connector: BaseConnector | None = None,
+        applied_mrid: bytes | None = None,
+        cause_mrid: bytes | None = None,
     ) -> bool:
         """Apply one translated mode and report it to the command observer.
 
@@ -312,11 +324,29 @@ class ConnectorDispatcher:
             # believe it succeeded, and that divergence is the point.
             if self._telemetry is not None:
                 self._telemetry.record_write(
-                    label, control, params, connector=connector, lfdi=lfdi, error=str(exc)
+                    label,
+                    control,
+                    params,
+                    connector=connector,
+                    lfdi=lfdi,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    origin=origin,
+                    applied_mrid=applied_mrid,
+                    cause_mrid=cause_mrid,
                 )
             raise
         if self._telemetry is not None:
-            self._telemetry.record_write(label, control, params, connector=connector, lfdi=lfdi)
+            self._telemetry.record_write(
+                label,
+                control,
+                params,
+                connector=connector,
+                lfdi=lfdi,
+                origin=origin,
+                applied_mrid=applied_mrid,
+                cause_mrid=cause_mrid,
+            )
         if lfdi:
             self._commands.record_command(lfdi, control, params, origin=origin, at=issued_at)
         else:
@@ -373,8 +403,13 @@ class ConnectorDispatcher:
         curves: list[Dercurve1],
         *,
         origin: str = CommandOrigin.DDERC_REAPPLY,
+        cause_mrid: bytes | None = None,
     ) -> None:
-        """Apply default DER control (DDERC fallback) to a device."""
+        """Apply default DER control (DDERC fallback) to a device.
+
+        ``cause_mrid`` names the event whose end brought the default back, for
+        the audit trail. ``None`` when no single event caused it.
+        """
         connector = await self._resolve_connector(device_href)
         await self._apply_default_control_to_connector(
             connector,
@@ -383,6 +418,7 @@ class ConnectorDispatcher:
             lfdi=self._lfdi_resolver(device_href),
             device_href=device_href,
             origin=origin,
+            cause_mrid=cause_mrid,
         )
 
     async def apply_default_control_by_lfdi(
@@ -392,11 +428,18 @@ class ConnectorDispatcher:
         curves: list[Dercurve1],
         *,
         origin: str = CommandOrigin.DDERC_REAPPLY,
+        cause_mrid: bytes | None = None,
     ) -> None:
         """Apply default DER control directly to a device identified by LFDI."""
         connector = await self._resolve_connector_by_lfdi(lfdi)
         await self._apply_default_control_to_connector(
-            connector, dderc, curves, lfdi=lfdi, device_href=None, origin=origin
+            connector,
+            dderc,
+            curves,
+            lfdi=lfdi,
+            device_href=None,
+            origin=origin,
+            cause_mrid=cause_mrid,
         )
 
     async def _apply_default_control_to_connector(
@@ -408,18 +451,27 @@ class ConnectorDispatcher:
         lfdi: str | None,
         device_href: str | None,
         origin: str = CommandOrigin.DDERC_REAPPLY,
+        cause_mrid: bytes | None = None,
     ) -> None:
         if connector is None:
             return
 
         label = lfdi or device_href or "<unknown>"
+        dderc_mrid = dderc.m_rid.value
         translations = translate_default_controls(dderc, curves)
         logger.debug("Applying DDERC fallback to %s (%d mode(s))", label, len(translations))
         for method_name, params in translations:
             method, reason = self._control_support(connector, method_name)
             if method is not None:
                 await self._apply_one(
-                    method, method_name, params, lfdi=lfdi, origin=origin, label=label
+                    method,
+                    method_name,
+                    params,
+                    lfdi=lfdi,
+                    origin=origin,
+                    label=label,
+                    applied_mrid=dderc_mrid,
+                    cause_mrid=cause_mrid,
                 )
             elif reason == BY_DESIGN:
                 # This connector has no register for the mode and never claimed
@@ -647,6 +699,8 @@ class ConnectorDispatcher:
     async def clear_control(
         self,
         device_href: str,
+        *,
+        cause_mrid: bytes | None = None,
     ) -> None:
         """Clear active control from a device by sending disable params.
 
@@ -659,12 +713,17 @@ class ConnectorDispatcher:
         logger.debug("Clearing all controls on %s", device_href)
         connector = await self._resolve_connector(device_href)
         await self._clear_control_on_connector(
-            connector, lfdi=self._lfdi_resolver(device_href), label=device_href
+            connector,
+            lfdi=self._lfdi_resolver(device_href),
+            label=device_href,
+            cause_mrid=cause_mrid,
         )
 
     async def clear_control_by_lfdi(
         self,
         lfdi: str,
+        *,
+        cause_mrid: bytes | None = None,
     ) -> None:
         """Clear active control from a device identified by LFDI.
 
@@ -674,7 +733,9 @@ class ConnectorDispatcher:
         """
         logger.debug("Clearing all controls on LFDI %s", lfdi)
         connector = await self._resolve_connector_by_lfdi(lfdi)
-        await self._clear_control_on_connector(connector, lfdi=lfdi, label=lfdi)
+        await self._clear_control_on_connector(
+            connector, lfdi=lfdi, label=lfdi, cause_mrid=cause_mrid
+        )
 
     async def _clear_control_on_connector(
         self,
@@ -682,6 +743,7 @@ class ConnectorDispatcher:
         *,
         lfdi: str | None = None,
         label: str = "",
+        cause_mrid: bytes | None = None,
     ) -> None:
         """Disable every active control on a device.
 
@@ -709,6 +771,7 @@ class ConnectorDispatcher:
                 # report as generic with no destination -- losing exactly the
                 # attribution this path most needs.
                 connector=connector,
+                cause_mrid=cause_mrid,
             )
             return
 
@@ -767,4 +830,5 @@ class ConnectorDispatcher:
                     lfdi=lfdi,
                     origin=CommandOrigin.COMMS_LOSS,
                     label=label,
+                    cause_mrid=cause_mrid,
                 )

@@ -202,6 +202,46 @@ class DeviceTelemetryConfig(_StrictForwarderModel):
         return cleaned
 
 
+class AuditConfig(_StrictForwarderModel):
+    """Configuration for the control audit trail.
+
+    One switch for both halves: device writes, enriched with what caused them,
+    and the event lifecycle and loss-of-communications records on their own
+    topic. Off by default, like the other telemetry streams.
+
+    Writes are published without the high-volume reads, so an operator can
+    keep an audit trail without turning on full device telemetry. With both on,
+    each write is still published once.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Whether to publish device writes with their cause, and event lifecycle "
+            "and loss-of-communications records"
+        ),
+    )
+    topic_suffix: str = Field(
+        default="out/der-events",
+        description=(
+            "Topic for lifecycle and loss-of-communications records, relative to the "
+            "forwarder topic base. Device writes stay on the device telemetry topic."
+        ),
+    )
+
+    @field_validator("topic_suffix")
+    @classmethod
+    def validate_topic_suffix(cls, v: str) -> str:
+        cleaned = v.strip().strip("/")
+        # An indexer that routes on the outbound prefix would not pick up a
+        # record published anywhere else, so the trail would be lost silently.
+        if not cleaned.startswith("out/") or cleaned == "out/":
+            raise ValueError("topic_suffix must start with 'out/' and name a topic under it")
+        if "+" in cleaned or "#" in cleaned:
+            raise ValueError("topic_suffix must not contain the MQTT wildcards '+' or '#'")
+        return cleaned
+
+
 class ForwarderConfig(_StrictForwarderModel):
     """Top-level forwarder configuration.
 
@@ -234,6 +274,31 @@ class ForwarderConfig(_StrictForwarderModel):
         default_factory=DeviceTelemetryConfig,
         description="Reporting of southbound device reads and writes",
     )
+    audit: AuditConfig = Field(
+        default_factory=AuditConfig,
+        description="Control audit trail: enriched device writes and event lifecycle records",
+    )
+
+    @model_validator(mode="after")
+    def validate_audit_topic_is_its_own(self) -> ForwarderConfig:
+        """Keep the lifecycle records off every other stream's topic.
+
+        Checked whether or not the other streams are enabled: turning one on
+        later must not quietly start mixing two payload shapes on one topic.
+        """
+        topic = self.audit.topic_suffix
+        others = {
+            "protocol messages": PROTOCOL_MESSAGE_TOPIC_SUFFIX,
+            "device_telemetry": self.device_telemetry.topic_suffix or PROTOCOL_MESSAGE_TOPIC_SUFFIX,
+            "connection_telemetry": self.connection_telemetry.topic_suffix,
+        }
+        for name, other in others.items():
+            if topic == other:
+                raise ValueError(
+                    f"audit.topic_suffix {topic!r} is also the {name} topic; "
+                    "lifecycle records need a topic of their own"
+                )
+        return self
 
     @model_validator(mode="after")
     def validate_telemetry_topics_differ(self) -> ForwarderConfig:

@@ -27,8 +27,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from py20305.forwarders.audit import PROCESS_SEQUENCE, AuditSequence, mrid_hex
 from py20305.forwarders.base import EventFrame
-from py20305.forwarders.config import PROTOCOL_MESSAGE_TOPIC_SUFFIX
+from py20305.forwarders.config import PROTOCOL_MESSAGE_TOPIC_SUFFIX, AuditConfig
 from py20305.forwarders.types import (
     NetworkEndpoint,
     Protocol,
@@ -173,6 +174,8 @@ class DeviceTelemetryEmitter:
         config: DeviceTelemetryConfig,
         *,
         client_id: str | None = None,
+        audit: AuditConfig | None = None,
+        sequence: AuditSequence | None = None,
     ) -> None:
         """Create an emitter.
 
@@ -180,9 +183,14 @@ class DeviceTelemetryEmitter:
             forwarder: Where events go. ``None`` disables emission.
             config: Whether telemetry is on, and its topic.
             client_id: Identifier recorded as the forwarding system.
+            audit: The audit trail switch. When on, writes are published even
+                with telemetry off, and each carries a ``boot_id`` and ``seq``.
+            sequence: The audit counter. Defaults to the process's own.
         """
         self._forwarder = forwarder
         self._config = config
+        self._audit = audit if audit is not None else AuditConfig()
+        self._sequence = sequence if sequence is not None else PROCESS_SEQUENCE
         self._forwarder_id = client_id or ""
         #: The client's own advertised host, used as the endpoint on
         #: whichever side of the exchange it sits. Empty until configured.
@@ -193,8 +201,17 @@ class DeviceTelemetryEmitter:
 
     @property
     def enabled(self) -> bool:
-        """Whether events will actually be emitted."""
+        """Whether device reads will actually be emitted."""
         return self._config.enabled and self._forwarder is not None
+
+    @property
+    def writes_enabled(self) -> bool:
+        """Whether device writes will actually be emitted.
+
+        The audit trail needs the writes without the reads, which are the
+        high-volume half, so either switch publishes writes.
+        """
+        return (self._config.enabled or self._audit.enabled) and self._forwarder is not None
 
     def attach_forwarder(self, forwarder: ForwarderManager | None) -> None:
         """Point the emitter at the transport once one exists.
@@ -211,6 +228,7 @@ class DeviceTelemetryEmitter:
         *,
         client_id: str | None = None,
         source_host: str | None = None,
+        audit: AuditConfig | None = None,
     ) -> None:
         """Apply operator configuration after construction.
 
@@ -219,8 +237,11 @@ class DeviceTelemetryEmitter:
             client_id: Identifier recorded as the forwarding system.
             source_host: The client's own advertised host, reported as its
                 endpoint on whichever side of the exchange it sits.
+            audit: The audit trail switch. Left as it was when omitted.
         """
         self._config = config
+        if audit is not None:
+            self._audit = audit
         if client_id is not None:
             self._forwarder_id = client_id
         if source_host is not None:
@@ -243,9 +264,10 @@ class DeviceTelemetryEmitter:
             connector: The connector the read went through, for its address.
             lfdi: The device's LFDI when one is known.
         """
-        if not values:
-            # Nothing was read. An empty envelope would be indistinguishable
-            # from a device reporting all-zero, which is a real reading.
+        if not values or not self.enabled:
+            # Nothing was read, or reads are not being reported. An empty
+            # envelope would be indistinguishable from a device reporting
+            # all-zero, which is a real reading.
             return
         self._emit(
             device=device,
@@ -264,6 +286,10 @@ class DeviceTelemetryEmitter:
         connector: object = None,
         lfdi: str | None = None,
         error: str | None = None,
+        error_type: str | None = None,
+        origin: str | None = None,
+        applied_mrid: bytes | None = None,
+        cause_mrid: bytes | None = None,
     ) -> None:
         """Report one control written to a device.
 
@@ -279,12 +305,31 @@ class DeviceTelemetryEmitter:
             connector: The connector the write went through, for its address.
             lfdi: The device's LFDI when one is known.
             error: The failure reason, when the write was rejected.
+            error_type: The failure's exception class name.
+            origin: Who issued the write, e.g. ``"ieee2030_5"``.
+            applied_mrid: The mRID of the control written, when it was a
+                DERControl or DefaultDERControl.
+            cause_mrid: The event whose lifecycle produced the write: the event
+                itself on activation, the event that ended on a fallback.
         """
+        if not self.writes_enabled:
+            return
         body: dict[str, Any] = {
             "control": control,
             "params": dict(params),
             "operation": "write",
         }
+        if error_type is not None:
+            body["error_type"] = error_type
+        # Indexed fields rather than body text: the body travels as one string,
+        # and these are what an audit query joins on.
+        extra: dict[str, Any] = {}
+        if origin is not None:
+            extra["origin"] = str(origin)
+        if applied_mrid is not None:
+            extra["applied_mrid"] = mrid_hex(applied_mrid)
+        if cause_mrid is not None:
+            extra["cause_mrid"] = mrid_hex(cause_mrid)
         # Bounded once, then used everywhere the text appears. The envelope
         # carries it in two places, and capping only one of them leaves the
         # device able to put an arbitrarily long string on the wire through the
@@ -300,6 +345,7 @@ class DeviceTelemetryEmitter:
             lfdi=lfdi,
             is_valid=error is None,
             validation_error=bounded,
+            extra=extra,
         )
 
     def _client_side(self) -> NetworkEndpoint:
@@ -322,6 +368,7 @@ class DeviceTelemetryEmitter:
         lfdi: str | None,
         is_valid: bool = True,
         validation_error: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         """Build the envelope and hand it to the transport.
 
@@ -332,10 +379,13 @@ class DeviceTelemetryEmitter:
         Putting the device in ``source`` for both would tell a collector that
         the inverter issued the command.
         """
-        if not self.enabled or self._forwarder is None:
+        if self._forwarder is None:
             return
         try:
             device_ep = device_endpoint(connector)
+            metadata: dict[str, Any] = {"device": device, **(extra or {})}
+            if direction is WireDirection.DOWNSTREAM and self._audit.enabled:
+                metadata.update(self._sequence.stamp())
 
             if direction is WireDirection.UPSTREAM:
                 # The device initiated nothing, but the data came from it. The
@@ -360,7 +410,7 @@ class DeviceTelemetryEmitter:
                 protocol_data=ProtocolMetadata(
                     lfdi=lfdi,
                     message_type=body.get("operation"),
-                    extra={"device": device},
+                    extra=metadata,
                 ),
                 is_valid=is_valid,
                 validation_error=validation_error,

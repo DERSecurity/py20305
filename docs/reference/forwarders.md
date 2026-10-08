@@ -10,6 +10,8 @@ Publishing captured protocol exchanges to a monitoring system.
 
 ::: py20305.forwarders.connection_telemetry
 
+::: py20305.forwarders.audit
+
 ::: py20305.forwarders.ocsf
 
 ::: py20305.client.observer

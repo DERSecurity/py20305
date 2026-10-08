@@ -165,6 +165,128 @@ assign it to `Sep2Client.connection_observer` -- or implement
 `py20305.client.observer.ConnectionObserver` to route outcomes anywhere
 else.
 
+## The control audit trail
+
+The streams above record what the server said and what reached each device.
+The audit trail records what the client decided in between, and links the two:
+which event a write carried out, when each event was scheduled, went active,
+ended or was opted out, and when the client stopped acting on the server
+because the server went quiet.
+
+```yaml
+forwarders:
+  mqtt:
+    endpoint: broker.example.com
+  audit:
+    enabled: true
+```
+
+Off by default. Like the other telemetry streams it rides the forwarder's
+transport, so the `mqtt` block is required.
+
+One switch publishes two things:
+
+| `audit` | `device_telemetry` | Reads | Writes | Lifecycle records |
+|---|---|---|---|---|
+| off | off | no | no | no |
+| off | on | yes | yes, with cause fields | no |
+| on | off | no | yes, with cause fields and sequence | yes |
+| on | on | yes | yes, once, with cause fields and sequence | yes |
+
+### Writes
+
+Writes stay on the device telemetry topic. Whichever switch publishes them,
+each write's `protocol_data.extra` carries, next to `device`:
+
+- `origin`: who issued the write: `ieee2030_5` for an event,
+  `dderc_reapply` for a DefaultDERControl, `comms_loss` for a write made
+  because the server went quiet, or the host application's own origin for a
+  write it issued.
+- `applied_mrid`: the mRID of the DERControl or DefaultDERControl written.
+  Absent for a clear and for a write the host application issued directly.
+- `cause_mrid`: the event whose lifecycle produced the write: the event itself
+  when it activates, and the event that ended, was cancelled or was opted out
+  when its devices fall back to their default or are cleared. Absent when no
+  single event caused the write.
+
+mRIDs are uppercase hex, the form the `mRID` element takes on the wire. A
+rejected write also carries `error_type`, the exception's class name, in its
+body beside `error`. These fields sit in `protocol_data.extra` rather than in
+the body because the body travels as one string, and a search index can only
+query the fields of the envelope.
+
+### Lifecycle records
+
+Published as flat JSON documents on their own topic, `out/der-events` under
+the forwarder's topic base by default. `topic_suffix` moves it; the
+configuration requires it to start with `out/`, rejects the MQTT wildcards,
+and rejects any topic another stream uses.
+
+An event record is published once per transition, never per poll:
+
+```json
+{
+  "kind": "der_event", "schema": 1,
+  "event_mrid": "0A1B...", "program_href": "/derp/1",
+  "from_state": "scheduled", "to_state": "active",
+  "effective_start": 1760000000, "effective_duration": 3600,
+  "primacy": 1, "lfdis": ["..."], "at": 1760000002.5,
+  "applied_lfdis": ["..."], "rejected_lfdis": [],
+  "client_id": "...", "boot_id": "...", "seq": 42
+}
+```
+
+- `to_state` is `scheduled`, `active`, `completed`, `cancelled`,
+  `superseded` or `opted_out`. `from_state` is `null` for an event first seen
+  already in that state.
+- `effective_start` and `effective_duration` are after randomization, and
+  `at` is on the server's timebase.
+- An `active` record is published once dispatch has finished, so
+  `applied_lfdis` and `rejected_lfdis` are final.
+- A `superseded` record carries `superseded_by`. When the supersession covers
+  only some devices or modes, it also carries `superseded_lfdis` and
+  `superseded_modes`, and the event keeps running in `from_state` on the rest.
+
+A DefaultDERControl is not an event and produces no lifecycle record; its
+writes carry `origin: dderc_reapply` and the `cause_mrid` of the event that
+ended.
+
+A loss-of-communications record is published on entering and on leaving the
+mode:
+
+```json
+{
+  "kind": "comms_loss", "schema": 1, "transition": "entered",
+  "elapsed_seconds": 905, "threshold": 900, "simulated": false,
+  "opted_out_mrids": ["0A1B..."], "at": 1760000000.0,
+  "client_id": "...", "boot_id": "...", "seq": 43
+}
+```
+
+A `cleared` record carries `resume_after` instead of `opted_out_mrids`: the
+epoch after which the schedule resumes, or `null` when the opted-out window has
+already passed.
+
+### Telling a complete trail from an incomplete one
+
+Delivery is best-effort, as for every stream on this transport: a full queue
+drops its oldest entry, and a stopped forwarder drops what it is given. Both
+are counted in the forwarder's statistics (`messages_dropped`,
+`events_dropped_not_running`).
+
+Every audit record, and every write while `audit` is on, carries `boot_id`, a
+random identifier per process start, and `seq`, one counter per process across
+both streams. A gap in `seq` within a `boot_id` marks a lost record, and a new
+`boot_id` marks a restart.
+
+Nothing in the trail can stop a control: a failure building or queueing a
+record is logged once and counted, and event processing carries on.
+
+Embedders not using the runner configure the client's emitter themselves:
+`client.audit.attach_forwarder(manager)` and
+`client.audit.configure(config.forwarders.audit)`, and pass the same `audit`
+section to the `DeviceTelemetryEmitter`.
+
 ## Measured device state
 
 A third payload kind rides the same transport: `TelemetryFrame`, a device's

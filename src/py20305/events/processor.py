@@ -35,6 +35,7 @@ from py20305.events.response import (
 from py20305.events.state_machine import EventRecord, EventState, EventStore
 from py20305.events.supersession import compute_supersession
 from py20305.events.timers import EventTimerManager
+from py20305.forwarders.audit import AuditEmitter
 from py20305.json_form import (
     serialize_default_der_control,
     serialize_der_control,
@@ -122,6 +123,7 @@ class EventProcessor:
         group_lookup: Callable[[str], list[str] | None] | None = None,
         comms_loss: CommsLossState | None = None,
         timebase: ServerTimebase | None = None,
+        audit: AuditEmitter | None = None,
     ) -> None:
         # ``group_lookup`` is an optional fan-out hook, unset by default.
         # Given a server-side program href, it returns the list of local
@@ -141,6 +143,10 @@ class EventProcessor:
         # timer firing, response timestamps). The default identity instance
         # behaves exactly like the local clock.
         self._timebase = timebase or ServerTimebase()
+        # Lifecycle records for the audit trail. Disabled until the host
+        # configures it, so every call below is a no-op by default.
+        self._audit = audit if audit is not None else AuditEmitter()
+        self._audit_failures = 0
         self._store = EventStore()
         self._rand_cache = RandomizationCache()
         self._response_tracker = ResponseTracker()
@@ -333,6 +339,7 @@ class EventProcessor:
                 record.state = EventState.CANCELLED
                 self._store.upsert(record)
                 logger.info("Event %s pre-cancelled by server", mrid_short)
+                self._audit_transition(record, None, "cancelled")
                 self._relay_control_event(record, "cancelled")
                 await self._post_response(derc, ResponseCode.CANCELLED, program_href)
                 if self._closed:
@@ -426,7 +433,9 @@ class EventProcessor:
             if record.program_href == program_href:
                 mrid_short = record.mrid.hex()[:8]
                 logger.info("Cancelling event %s from removed program %s", mrid_short, program_href)
+                from_state = record.state.value
                 self._store.transition(record.mrid, EventState.CANCELLED)
+                self._audit_transition(record, from_state, "cancelled")
                 self._timer_mgr.cancel(record.mrid)
                 # cancel_program is sync, but runs inside the event loop, so
                 # _emit_relay's loop.create_task succeeds.
@@ -464,6 +473,7 @@ class EventProcessor:
             record, self._on_activation, now_fn=self._now_fn_for(record.program_href)
         )
         self._relay_control_event(record, "scheduled")
+        self._audit_transition(record, None, "scheduled")
 
     async def _handle_late_discovery(self, record: EventRecord, derp_state: object) -> None:
         """Handle an event discovered after its start time (already active).
@@ -475,7 +485,7 @@ class EventProcessor:
         mrid_short = record.mrid.hex()[:8]
         if self._comms_loss.active:
             logger.info("Event %s: comms-loss active -- opting out (late discovery)", mrid_short)
-            await self._opt_out_event(record)
+            await self._opt_out_event(record, from_state=None)
             return
         logger.info("Event %s: late discovery (already active), posting ACK", mrid_short)
         await self._post_response(record.derc, ResponseCode.ACKNOWLEDGED, record.program_href)
@@ -491,6 +501,7 @@ class EventProcessor:
         if self._closed:
             return
         self._relay_control_event(record, "active")
+        self._audit_activation(record, from_state=None)
 
         # Schedule completion timer
         self._timer_mgr.schedule_completion(
@@ -507,9 +518,11 @@ class EventProcessor:
         mrid_short = record.mrid.hex()[:8]
         was_active = record.state == EventState.ACTIVE
         logger.info("Event %s: cancelled (was %s)", mrid_short, record.state.value)
+        from_state = record.state.value
         self._store.transition(record.mrid, EventState.CANCELLED)
         self._timer_mgr.cancel(record.mrid)
         self._relay_control_event(record, "cancelled")
+        self._audit_transition(record, from_state, "cancelled")
         # A cancellation tells a device the event it was running has been called
         # off. A device that was told the event was rejected was never running it,
         # so it is not told again. An event cancelled while still SCHEDULED
@@ -573,7 +586,7 @@ class EventProcessor:
 
         if self._comms_loss.active:
             logger.info("Event %s: comms-loss active -- opting out instead of applying", mrid_short)
-            await self._opt_out_event(record)
+            await self._opt_out_event(record, from_state=EventState.SCHEDULED.value)
             return
 
         # IEEE 10.2.2.3 rule l): SUPERSEDED SHALL be POSTed at the Effective
@@ -600,6 +613,7 @@ class EventProcessor:
             time.monotonic() - dispatch_started,
         )
         self._relay_control_event(record, "active")
+        self._audit_activation(record, from_state=EventState.SCHEDULED.value)
         self._timer_mgr.schedule_completion(
             record, self._on_completion, now_fn=self._now_fn_for(record.program_href)
         )
@@ -627,6 +641,7 @@ class EventProcessor:
         )
         self._store.transition(record.mrid, EventState.COMPLETED)
         self._relay_control_event(record, "completed")
+        self._audit_transition(record, EventState.ACTIVE.value, "completed")
         await self._post_started_device_lifecycle(record, ResponseCode.COMPLETED, mrid_short)
         await self._apply_dderc_fallback(record)
 
@@ -742,7 +757,22 @@ class EventProcessor:
 
             # If all devices for this program are superseded, fully supersede
             program_devices = device_map.get(superseded.program_href, set())
-            if program_devices and superseded.superseded_devices >= program_devices:
+            fully = bool(program_devices) and superseded.superseded_devices >= program_devices
+            if newly_superseded and not fully:
+                # The event keeps running on its other devices, so its state
+                # does not change; the record says which part was taken over.
+                self._audit_transition(
+                    superseded,
+                    superseded.state.value,
+                    "superseded",
+                    superseded_by=result.superseding_mrid,
+                    superseded_lfdis=self._lfdis_for_hrefs(superseded.superseded_devices),
+                    superseded_modes={
+                        self._lfdi_or_href(dev): sorted(modes)
+                        for dev, modes in superseded.superseded_modes.items()
+                    },
+                )
+            if fully:
                 was_active = superseded.state == EventState.ACTIVE
                 logger.info(
                     "Event %s: SUPERSEDED by %s (was %s)",
@@ -750,9 +780,13 @@ class EventProcessor:
                     result.superseding_mrid.hex()[:8],
                     superseded.state.value,
                 )
+                from_state = superseded.state.value
                 self._store.transition(superseded.mrid, EventState.SUPERSEDED)
                 self._timer_mgr.cancel(superseded.mrid)
                 self._relay_control_event(superseded, "superseded")
+                self._audit_transition(
+                    superseded, from_state, "superseded", superseded_by=result.superseding_mrid
+                )
 
                 # Per-device SUPERSEDED responses were already posted above
                 # as each device was added to newly_superseded.
@@ -1008,6 +1042,68 @@ class EventProcessor:
                 out.append(lfdi.hex())
         return out
 
+    def _audit_activation(self, record: EventRecord, *, from_state: str | None) -> None:
+        """Record an event going active, once its dispatch has settled.
+
+        Emitted after the per-device outcomes are in, not at the state change,
+        so the applied and rejected lists are final.
+        """
+        self._audit_transition(
+            record,
+            from_state,
+            EventState.ACTIVE.value,
+            applied_lfdis=self._lfdis_for_hrefs(record.applied_devices),
+            rejected_lfdis=self._lfdis_for_hrefs(record.rejected_devices),
+        )
+
+    def _audit_transition(
+        self,
+        record: EventRecord,
+        from_state: str | None,
+        to_state: str,
+        **details: Any,
+    ) -> None:
+        """Hand one lifecycle transition to the audit trail.
+
+        Never raises: the trail must not be able to stop an event from being
+        processed, so a failure building the record is logged and dropped.
+        """
+        if not self._audit.enabled:
+            return
+        try:
+            self._audit.event_transition(
+                event_mrid=record.mrid,
+                program_href=record.program_href,
+                from_state=from_state,
+                to_state=to_state,
+                effective_start=record.start,
+                effective_duration=record.duration,
+                primacy=record.primacy,
+                lfdis=self._affected_lfdis_for_program(record.program_href),
+                at=self._timebase.now(self._fsa_scope(record.program_href)),
+                **details,
+            )
+        except Exception:
+            self._audit_failures += 1
+            log = logger.warning if self._audit_failures == 1 else logger.debug
+            log(
+                "Audit record for event %s failed; further failures log at debug",
+                record.mrid.hex()[:8],
+                exc_info=True,
+            )
+
+    def _lfdi_or_href(self, dev_href: str) -> str:
+        """A device as its hex LFDI, or its href when the LFDI is not known.
+
+        The href is kept rather than dropping the device: an audit record that
+        silently loses a device reads as the device never having been involved.
+        """
+        lfdi = self._get_device_lfdi(dev_href)
+        return lfdi.hex() if lfdi is not None else dev_href
+
+    def _lfdis_for_hrefs(self, hrefs: set[str]) -> list[str]:
+        return [self._lfdi_or_href(h) for h in hrefs]
+
     def _relay_control_event(self, record: EventRecord, transition: str) -> None:
         """Relay a DERControl lifecycle change to affected connectors (stream=control)."""
         derc = record.derc
@@ -1133,7 +1229,7 @@ class EventProcessor:
         self._relay_tasks.add(task)
         task.add_done_callback(self._relay_tasks.discard)
 
-    async def enter_comms_loss(self) -> None:
+    async def enter_comms_loss(self) -> list[bytes]:
         """Opt out of every active event and revert devices to the planning limit.
 
         Loss-of-communications entry: each active event is marked
@@ -1143,10 +1239,12 @@ class EventProcessor:
         raised to the latest opted-out event end so recovery resumes only the
         schedule that follows it. Events stay in ACTIVE state (the ``opted_out``
         flag is the marker), so supersession and classification are unaffected.
+
+        Returns the mRIDs of the events opted out, for the audit trail.
         """
         active = [r for r in self._store.by_state(EventState.ACTIVE) if not r.opted_out]
         if not active:
-            return
+            return []
         boundary = self._comms_loss.resume_after_epoch or 0
         self._comms_loss.resume_after_epoch = max(boundary, max(r.end for r in active))
         # Flag all opted-out first so per-record reverts see no "other active"
@@ -1154,17 +1252,24 @@ class EventProcessor:
         for record in active:
             record.opted_out = True
             self._timer_mgr.cancel(record.mrid)
+            self._audit_transition(record, EventState.ACTIVE.value, "opted_out")
         for record in active:
             await self._apply_dderc_fallback(record, clear_if_no_dderc=True)
+        return [record.mrid for record in active]
 
-    async def _opt_out_event(self, record: EventRecord) -> None:
+    async def _opt_out_event(self, record: EventRecord, *, from_state: str | None) -> None:
         """Opt a single event out (comms-loss gate on activation/late discovery).
 
         Marks the event opted-out, raises the resume boundary to its end,
         cancels its timers, and reverts its devices to DDERC/clear. No response
         is posted.
+
+        ``from_state`` is the state the audit record reports the event leaving:
+        ``scheduled`` at activation, ``None`` for an event first seen already
+        running.
         """
         record.opted_out = True
+        self._audit_transition(record, from_state, "opted_out")
         boundary = self._comms_loss.resume_after_epoch or 0
         self._comms_loss.resume_after_epoch = max(boundary, record.end)
         self._timer_mgr.cancel(record.mrid)
@@ -1261,6 +1366,7 @@ class EventProcessor:
                             best_prog.default_dercontrol,  # type: ignore[arg-type]
                             best_prog.der_curves,
                             origin=origin,
+                            cause_mrid=record.mrid,
                         )
                         for lfdi in local_lfdis
                     )
@@ -1271,6 +1377,7 @@ class EventProcessor:
                             best_prog.default_dercontrol,  # type: ignore[arg-type]
                             best_prog.der_curves,
                             origin=origin,
+                            cause_mrid=record.mrid,
                         )
                     )
             results = await asyncio.gather(*coros, return_exceptions=True)
@@ -1311,12 +1418,12 @@ class EventProcessor:
                 # dict.fromkeys: group_lookup and DeviceMapping.add don't dedup,
                 # so guard against dispatching the same clear twice.
                 clear_coros.extend(
-                    self._dispatcher.clear_control_by_lfdi(local)
+                    self._dispatcher.clear_control_by_lfdi(local, cause_mrid=record.mrid)
                     for local in dict.fromkeys(local_lfdis)
                 )
             else:
                 clear_coros.extend(
-                    self._dispatcher.clear_control(dev_href)
+                    self._dispatcher.clear_control(dev_href, cause_mrid=record.mrid)
                     for dev_href in dict.fromkeys(dev_href for dev_href, _lfdi in clear_targets)
                 )
             clear_results = await asyncio.gather(*clear_coros, return_exceptions=True)
