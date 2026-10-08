@@ -798,6 +798,55 @@ class TestLifecycleRecords:
         await site.processor.shutdown()
 
     @pytest.mark.asyncio
+    async def test_an_expired_event_with_no_response_requested_is_recorded_once(self):
+        """With no EXPIRED posted there is no response to remember it by, and the
+        event is past its end, so only the trail's own memory stops a repeat."""
+        now = int(time.time())
+        derc = _derc(0x01, start=now - 10000, duration=100)
+        derc.response_required = b"\x00"
+        state = _state([derc])
+        state.der_programs["/derp/1"].der_controls_complete = True
+        site = Site(state)
+
+        for _ in range(3):
+            await site.processor.process_controls("/derp/1")
+
+        assert site.transitions() == [(HEX_1, None, "expired")]
+        await site.processor.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_event_already_over_is_recorded_once(self):
+        now = int(time.time())
+        comms = CommsLossState(resume_after_epoch=now + 10000)
+        state = _state([_derc(0x01, start=now - 500, duration=100)])
+        state.der_programs["/derp/1"].der_controls_complete = True
+        site = Site(state, comms_loss=comms)
+
+        for _ in range(3):
+            await site.processor.process_controls("/derp/1")
+
+        assert site.transitions() == [(HEX_1, None, "skipped")]
+        await site.processor.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_an_event_the_program_stops_serving_is_forgotten(self):
+        """Its memory goes once the server drops it, so the set stays bounded."""
+        now = int(time.time())
+        derc = _derc(0x01, start=now - 10000, duration=100)
+        derc.response_required = b"\x00"
+        state = _state([derc])
+        state.der_programs["/derp/1"].der_controls_complete = True
+        site = Site(state)
+        await site.processor.process_controls("/derp/1")
+        assert site.processor._audit_unstored_seen
+
+        state.der_programs["/derp/1"].der_controls = []
+        await site.processor.process_controls("/derp/1")
+
+        assert site.processor._audit_unstored_seen == {}
+        await site.processor.shutdown()
+
+    @pytest.mark.asyncio
     async def test_an_event_in_the_opted_out_window_is_recorded_once_as_skipped(self):
         now = int(time.time())
         comms = CommsLossState(resume_after_epoch=now + 10000)

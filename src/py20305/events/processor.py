@@ -148,9 +148,11 @@ class EventProcessor:
         # configures it, so every call below is a no-op by default.
         self._audit = audit if audit is not None else AuditEmitter()
         self._audit_failures = 0
-        #: Events recorded as expired or skipped, by mRID, with their end. They
-        #: are not stored, so this is what stops each poll recording them again.
-        self._audit_unstored_seen: dict[bytes, int] = {}
+        #: Events recorded as expired or skipped, by mRID, with their program.
+        #: They are not stored, so this is what stops each poll recording them
+        #: again. Kept while the program still serves them, not by age: both
+        #: kinds can be past their end and still served, poll after poll.
+        self._audit_unstored_seen: dict[bytes, str] = {}
         self._store = EventStore()
         self._rand_cache = RandomizationCache()
         self._response_tracker = ResponseTracker()
@@ -425,15 +427,27 @@ class EventProcessor:
             self._relay_snapshots.pop(("control", expired_mrid.hex()), None)
             self._relay_snapshots.pop(("doe", expired_mrid.hex()), None)
         self._rand_cache.prune(now)
-        for seen_mrid, seen_end in list(self._audit_unstored_seen.items()):
-            if seen_end + 60 < now:
-                del self._audit_unstored_seen[seen_mrid]
+        self._forget_unstored_no_longer_served(program_href)
         self._response_tracker.prune(now)
 
         # Apply DDERC to devices that have no active events.
         # Per IEEE 2030.5 §10.10, the DefaultDERControl is the baseline
         # operating state and should be active whenever no event overrides it.
         await self._apply_initial_dderc(program_href)
+
+    def _forget_unstored_no_longer_served(self, program_href: str) -> None:
+        """Forget expired and skipped events the program no longer serves.
+
+        Only on a complete fetch: an empty list from a failed one would forget
+        every event, and the next poll would record them all again.
+        """
+        derp_state = self._state.der_programs.get(program_href)
+        if derp_state is None or not derp_state.der_controls_complete:
+            return
+        served = {derc.m_rid.value for derc in derp_state.der_controls}
+        for mrid, program in list(self._audit_unstored_seen.items()):
+            if program == program_href and mrid not in served:
+                del self._audit_unstored_seen[mrid]
 
     def cancel_program(self, program_href: str) -> None:
         """Cancel all events from a removed program (Gap 3: IEEE 8.8.3).
@@ -457,6 +471,9 @@ class EventProcessor:
         # The program is gone -- drop its baseline relay slot so the cache stays
         # bounded by live program count.
         self._relay_snapshots.pop(("default_baseline", program_href), None)
+        for mrid, program in list(self._audit_unstored_seen.items()):
+            if program == program_href:
+                del self._audit_unstored_seen[mrid]
         if cancelled_count:
             logger.info(
                 "Cancelled %d event(s) from removed program %s", cancelled_count, program_href
@@ -1202,7 +1219,7 @@ class EventProcessor:
         mrid = derc.m_rid.value
         if mrid in self._audit_unstored_seen:
             return
-        self._audit_unstored_seen[mrid] = start + duration
+        self._audit_unstored_seen[mrid] = program_href
         transient = EventRecord(
             mrid=mrid,
             derc=derc,

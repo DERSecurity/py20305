@@ -322,7 +322,9 @@ counted in the forwarder's statistics: `messages_dropped` for a full queue,
 `events_dropped_by_forwarder`, per forwarder, for events a forwarder did not
 take because its broker was unreachable at start or queueing raised. That
 counter is keyed by the forwarder's name, with its position added when two
-share a name.
+share a name. A record the broker refuses at publish time is counted in the
+forwarder's `publish_errors`, not as a drop; the gap in `seq` shows it either
+way.
 
 Every audit record, and every write while `audit` is on, carries `boot_id` and
 `seq`: one counter per client, shared by its writes and its lifecycle records.
