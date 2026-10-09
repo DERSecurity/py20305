@@ -288,7 +288,10 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
     forwarder = build_forwarder(config, own_lfdi)
     telemetry = (
         DeviceTelemetryEmitter(
-            forwarder, config.forwarders.device_telemetry, client_id=own_lfdi
+            forwarder,
+            config.forwarders.device_telemetry,
+            client_id=own_lfdi,
+            audit=config.forwarders.audit,
         )
         if config.forwarders is not None
         else None
@@ -297,15 +300,17 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
     # transport rather than owning one, so this configuration silently records
     # nothing -- which looks exactly like a device that is never read or
     # written, and is worth saying out loud.
-    if (
-        config.forwarders is not None
-        and config.forwarders.device_telemetry.enabled
-        and forwarder is None
-    ):
-        logger.warning(
-            "device telemetry is enabled but no forwarder is configured or enabled; "
-            "nothing will be published. Configure `forwarders.mqtt` alongside it."
-        )
+    if config.forwarders is not None and forwarder is None:
+        for name, section in (
+            ("device telemetry", config.forwarders.device_telemetry),
+            ("the audit trail", config.forwarders.audit),
+        ):
+            if section.enabled:
+                logger.warning(
+                    "%s is enabled but no forwarder is configured or enabled; nothing "
+                    "will be published. Configure `forwarders.mqtt` alongside it.",
+                    name,
+                )
 
     client = CsipClient(
         config.server.url,
@@ -323,6 +328,12 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
     # back to start and stop the transport -- so the manager needs no second
     # channel out of here and this function keeps its shape.
     client.http.forwarder = forwarder
+    if config.forwarders is not None:
+        client.audit.attach_forwarder(forwarder)
+        client.audit.configure(config.forwarders.audit, client_id=own_lfdi)
+        if telemetry is not None:
+            # One counter for the client's writes and its lifecycle records.
+            telemetry.configure(config.forwarders.device_telemetry, sequence=client.audit.sequence)
 
     # Connection telemetry: the client's own connection outcomes, on their own
     # topic. Attached through the observer seam so the client stays ignorant

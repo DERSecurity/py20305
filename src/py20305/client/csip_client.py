@@ -39,6 +39,7 @@ from py20305.events.comms_loss import CommsLossState
 from py20305.events.dispatch import ControlDispatcher, NullDispatcher
 from py20305.events.processor import EventProcessor
 from py20305.events.tariff import TariffProcessor
+from py20305.forwarders.audit import AuditEmitter
 from py20305.subscription.manager import (
     StoredNotification,
     SubscriptionManager,
@@ -227,6 +228,15 @@ class CsipClient:
         #: The client's own certificate LFDI, captured at connect() for in-band
         #: self-reregistration on comms-loss recovery. Cert-derived and stable.
         self._own_lfdi: str | None = None
+        #: Audit trail for event lifecycle and loss-of-communications records.
+        #: Disabled until the host attaches a forwarder and configures it.
+        self._audit = AuditEmitter()
+        #: Whether the current comms-loss episode was a simulation, so the
+        #: clear record attributes it the same way the entry record did.
+        self._comms_loss_simulated = False
+        #: Monotonic time the current comms-loss episode began, for how long it
+        #: lasted. Monotonic because the server timebase can move under it.
+        self._comms_loss_entered_monotonic: float | None = None
         self._event_processor = EventProcessor(
             self._http,
             self._state,
@@ -236,6 +246,7 @@ class CsipClient:
             group_lookup=group_lookup,
             comms_loss=self._comms_loss,
             timebase=self._timebase,
+            audit=self._audit,
         )
         #: Pricing function set: relays active-interval prices to connectors.
         #: Constructed unconditionally but only driven by the tariff poll when
@@ -270,6 +281,11 @@ class CsipClient:
     def dispatcher(self) -> ControlDispatcher:
         """The dispatcher this client applies controls through."""
         return self._dispatcher
+
+    @property
+    def audit(self) -> AuditEmitter:
+        """The audit trail emitter. Attach a forwarder and configure it to enable."""
+        return self._audit
 
     @property
     def subscription_manager(self) -> SubscriptionManager | None:
@@ -651,7 +667,24 @@ class CsipClient:
             details=details,
         )
         logger.warning("Entering loss-of-communications mode (silent for %ds)", elapsed)
+        self._comms_loss_simulated = simulated
+        self._comms_loss_entered_monotonic = time.monotonic()
+        # Recorded before any event is opted out, so the record that explains
+        # the opt-outs and the fallback writes comes ahead of them in the trail,
+        # and is not lost if reverting the fleet fails part way.
+        self._audit.comms_loss(
+            transition="entered",
+            elapsed_seconds=elapsed,
+            threshold=self._comms_loss_seconds,
+            simulated=simulated,
+            at=self._timebase.now(),
+        )
         await self._event_processor.enter_comms_loss()
+
+    def _comms_loss_duration(self) -> int:
+        """Whole seconds in loss-of-communications mode so far, or 0 if unknown."""
+        started = self._comms_loss_entered_monotonic
+        return int(time.monotonic() - started) if started is not None else 0
 
     async def _recover_from_comms_loss(self) -> None:
         """Recover once communications are restored.
@@ -661,6 +694,15 @@ class CsipClient:
         opted-out event via the resume-after boundary, then clears the mode.
         """
         logger.info("Communications restored -- recovering from loss-of-communications mode")
+        # Before the re-poll, whose records it explains. Repeats if this
+        # recovery fails and the next probe tick tries again.
+        self._audit.comms_loss(
+            transition="recovering",
+            duration_seconds=self._comms_loss_duration(),
+            threshold=self._comms_loss_seconds,
+            simulated=self._comms_loss_simulated,
+            at=self._timebase.now(),
+        )
         # 1. In-band self-reregistration, only when the server no longer
         #    lists our EndDevice: some head-ends remove EndDevices during an
         #    outage and expect re-registration, while others retain them and
@@ -706,6 +748,15 @@ class CsipClient:
         boundary = self._comms_loss.resume_after_epoch
         if boundary is not None and int(self._timebase.now()) > boundary:
             self._comms_loss.resume_after_epoch = None
+        self._audit.comms_loss(
+            transition="cleared",
+            duration_seconds=self._comms_loss_duration(),
+            threshold=self._comms_loss_seconds,
+            simulated=self._comms_loss_simulated,
+            at=self._timebase.now(),
+            resume_after=self._comms_loss.resume_after_epoch,
+        )
+        self._comms_loss_entered_monotonic = None
         logger.info(
             "Loss-of-communications mode cleared%s",
             (

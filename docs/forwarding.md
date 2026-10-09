@@ -165,6 +165,188 @@ assign it to `Sep2Client.connection_observer` -- or implement
 `py20305.client.observer.ConnectionObserver` to route outcomes anywhere
 else.
 
+## The control audit trail
+
+The streams above record what the server said and what reached each device.
+The audit trail records what the client decided in between, and links the two:
+which event a write carried out, when each event was scheduled, went active,
+ended or was opted out, and when the client stopped acting on the server
+because the server went quiet.
+
+```yaml
+forwarders:
+  mqtt:
+    endpoint: broker.example.com
+  audit:
+    enabled: true
+```
+
+Off by default. Like the other telemetry streams it rides the forwarder's
+transport, so the `mqtt` block is required.
+
+One switch publishes two things:
+
+| `audit` | `device_telemetry` | Reads | Writes | Lifecycle records |
+|---|---|---|---|---|
+| off | off | no | no | no |
+| off | on | yes | yes, with cause fields | no |
+| on | off | no | yes, with cause fields and sequence | yes |
+| on | on | yes | yes, once, with cause fields and sequence | yes |
+
+### Writes
+
+Writes stay on the device telemetry topic. Whichever switch publishes them,
+each write's `protocol_data.extra` carries, next to `device`:
+
+- `origin`: who issued the write: `ieee2030_5` for an event,
+  `dderc_reapply` for a DefaultDERControl, `comms_loss` for a write made
+  because the server went quiet, or the host application's own origin for a
+  write it issued.
+- `applied_mrid`: the mRID of the DERControl or DefaultDERControl written.
+  Absent for a clear and for a write the host application issued directly.
+- `cause_mrid`: the event whose lifecycle produced the write: the event itself
+  when it activates, and the event that ended, was cancelled or was opted out
+  when its devices fall back to their default or are cleared. Absent when no
+  single event caused the write.
+
+mRIDs are uppercase hex, the form the `mRID` element takes on the wire. A
+rejected write also carries `error_type`, the exception's class name, in its
+body beside `error`. A write the command gate refused, because another
+interface holds the command role for the device, is recorded too, with
+`error_type: refused` and `is_valid: false`; nothing reached the device. These
+fields sit in `protocol_data.extra` rather than in the body because the body
+travels as one string, and a search index can only query the fields of the
+envelope.
+
+The write records are the authority on what reached a device. A device with no
+connector, or with none of the event's modes implemented, is dispatched to and
+gets no write record at all.
+
+### Lifecycle records
+
+Published as flat JSON documents on their own topic, `out/der-events` under
+the forwarder's topic base by default. `topic_suffix` moves it; the
+configuration requires it to start with `out/`, rejects the MQTT wildcards,
+and rejects any topic another stream uses, including `out/telemetry`.
+
+An event record is published once per transition, never per poll:
+
+```json
+{
+  "kind": "der_event", "schema": 1,
+  "event_mrid": "0A1B...", "program_href": "/derp/1",
+  "from_state": "scheduled", "to_state": "active",
+  "effective_start": 1760000000, "effective_duration": 3600,
+  "primacy": 1, "lfdis": ["..."], "at": 1760000002.5,
+  "applied_lfdis": ["..."], "rejected_lfdis": [],
+  "client_id": "...", "boot_id": "...", "seq": 42
+}
+```
+
+- `to_state` is `scheduled`, `active`, `completed`, `cancelled`,
+  `superseded`, `opted_out`, `expired` (already over when first received;
+  the client answers it EXPIRED) or `skipped` (inside a loss-of-communications
+  window the client opted out of). `from_state` is `null` for an event first
+  seen already in that state.
+- `effective_start` and `effective_duration` are after randomization.
+- An `active` record is published once dispatch has finished, so
+  `applied_lfdis` and `rejected_lfdis` are final. They are the outcome each
+  device's dispatch returned, which is what the server was told: `applied`
+  means the dispatch returned without error, `rejected` that it failed or
+  missed the activation deadline. Under a group lookup, where one server
+  EndDevice stands for several local devices, they list the local devices one
+  by one, so a partial failure shows here even though the server is told the
+  event started. Whether a write then reached each device is in the write
+  records above.
+- An event opted out during loss of communications is no longer in force, so
+  any later record for it, such as a cancellation, has `from_state:
+  opted_out`.
+- A whole supersession is the transition to `superseded`, with
+  `superseded_by`. A partial one, where another event takes over only some
+  devices or modes, is not a transition: its record has `from_state` equal to
+  `to_state`, the event's current state, and carries `superseded_by`,
+  `superseded_lfdis` and `superseded_modes`. Under a group lookup these name
+  the program's local devices. Modes are named by their IEEE 2030.5 element,
+  such as `opModMaxLimW`.
+- LFDIs are lowercase hex throughout. A device whose LFDI is not known is
+  named by its EndDevice href, exactly as the server wrote it: hrefs are
+  case-sensitive.
+
+A DefaultDERControl is not an event and produces no lifecycle record; its
+writes carry `origin: dderc_reapply` and the `cause_mrid` of the event that
+ended.
+
+A dispatch that misses the activation deadline is listed as rejected in the
+`active` record, because that is what the server is told, and its apply
+carries on. When it finishes, a `late_dispatch` record says how:
+
+```json
+{
+  "kind": "late_dispatch", "schema": 1,
+  "event_mrid": "0A1B...", "lfdi": "...", "applied": true, "at": 1760000031.0,
+  "client_id": "...", "boot_id": "...", "seq": 44
+}
+```
+
+A failed one also carries `error` and `error_type`.
+
+Loss of communications is recorded in the order it happens: `entered` when the
+mode is entered, before any event is opted out; `recovering` once contact
+returns, before the schedule is polled again; and `cleared` once the mode
+ends. A recovery whose re-poll fails is retried on the next probe, so
+`recovering` can repeat before one `cleared`. The `opted_out` records and the
+fallback writes come between `entered` and `recovering`, and what the re-poll
+finds comes between `recovering` and `cleared`.
+
+```json
+{
+  "kind": "comms_loss", "schema": 1, "transition": "entered",
+  "elapsed_seconds": 905, "threshold": 900, "simulated": false,
+  "at": 1760000000.0, "client_id": "...", "boot_id": "...", "seq": 43
+}
+```
+
+`entered` carries `elapsed_seconds`, how long the server had been silent.
+`recovering` and `cleared` carry `duration_seconds` instead, how long the
+client had been in the mode, and `cleared` adds `resume_after`: the epoch after
+which the schedule resumes, or `null` when the opted-out window has already
+passed.
+
+Lifecycle, `late_dispatch` and loss-of-communications records give `at` on the
+server's timebase, so they line up with the event times the server set. Write
+records carry the envelope's own `timestamp`, which is the client's clock.
+
+### Telling a complete trail from an incomplete one
+
+Delivery is best-effort, as for every stream on this transport: a full queue
+drops its oldest entry, and a stopped forwarder drops what it is given. Each is
+counted in the forwarder's statistics: `messages_dropped` for a full queue,
+`events_dropped_not_running` while the whole transport is stopped, and
+`events_dropped_by_forwarder`, per forwarder, for events a forwarder did not
+take because its broker was unreachable at start or queueing raised. That
+counter is keyed by the forwarder's name, with its position added when two
+share a name. A record the broker refuses at publish time is counted in the
+forwarder's `publish_errors`, not as a drop; the gap in `seq` shows it either
+way.
+
+Every audit record, and every write while `audit` is on, carries `boot_id` and
+`seq`: one counter per client, shared by its writes and its lifecycle records.
+The two travel on different topics, so a gap check must merge them: the audit
+records' `seq` and the write records' `protocol_data.extra.seq`. On the merged
+stream, a gap in `seq` within a `boot_id` marks a lost record, and a new
+`boot_id` marks a restart. On the audit topic alone, every device write shows
+as a gap.
+
+Nothing in the trail can stop a control: a failure building or queueing a
+record is logged once and counted, and event processing carries on.
+
+Embedders not using the runner configure the client's emitter themselves:
+`client.audit.attach_forwarder(manager)` and
+`client.audit.configure(config.forwarders.audit)`. Pass the same `audit`
+section, and the client's counter, to the client's `DeviceTelemetryEmitter`:
+`telemetry.configure(config.forwarders.device_telemetry,
+audit=config.forwarders.audit, sequence=client.audit.sequence)`.
+
 ## Measured device state
 
 A third payload kind rides the same transport: `TelemetryFrame`, a device's

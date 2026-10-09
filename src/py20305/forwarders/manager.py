@@ -52,6 +52,10 @@ class ForwarderManager:
         self._client_lfdi: str | None = None
         self._forwarder_id: str | None = None
         self._source_host: str | None = None
+        self._events_dropped_not_running = 0
+        #: Events a forwarder did not take -- its start failed, or queueing
+        #: raised -- by forwarder.
+        self._events_dropped_by_failed: dict[str, int] = {}
 
     @property
     def running(self) -> bool:
@@ -207,6 +211,8 @@ class ForwarderManager:
             return
 
         for forwarder in self._forwarders:
+            if forwarder in self._failed:
+                continue
             try:
                 forwarder.queue_message(frame)
             except Exception as e:
@@ -259,14 +265,37 @@ class ForwarderManager:
             event: Event frame to route
         """
         if not self._running:
+            # Counted: an audit consumer sees the loss as a sequence gap, and
+            # an operator needs a number on this side that explains it.
+            self._events_dropped_not_running += 1
             logger.debug("ForwarderManager not running, dropping event")
             return
 
         for forwarder in self._forwarders:
+            if forwarder in self._failed:
+                # Its start failed, so it is not running and would drop the
+                # event without a word while the manager reports itself running.
+                # This count is what explains the gap a sequence-checking
+                # consumer then sees.
+                self._count_event_drop(forwarder)
+                continue
             try:
                 forwarder.queue_event(event)
             except Exception as e:
+                self._count_event_drop(forwarder)
                 logger.error("Error queueing event to forwarder %s: %s", forwarder.name, e)
+
+    def _count_event_drop(self, forwarder: BaseForwarder) -> None:
+        """Count one event a forwarder did not take, under a key unique to it.
+
+        Its name, unless another registered forwarder shares the name, when its
+        position is added: two forwarders on one counter would hide which of
+        them is losing records.
+        """
+        name = forwarder.name
+        if sum(1 for other in self._forwarders if other.name == name) > 1:
+            name = f"{name}#{self._forwarders.index(forwarder)}"
+        self._events_dropped_by_failed[name] = self._events_dropped_by_failed.get(name, 0) + 1
 
     def queue_telemetry(self, frame: TelemetryFrame) -> None:
         """Route measured device state to all registered forwarders.
@@ -280,6 +309,8 @@ class ForwarderManager:
             return
 
         for forwarder in self._forwarders:
+            if forwarder in self._failed:
+                continue
             try:
                 forwarder.queue_telemetry(frame)
             except Exception as e:
@@ -291,6 +322,8 @@ class ForwarderManager:
             "running": self._running,
             "forwarder_count": len(self._forwarders),
             "client_lfdi": self._client_lfdi,
+            "events_dropped_not_running": self._events_dropped_not_running,
+            "events_dropped_by_forwarder": dict(self._events_dropped_by_failed),
             "forwarders": {f.name: f.get_statistics() for f in self._forwarders},
         }
 

@@ -43,6 +43,13 @@ class EventRecord:
     #: ``rejected_devices`` means dispatch never had a target at all, which is the
     #: one case where the any-LFDI fallback still announces the lifecycle.
     applied_devices: set[str] = field(default_factory=set)
+    #: Under a group lookup, each local device's dispatch outcome by its LFDI,
+    #: for the audit trail. The two sets above are in the server's terms: one
+    #: EndDevice stands for several local devices, its response reports them as
+    #: one, and a partial failure there still reads as applied. Empty without a
+    #: group lookup, where the sets above already name each device.
+    applied_local: set[str] = field(default_factory=set)
+    rejected_local: set[str] = field(default_factory=set)
     #: Set when the event was opted out during loss-of-communications mode: its
     #: control is not applied (or is reverted to DDERC) and no response is
     #: posted. Stays set until the record is pruned (recovery clears only the
