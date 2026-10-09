@@ -35,14 +35,14 @@ ConnectorPayload = dict[str, Any] | None
 class ScheduleNotification:
     """A relayed, forward-looking schedule event for a connector.
 
-    Pushed by the event processor on every *change* to a control, so a
-    downstream optimizer stays current without polling for it. Informational
-    only: it does not apply setpoints, which remains the job of the
-    ``update_*`` methods.
+    Pushed by the core on every *change* to a relayed schedule -- a control,
+    baseline, DOE or price -- so a downstream optimizer stays current without
+    polling for it. Informational only: it does not apply setpoints, which
+    remains the job of the ``update_*`` methods.
     """
 
-    #: "control" | "default_baseline" | "doe".
-    #: "price" | "drlc" | "flow_reservation" are reserved for later.
+    #: "control" | "default_baseline" | "doe" | "price".
+    #: "drlc" | "flow_reservation" are reserved for later.
     stream: str
     #: event streams: "scheduled"|"updated"|"active"|"superseded"|"cancelled"|"completed";
     #: default_baseline: "default_added"|"default_updated".
@@ -495,7 +495,8 @@ class BaseConnector:
         return None
 
     async def notification_price(self, notification: ScheduleNotification) -> None:
-        """A pricing/TimeTariffInterval schedule changed (future stream)."""
+        """The active pricing interval (TimeTariffInterval) changed. Relay-only:
+        the connector decides whether to act on the price."""
         return None
 
     async def notification_drlc(self, notification: ScheduleNotification) -> None:
