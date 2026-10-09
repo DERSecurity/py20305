@@ -266,8 +266,11 @@ An event record is published once per transition, never per poll:
   devices or modes, is not a transition: its record has `from_state` equal to
   `to_state`, the event's current state, and carries `superseded_by`,
   `superseded_lfdis` and `superseded_modes`. Under a group lookup these name
-  the program's local devices.
-- LFDIs are lowercase hex throughout.
+  the program's local devices. Modes are named by their IEEE 2030.5 element,
+  such as `opModMaxLimW`.
+- LFDIs are lowercase hex throughout. A device whose LFDI is not known is
+  named by its EndDevice href, exactly as the server wrote it: hrefs are
+  case-sensitive.
 
 A DefaultDERControl is not an event and produces no lifecycle record; its
 writes carry `origin: dderc_reapply` and the `cause_mrid` of the event that
@@ -328,8 +331,11 @@ way.
 
 Every audit record, and every write while `audit` is on, carries `boot_id` and
 `seq`: one counter per client, shared by its writes and its lifecycle records.
-A gap in `seq` within a `boot_id` marks a lost record, and a new `boot_id`
-marks a restart.
+The two travel on different topics, so a gap check must merge them: the audit
+records' `seq` and the write records' `protocol_data.extra.seq`. On the merged
+stream, a gap in `seq` within a `boot_id` marks a lost record, and a new
+`boot_id` marks a restart. On the audit topic alone, every device write shows
+as a gap.
 
 Nothing in the trail can stop a control: a failure building or queueing a
 record is logged once and counted, and event processing carries on.

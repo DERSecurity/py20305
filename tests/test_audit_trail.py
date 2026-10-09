@@ -531,6 +531,29 @@ class TestWritesNameTheirCause:
         assert fallback["applied_mrid"] == HEX_DDERC
         await site.processor.shutdown()
 
+    def test_an_href_keeps_its_case_and_an_lfdi_is_lowered(self):
+        """An href is a case-sensitive URI; lowering it would stop it joining
+        back to the server's own href."""
+        forwarder = RecordingForwarder()
+        emitter = AuditEmitter(forwarder, AuditConfig(enabled=True))  # type: ignore[arg-type]
+
+        emitter.event_transition(
+            event_mrid=bytes([1]) * 16,
+            program_href="/derp/1",
+            from_state=None,
+            to_state="scheduled",
+            effective_start=0,
+            effective_duration=1,
+            primacy=0,
+            lfdis=["/edev/ABC", "AB" * 20],
+            at=0.0,
+        )
+        emitter.late_dispatch(event_mrid=bytes([1]) * 16, lfdi="/edev/ABC", applied=True, at=0.0)
+
+        event, late = forwarder.audit_records()
+        assert event["lfdis"] == sorted(["/edev/ABC", "ab" * 20])
+        assert late["lfdi"] == "/edev/ABC"
+
     def test_mrids_are_uppercase_hex(self):
         assert mrid_hex(bytes.fromhex("0a1b2c")) == "0A1B2C"
 
@@ -686,7 +709,9 @@ class TestLifecycleRecords:
         assert partial["event_mrid"] == HEX_2
         assert partial["superseded_by"] == HEX_1
         assert partial["superseded_lfdis"] == [LFDI_1.hex()]
-        assert LFDI_1.hex() in partial["superseded_modes"]
+        assert partial["superseded_modes"] == {LFDI_1.hex(): ["opModMaxLimW"]}, (
+            "modes by their IEEE 2030.5 element name, as every other identifier"
+        )
         assert site.processor._store.get(b"\x02" * 16).state == EventState.ACTIVE
         await site.processor.shutdown()
 
@@ -921,7 +946,10 @@ class TestLifecycleRecords:
             r for r in site.forwarder.audit_records("der_event") if "superseded_lfdis" in r
         ]
         assert partial["superseded_lfdis"] == [local_a.lower(), local_b.lower()]
-        assert set(partial["superseded_modes"]) == {local_a.lower(), local_b.lower()}
+        assert partial["superseded_modes"] == {
+            local_a.lower(): ["opModMaxLimW"],
+            local_b.lower(): ["opModMaxLimW"],
+        }
         active = next(
             r
             for r in site.forwarder.audit_records("der_event")

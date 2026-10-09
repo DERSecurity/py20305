@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import re
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -49,13 +50,17 @@ def mrid_hex(mrid: bytes | None) -> str | None:
     return mrid.hex().upper() if mrid is not None else None
 
 
+_HEX = re.compile(r"[0-9A-Fa-f]+")
+
+
 def _lfdi(value: str) -> str:
     """An LFDI as lowercase hex, whatever case the host or the server used.
 
     The records join on these, so two spellings of one device would read as two
-    devices.
+    devices. A device whose LFDI is not known is named by its EndDevice href,
+    which is a case-sensitive URI and is left exactly as the server wrote it.
     """
-    return value.lower()
+    return value.lower() if _HEX.fullmatch(value) else value
 
 
 class AuditSequence:

@@ -11,9 +11,9 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from dataclasses import replace
-from functools import partial
+from functools import cache, partial
 from typing import Any
 
 from py20305.client.http import Sep2Client
@@ -104,6 +104,26 @@ def _extract_doe_envelope(base: Any) -> dict[str, dict[str, int | float]]:
             "watts": _resolve_watts(value, multiplier),
         }
     return out
+
+
+@cache
+def _wire_names() -> dict[str, str]:
+    """DERControlBase field names to their IEEE 2030.5 element names.
+
+    Taken from the XML binding that serializes the model, so the two cannot
+    disagree.
+    """
+    from py20305.models.sep.sep import DercontrolBase
+    from py20305.xml.serialization import _context
+
+    return {var.name: var.local_name for var in _context.build(DercontrolBase).get_all_vars()}
+
+
+def _wire_mode_names(modes: Iterable[str]) -> list[str]:
+    """Modes as the audit trail names them: by their element name on the wire,
+    as every other identifier in its records is."""
+    names = _wire_names()
+    return sorted(names.get(mode, mode) for mode in modes)
 
 
 class EventProcessor:
@@ -1142,7 +1162,7 @@ class EventProcessor:
                 "superseded_by": superseded_by,
                 "superseded_lfdis": self._lfdis_for_hrefs(record.superseded_devices),
                 "superseded_modes": {
-                    self._lfdi_or_href(dev): sorted(modes)
+                    self._lfdi_or_href(dev): _wire_mode_names(modes)
                     for dev, modes in record.superseded_modes.items()
                 },
             }
@@ -1152,7 +1172,9 @@ class EventProcessor:
         return {
             "superseded_by": superseded_by,
             "superseded_lfdis": list(local),
-            "superseded_modes": {lfdi: sorted(modes) for lfdi in local} if modes else {},
+            "superseded_modes": (
+                {lfdi: _wire_mode_names(modes) for lfdi in local} if modes else {}
+            ),
         }
 
     def _audit_transition(
