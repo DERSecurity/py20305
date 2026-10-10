@@ -1463,8 +1463,10 @@ class EventProcessor:
 
         # Unregister modes and compute per-device fallback needs
         needs_fallback: list[str] = []
+        released_modes: dict[str, frozenset[str]] = {}
         for dev_href in devices:
             released = self._mode_tracker.unregister(dev_href, record.mrid)
+            released_modes[dev_href] = released
             if released:
                 # Some modes were released and not covered by other events
                 needs_fallback.append(dev_href)
@@ -1479,14 +1481,26 @@ class EventProcessor:
         # A shared device may belong to multiple programs; on event completion,
         # it should revert to the best (lowest primacy number) DDERC available.
         dderc_targets: list[tuple[str, bytes, DerProgramState]] = []
+        # Modes the ended event set that the default does not carry. The
+        # default only writes the modes it names, so these would stay in
+        # effect on the device unless they are disabled here.
+        withdraw_targets: list[tuple[str, frozenset[str]]] = []
         for dev_href in needs_fallback:
             lfdi = self._get_device_lfdi(dev_href)
             if lfdi is None:
                 continue
             best = self._best_dderc_program_for_device(dev_href)
+            released = released_modes.get(dev_href, frozenset())
             if best is None:
                 if clear_if_no_dderc:
                     clear_targets.append((dev_href, lfdi))
+                elif released:
+                    logger.debug(
+                        "Event %s: no DDERC for device %s, disabling the modes it released",
+                        record.mrid.hex()[:8],
+                        dev_href,
+                    )
+                    withdraw_targets.append((dev_href, released))
                 else:
                     logger.debug(
                         "Event %s: no DDERC for device %s, no revert action taken",
@@ -1494,6 +1508,11 @@ class EventProcessor:
                         dev_href,
                     )
                 continue
+            dderc = best.default_dercontrol
+            assert dderc is not None  # guaranteed by _best_dderc_program_for_device
+            uncovered = released - get_active_mode_names(dderc.dercontrol_base)
+            if uncovered:
+                withdraw_targets.append((dev_href, uncovered))
             if self._dderc_tracker.should_apply(lfdi, best.href, best.primacy):
                 dderc_targets.append((dev_href, lfdi, best))
 
@@ -1574,6 +1593,34 @@ class EventProcessor:
                     self._dderc_tracker.record_application(
                         lfdi, best_prog.href, dderc.m_rid.value, best_prog.primacy
                     )
+
+        if withdraw_targets:
+            # Same fan-out as the DDERC path: by local LFDI when a group
+            # lookup maps the server-side device to sub-devices, else by href.
+            local_lfdis = self._group_local_lfdis(record.program_href)
+            withdraw_coros: list[Coroutine[Any, Any, None]] = []
+            if local_lfdis is not None:
+                modes_for_program: frozenset[str] = frozenset().union(
+                    *(modes for _dev_href, modes in withdraw_targets)
+                )
+                withdraw_coros.extend(
+                    self._dispatcher.disable_modes_by_lfdi(
+                        local, modes_for_program, cause_mrid=record.mrid
+                    )
+                    for local in dict.fromkeys(local_lfdis)
+                )
+            else:
+                withdraw_coros.extend(
+                    self._dispatcher.disable_modes(dev_href, modes, cause_mrid=record.mrid)
+                    for dev_href, modes in withdraw_targets
+                )
+            withdraw_results = await asyncio.gather(*withdraw_coros, return_exceptions=True)
+            for failure in (r for r in withdraw_results if isinstance(r, Exception)):
+                logger.warning(
+                    "Event %s: disabling released modes failed: %s",
+                    record.mrid.hex()[:8],
+                    failure,
+                )
 
         if clear_targets:
             # No DDERC to fall back to: clear the device to the connector

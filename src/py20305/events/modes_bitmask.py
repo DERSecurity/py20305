@@ -59,11 +59,35 @@ def build_modes_responded(base: DercontrolBase) -> DercontrolType:
     return DercontrolType(value=bitmask.to_bytes(4, byteorder="big"))
 
 
+#: CSIP-AUS envelope limits. They are extension elements, carried in
+#: ``DercontrolBase.other_element`` rather than as fields, so they are tracked
+#: by their element names.
+CSIPAUS_LIMIT_NAMES: frozenset[str] = frozenset(
+    {"opModExpLimW", "opModImpLimW", "opModGenLimW", "opModLoadLimW"}
+)
+
+
+def _extension_mode_names(base: DercontrolBase) -> list[str]:
+    names: list[str] = []
+    for elem in getattr(base, "other_element", None) or []:
+        meta = getattr(getattr(elem, "Meta", None), "name", None) or getattr(
+            getattr(getattr(elem, "__class__", None), "Meta", None), "name", None
+        )
+        if meta in CSIPAUS_LIMIT_NAMES:
+            names.append(meta)
+    return names
+
+
 def get_active_mode_names(base: DercontrolBase) -> frozenset[str]:
-    """Return the set of active mode field names from a DercontrolBase."""
+    """Return the set of active mode names from a DercontrolBase.
+
+    Field names for the base modes (``op_mod_fixed_w``) and element names for
+    the CSIP-AUS limits (``opModExpLimW``).
+    """
     names: list[str] = []
     for field_name in _FIELD_TO_BIT:
         val = getattr(base, field_name, None)
         if val is not None:
             names.append(field_name)
+    names.extend(_extension_mode_names(base))
     return frozenset(names)

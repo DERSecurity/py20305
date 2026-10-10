@@ -7,7 +7,19 @@ below says so explicitly.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **An ended event's modes that the default does not carry are now disabled
+  (#51).** When an event completed or was cancelled, the processor applied the
+  DefaultDERControl, which writes only the modes it names, so a mode the event
+  had set and the default did not mention (a fixed setpoint, an export limit)
+  stayed in effect on the connector and the device. The processor now disables
+  those modes through the dispatcher's new `disable_modes` /
+  `disable_modes_by_lfdi`, with the origin `CommandOrigin.EVENT_END`, and with no
+  default on any program it disables everything the event released instead of
+  taking no action. The CSIP-AUS limits are tracked by element name so they are
+  released too. `ControlDispatcher` gains the two methods; a dispatcher of your
+  own needs them.
 
 ## [0.10.0] - 2026-10-06
 

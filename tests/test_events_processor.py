@@ -40,6 +40,7 @@ from py20305.models.sep.sep import (
     PowerOfTenMultiplierType,
     PrimacyType,
     Sfditype,
+    SignedPerCentControlType,
     TimeType,
 )
 
@@ -3844,4 +3845,84 @@ class TestFsaScopedClockRegression:
             "with a stale FSA offset the event is classified as already expired"
         )
 
+        await proc.shutdown()
+
+
+class TestModeWithdrawalAtEventEnd:
+    """An ended event's modes that the default does not carry are disabled.
+
+    The default control writes only the modes it names, so a setpoint the event
+    set would otherwise stay on the device after the event is over.
+    """
+
+    @staticmethod
+    def _dderc(base: DercontrolBase) -> DefaultDercontrol:
+        return DefaultDercontrol(m_rid=MRidtype(value=b"\x20" * 16), dercontrol_base=base)
+
+    @staticmethod
+    async def _cancel_active_event(
+        dispatcher: AsyncMock,
+        derc_base: DercontrolBase,
+        dderc: DefaultDercontrol | None,
+        shutdown: asyncio.Event,
+    ) -> EventProcessor:
+        now = int(time.time())
+        derc = _make_derc(0x01, start=now - 10, duration=3600, current_status=0, base=derc_base)
+        state = _setup_state(der_controls=[derc], dderc=dderc)
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        proc = EventProcessor(http, state, dispatcher, shutdown)
+        await proc.process_controls("/derp/1")
+        assert proc._store.get(derc.m_rid.value).state == EventState.ACTIVE
+
+        cancelled = _make_derc(
+            0x01, start=now - 10, duration=3600, current_status=2, base=derc_base
+        )
+        state.der_programs["/derp/1"].der_controls = [cancelled]
+        await proc.process_controls("/derp/1")
+        assert proc._store.get(derc.m_rid.value).state == EventState.CANCELLED
+        return proc
+
+    @pytest.mark.asyncio
+    async def test_a_mode_the_default_does_not_carry_is_disabled(self, shutdown: asyncio.Event):
+        dispatcher = AsyncMock()
+        proc = await self._cancel_active_event(
+            dispatcher,
+            DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500)),
+            self._dderc(DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=10000))),
+            shutdown,
+        )
+        dispatcher.apply_default_control.assert_awaited()
+        dispatcher.disable_modes.assert_awaited_once()
+        args, kwargs = dispatcher.disable_modes.await_args
+        assert args[0] == "/edev/1"
+        assert args[1] == frozenset({"op_mod_fixed_w"})
+        assert kwargs["cause_mrid"] == b"\x01" * 16
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_mode_the_default_carries_is_left_to_the_default(self, shutdown: asyncio.Event):
+        dispatcher = AsyncMock()
+        proc = await self._cancel_active_event(
+            dispatcher,
+            DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=5000)),
+            self._dderc(DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=10000))),
+            shutdown,
+        )
+        dispatcher.apply_default_control.assert_awaited()
+        dispatcher.disable_modes.assert_not_awaited()
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_without_a_default_the_released_modes_are_disabled(self, shutdown: asyncio.Event):
+        dispatcher = AsyncMock()
+        proc = await self._cancel_active_event(
+            dispatcher,
+            DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500)),
+            None,
+            shutdown,
+        )
+        dispatcher.apply_default_control.assert_not_awaited()
+        dispatcher.disable_modes.assert_awaited_once()
+        assert dispatcher.disable_modes.await_args.args[1] == frozenset({"op_mod_fixed_w"})
         await proc.shutdown()

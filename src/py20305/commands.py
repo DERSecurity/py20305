@@ -51,6 +51,10 @@ class CommandOrigin(StrEnum):
     DDERC_REAPPLY = "dderc_reapply"
     #: Loss-of-communications handling reasserting the planning limit.
     COMMS_LOSS = "comms_loss"
+    #: An event ending: the modes it set that the DefaultDERControl does not
+    #: carry are disabled, so a device does not keep a setpoint whose event
+    #: is over.
+    EVENT_END = "event_end"
 
 
 class CommandStatus(StrEnum):
