@@ -423,6 +423,30 @@ class TestTranslateCSIPAUS:
         assert result is not None
         assert result[1]["imp_lim_w"] == 30000
 
+    def test_exp_lim_from_a_generic_element(self):
+        """A limit the parser left untyped (no CSIP-AUS class registered) still translates."""
+        from xsdata.formats.dataclass.models.generics import AnyElement
+
+        ns = "{https://csipaus.org/ns}"
+        elem = AnyElement(
+            qname=f"{ns}opModExpLimW",
+            children=[
+                AnyElement(qname=f"{ns}multiplier", text="3"),
+                AnyElement(qname=f"{ns}value", text="2000"),
+            ],
+        )
+        base = DercontrolBase(other_element=[elem])
+        assert translate_exp_lim(base, []) == (
+            "update_exp_lim",
+            {"exp_lim_mode_enable": 1, "exp_lim_w": 2000000},
+        )
+
+    def test_a_generic_element_without_a_value_is_no_limit(self):
+        from xsdata.formats.dataclass.models.generics import AnyElement
+
+        elem = AnyElement(qname="{https://csipaus.org/ns}opModExpLimW", children=[])
+        assert translate_exp_lim(DercontrolBase(other_element=[elem]), []) is None
+
 
 class TestTranslateControls:
     def test_empty_base_returns_empty(self):
