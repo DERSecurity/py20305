@@ -6,6 +6,7 @@ This module maps DercontrolBase field names to their corresponding bit positions
 
 from __future__ import annotations
 
+from py20305.models.csipaus.elements import DOE_LIMIT_NAMES, doe_limits
 from py20305.models.sep.sep import DercontrolBase, DercontrolType
 
 # Mapping from DercontrolBase field names to DERControlType bit positions.
@@ -61,21 +62,12 @@ def build_modes_responded(base: DercontrolBase) -> DercontrolType:
 
 #: CSIP-AUS envelope limits. They are extension elements, carried in
 #: ``DercontrolBase.other_element`` rather than as fields, so they are tracked
-#: by their element names.
-CSIPAUS_LIMIT_NAMES: frozenset[str] = frozenset(
-    {"opModExpLimW", "opModImpLimW", "opModGenLimW", "opModLoadLimW"}
-)
+#: by their element names, whether they parsed as typed models or not.
+CSIPAUS_LIMIT_NAMES: frozenset[str] = DOE_LIMIT_NAMES
 
 
 def _extension_mode_names(base: DercontrolBase) -> list[str]:
-    names: list[str] = []
-    for elem in getattr(base, "other_element", None) or []:
-        meta = getattr(getattr(elem, "Meta", None), "name", None) or getattr(
-            getattr(getattr(elem, "__class__", None), "Meta", None), "name", None
-        )
-        if meta in CSIPAUS_LIMIT_NAMES:
-            names.append(meta)
-    return names
+    return list(doe_limits(base))
 
 
 def get_active_mode_names(base: DercontrolBase) -> frozenset[str]:

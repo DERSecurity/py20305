@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from py20305.models.csipaus.elements import doe_limits
 from py20305.models.sep.sep import (
     DefaultDercontrol1,
     DercontrolBase,
@@ -745,14 +746,12 @@ def _translate_csipaus_power_limit(
     enable_key: str,
     value_key: str,
 ) -> tuple[str, dict[str, Any]] | None:
-    """Translate CSIP-AUS power limit from other_element list.
+    """Translate a CSIP-AUS power limit from the other_element list.
 
-    FIX: Checks both namespaced and non-namespaced elements consistently,
-    unlike the original which only checked namespaced for exp_lim.
+    The limits are extension elements. They parse as typed models when the
+    CSIP-AUS classes are registered with the parser and as generic elements
+    otherwise; ``doe_limits`` reads both.
     """
-    # CSIP-AUS fields arrive via DercontrolBase.other_element as parsed
-    # Pydantic extension objects (OpModExpLimW, OpModImpLimW, etc.)
-    # They have .value and .multiplier attributes (inheriting from ActivePower).
     xml_name_map = {
         "update_exp_lim": "opModExpLimW",
         "update_imp_lim": "opModImpLimW",
@@ -763,23 +762,12 @@ def _translate_csipaus_power_limit(
     if target_name is None:
         return None
 
-    for elem in base.other_element:
-        meta_name = None
-        if hasattr(elem, "Meta") and hasattr(elem.Meta, "name"):
-            meta_name = elem.Meta.name
-        elif hasattr(elem, "__class__") and hasattr(elem.__class__, "Meta"):
-            meta = elem.__class__.Meta
-            meta_name = getattr(meta, "name", None)
-
-        if meta_name == target_name and hasattr(elem, "value") and hasattr(elem, "multiplier"):
-            value = elem.value
-            multiplier = elem.multiplier
-            if hasattr(multiplier, "value"):
-                multiplier = multiplier.value
-            w = value * (10 ** int(multiplier))
-            return (method_name, {enable_key: 1, value_key: w})
-
-    return None
+    pair = doe_limits(base).get(target_name)
+    if pair is None:
+        return None
+    value, multiplier = pair
+    w = value * (10**multiplier)
+    return (method_name, {enable_key: 1, value_key: w})
 
 
 def translate_exp_lim(

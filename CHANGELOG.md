@@ -20,6 +20,14 @@ below says so explicitly.
   taking no action. The CSIP-AUS limits are tracked by element name so they are
   released too. `ControlDispatcher` gains the two methods; a dispatcher of your
   own needs them.
+- **A CSIP-AUS limit is translated whichever module loaded first (#50).** The
+  parser types an extension element (`opModExpLimW` and the other limits) only
+  when its class is already imported, and left it a generic element otherwise,
+  which the translation did not read: a control received before anything had
+  imported the CSIP-AUS models activated with no modes. `py20305.xml` now
+  imports the models, and the translation, the active-mode tracking and the
+  JSON form read a typed model and a generic element alike through
+  `models.csipaus.elements`.
 
 ## [0.10.0] - 2026-10-06
 

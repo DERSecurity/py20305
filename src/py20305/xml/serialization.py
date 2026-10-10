@@ -10,6 +10,12 @@ from typing import TypeVar
 from lxml import etree
 from xsdata_pydantic.bindings import XmlContext, XmlParser, XmlSerializer
 
+# The parser types an extension element (the CSIP-AUS limits in a
+# DERControlBase) only when its class is already imported, and leaves it a
+# generic element otherwise. Importing the models here makes that independent
+# of which other module happened to load first.
+from py20305.models.csipaus import csipaus_ext  # noqa: F401
+
 APPLICATION_SEP_XML = "application/sep+xml"
 
 
