@@ -4038,3 +4038,105 @@ class TestModeWithdrawalAtEventEnd:
             self._LOCAL_2: frozenset({"op_mod_fixed_w"}),
         }
         await proc.shutdown()
+
+
+class TestADefaultDoesNotOverrideAnActiveEvent:
+    """An event ending must not write its default over another event's modes.
+
+    Two events can hold the same device for different modes without either
+    superseding the other. When one ends, the default that comes back is
+    written whole, so a mode the default names and the other event is still
+    controlling would be taken from the event that owns it. A default is the
+    baseline for modes no event is controlling, never an override of one.
+    """
+
+    MRID_A = b"\x01" * 16
+    MRID_B = b"\x02" * 16
+    _FIXED_W = "op_mod_fixed_w"
+    _MAX_LIM_W = "op_mod_max_lim_w"
+
+    @staticmethod
+    def _dderc(base: DercontrolBase) -> DefaultDercontrol:
+        return DefaultDercontrol(m_rid=MRidtype(value=b"\x20" * 16), dercontrol_base=base)
+
+    async def _a_ends_beside_b(
+        self, dispatcher: AsyncMock, default_base: DercontrolBase
+    ) -> EventProcessor:
+        """A owns fixed_w, B owns max_lim_w, both on /edev/1, neither superseding.
+
+        Their modes do not intersect, so no supersession happens and both stay
+        active. A is then cancelled while B keeps running, and A's program is
+        the only one with a default.
+        """
+        now = int(time.time())
+        base_a = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500))
+        base_b = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_a)],
+            dderc=self._dderc(default_base),
+            device_hrefs=["/edev/1"],
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x02, start=now - 10, duration=3600, base=base_b)],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event())
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+        assert proc._store.get(self.MRID_A).state == EventState.ACTIVE
+        assert proc._store.get(self.MRID_B).state == EventState.ACTIVE, (
+            "the fixture must leave B running: neither event supersedes the other"
+        )
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base_a)
+        ]
+        await proc.process_controls("/derp/1")
+        return proc
+
+    @pytest.mark.asyncio
+    async def test_the_default_is_withheld_when_it_names_a_mode_b_is_running(self):
+        dispatcher = AsyncMock()
+        proc = await self._a_ends_beside_b(
+            dispatcher,
+            DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=9999)),
+        )
+
+        assert dispatcher.apply_default_control.await_count == 0, (
+            "the default would have written op_mod_max_lim_w over the event holding it"
+        )
+        # A's own mode still has to go somewhere: with the default withheld it
+        # is disabled rather than left on the device.
+        disabled = {
+            call.args[0]: frozenset(call.args[1])
+            for call in dispatcher.disable_modes.await_args_list
+        }
+        assert disabled == {"/edev/1": frozenset({self._FIXED_W})}
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_default_is_applied_when_it_names_nothing_b_is_running(self):
+        """The control: sharing a device is not on its own a reason to withhold."""
+        dispatcher = AsyncMock()
+        proc = await self._a_ends_beside_b(
+            dispatcher,
+            DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=1000)),
+        )
+
+        assert dispatcher.apply_default_control.await_count == 1, (
+            "the default names only the ending event's own mode and must come back"
+        )
+        # The default carries fixed_w, so it reverts it; nothing is disabled.
+        assert dispatcher.disable_modes.await_count == 0
+        await proc.shutdown()

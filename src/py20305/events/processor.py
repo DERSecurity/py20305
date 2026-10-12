@@ -1501,6 +1501,28 @@ class EventProcessor:
             dderc = best.default_dercontrol
             assert dderc is not None  # guaranteed by _best_dderc_program_for_device
             carried = get_active_mode_names(dderc.dercontrol_base)
+            # A default is the baseline for the modes no event is controlling,
+            # never an override of one. It is written whole, so where it names a
+            # mode another active event holds on this device, applying it would
+            # take that mode from the event that owns it. Withhold it there and
+            # disable what this event released instead: the event still holding
+            # the device keeps what is its, and its own end brings the default
+            # back for everything at once.
+            # This event's own registration is already gone: the loop above
+            # unregistered it for every device that reached here, which is what
+            # makes a plain reading of the tracker the other events' modes.
+            held = self._mode_tracker.covered(dev_href)
+            if carried & held:
+                logger.debug(
+                    "Event %s: holding back the default for %s, it names %s which "
+                    "another active event is controlling",
+                    record.mrid.hex()[:8],
+                    dev_href,
+                    sorted(carried & held),
+                )
+                if released:
+                    withdraw_targets.append((dev_href, released))
+                continue
             default_modes |= carried
             uncovered = released - carried
             if uncovered:
