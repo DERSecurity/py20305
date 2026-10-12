@@ -23,6 +23,7 @@ from py20305.connectors.control_errors import (
 from py20305.events import processor as processor_mod
 from py20305.events.comms_loss import CommsLossState
 from py20305.events.dispatch import NullDispatcher
+from py20305.events.modes_bitmask import get_active_mode_names
 from py20305.events.processor import EventProcessor
 from py20305.events.response import ResponseCode
 from py20305.events.state_machine import EventState
@@ -309,7 +310,7 @@ class TestProcessControlsCancellation:
 
 
 class TestDisappearedEventCancellation:
-    """IEEE 2030.5-2023 §10.2.2.3 rule p): an event removed from the server
+    """IEEE 2030.5-2023 Â§10.2.2.3 rule p): an event removed from the server
     before the end of its Effective Scheduled Period is cancelled.
 
     Note the 2023 edition flags this as a change from earlier revisions -- a
@@ -927,7 +928,7 @@ class TestAggregatorModeDispatch:
         """Initial DDERC (applied at the tail of process_controls when no
         event is active) must also fan out to local LFDIs in aggregator
         mode rather than hit the aggregator's own EDev."""
-        # Program has a DDERC but no DERControls — exercises _apply_initial_dderc.
+        # Program has a DDERC but no DERControls â€” exercises _apply_initial_dderc.
         state = _setup_state(der_controls=[], dderc=_make_dderc())
 
         local_lfdis = ["aa" * 20, "bb" * 20, "cc" * 20]
@@ -1490,7 +1491,7 @@ class TestInitialDderc:
         state.device_mapping.add("/derp/2", "/edev/1")
 
         await proc.process_controls("/derp/2")
-        # Lower-priority DDERC should be blocked — high-priority already applied
+        # Lower-priority DDERC should be blocked â€” high-priority already applied
         assert dispatcher.apply_default_control.await_count == 1
         await proc.shutdown()
 
@@ -1552,7 +1553,7 @@ class TestInitialDderc:
         await proc.process_controls("/derp/1")
         dispatcher.apply_default_control.assert_not_awaited()
 
-        # Now process Program B — device has active event from A, so no DDERC
+        # Now process Program B â€” device has active event from A, so no DDERC
         await proc.process_controls("/derp/2")
         dispatcher.apply_default_control.assert_not_awaited()
 
@@ -1735,7 +1736,7 @@ class TestSupersessionPerDeviceResponses:
 
     @pytest.mark.asyncio
     async def test_superseded_posts_per_device(self, shutdown: asyncio.Event):
-        """Two programs, two shared devices — SUPERSEDED posted for each device exactly once."""
+        """Two programs, two shared devices â€” SUPERSEDED posted for each device exactly once."""
         now = int(time.time())
         derc1 = _make_derc(0x01, start=now - 10, duration=3600, status_time=1000)
         derc2 = _make_derc(0x02, start=now - 10, duration=3600, status_time=1000)
@@ -1839,7 +1840,7 @@ class TestActivationCompletionExcludesSuperseded:
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
-        # Process both — supersession partially supersedes derc2 on /edev/1
+        # Process both â€” supersession partially supersedes derc2 on /edev/1
         await proc.process_controls("/derp/1")
         await proc.process_controls("/derp/2")
 
@@ -1927,7 +1928,7 @@ class TestDeferredSupersession:
 
     When a higher-priority SCHEDULED event overlaps a lower-priority ACTIVE
     event, the SUPERSEDED response must be deferred until the superseding
-    event actually activates — not posted eagerly at discovery time.
+    event actually activates â€” not posted eagerly at discovery time.
     """
 
     def _setup_two_programs(
@@ -1985,7 +1986,7 @@ class TestDeferredSupersession:
         await proc.process_controls("/derp/1")
         await proc.process_controls("/derp/2")
 
-        # Event 1 should still be ACTIVE — not superseded yet
+        # Event 1 should still be ACTIVE â€” not superseded yet
         rec1 = proc._store.get(derc1.m_rid.value)
         assert rec1 is not None
         assert rec1.state == EventState.ACTIVE
@@ -2017,7 +2018,7 @@ class TestDeferredSupersession:
         # Reset mock to isolate activation responses
         http.post.reset_mock()
 
-        # Activate event 2 — this should trigger deferred supersession
+        # Activate event 2 â€” this should trigger deferred supersession
         rec2 = proc._store.get(derc2.m_rid.value)
         await proc._on_activation(rec2)
 
@@ -2061,7 +2062,7 @@ class TestDeferredSupersession:
         assert rec1.state == EventState.ACTIVE
         assert len(rec1.superseded_devices) == 0
 
-        # Complete event 1 — should post COMPLETED to ALL devices
+        # Complete event 1 â€” should post COMPLETED to ALL devices
         http.post.reset_mock()
         await proc._on_completion(rec1)
 
@@ -4037,6 +4038,677 @@ class TestModeWithdrawalAtEventEnd:
             self._LOCAL_1: frozenset({"op_mod_fixed_w"}),
             self._LOCAL_2: frozenset({"op_mod_fixed_w"}),
         }
+        await proc.shutdown()
+
+
+class TestADefaultDoesNotOverrideAnActiveEvent:
+    """An event ending must not write its default over another event's modes.
+
+    Two events can hold the same device for different modes without either
+    superseding the other. When one ends, the default that comes back is
+    written whole, so a mode the default names and the other event is still
+    controlling would be taken from the event that owns it. A default is the
+    baseline for modes no event is controlling, never an override of one.
+    """
+
+    MRID_A = b"\x01" * 16
+    MRID_B = b"\x02" * 16
+    _FIXED_W = "op_mod_fixed_w"
+    _MAX_LIM_W = "op_mod_max_lim_w"
+
+    @staticmethod
+    def _dderc(base: DercontrolBase) -> DefaultDercontrol:
+        return DefaultDercontrol(m_rid=MRidtype(value=b"\x20" * 16), dercontrol_base=base)
+
+    async def _a_ends_beside_b(
+        self, dispatcher: AsyncMock, default_base: DercontrolBase
+    ) -> EventProcessor:
+        """A owns fixed_w, B owns max_lim_w, both on /edev/1, neither superseding.
+
+        Their modes do not intersect, so no supersession happens and both stay
+        active. A is then cancelled while B keeps running, and A's program is
+        the only one with a default.
+        """
+        now = int(time.time())
+        base_a = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500))
+        base_b = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_a)],
+            dderc=self._dderc(default_base),
+            device_hrefs=["/edev/1"],
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x02, start=now - 10, duration=3600, base=base_b)],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event())
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+        assert proc._store.get(self.MRID_A).state == EventState.ACTIVE
+        assert proc._store.get(self.MRID_B).state == EventState.ACTIVE, (
+            "the fixture must leave B running: neither event supersedes the other"
+        )
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base_a)
+        ]
+        await proc.process_controls("/derp/1")
+        return proc
+
+    @staticmethod
+    def _default_modes_sent(dispatcher: AsyncMock) -> list[frozenset[str]]:
+        from py20305.events.modes_bitmask import get_active_mode_names
+
+        return [
+            get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control.await_args_list
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_default_goes_out_without_the_mode_b_is_running(self):
+        """The default sets what no event is setting, and leaves the rest alone.
+
+        Sending it whole would take op_mod_max_lim_w from B. Withholding it
+        whole would leave op_mod_fixed_w off, although the program says what it
+        should be, for as long as B runs. It goes out naming only the modes
+        nobody is controlling.
+        """
+        dispatcher = AsyncMock()
+        proc = await self._a_ends_beside_b(
+            dispatcher,
+            DercontrolBase(
+                op_mod_max_lim_w=PerCentControlType(value=9999),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+
+        assert self._default_modes_sent(dispatcher) == [frozenset({self._FIXED_W})], (
+            "the default must set the released mode and not the one B is running"
+        )
+        assert dispatcher.disable_modes.await_count == 0, (
+            "the default carries the released mode, so there is nothing to switch off"
+        )
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_default_naming_only_b_s_mode_sends_nothing_and_disables_the_rest(self):
+        """With nothing left to write, there is no write, and the mode this
+        event released has to be switched off instead."""
+        dispatcher = AsyncMock()
+        proc = await self._a_ends_beside_b(
+            dispatcher,
+            DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=9999)),
+        )
+
+        assert dispatcher.apply_default_control.await_count == 0
+        disabled = {
+            call.args[0]: frozenset(call.args[1])
+            for call in dispatcher.disable_modes.await_args_list
+        }
+        assert disabled == {"/edev/1": frozenset({self._FIXED_W})}
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_whole_default_comes_back_when_the_other_event_ends(self):
+        """The masked mode is not lost: B's own end writes the whole default.
+
+        This pins the outcome, not the bookkeeping that is meant to protect it.
+        The partial application is deliberately not recorded as the program's
+        default being in place -- the device never received that default -- but
+        B's end reaches the same place through its own fallback whether or not
+        the recording is skipped, so no test here distinguishes the two.
+        """
+        now = int(time.time())
+        dispatcher = AsyncMock()
+        proc = await self._a_ends_beside_b(
+            dispatcher,
+            DercontrolBase(
+                op_mod_max_lim_w=PerCentControlType(value=9999),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+        assert self._default_modes_sent(dispatcher) == [frozenset({self._FIXED_W})]
+        dispatcher.reset_mock()
+
+        base_b = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = proc._state
+        state.der_programs["/derp/2"].der_controls = [
+            _make_derc(0x02, start=now - 10, duration=3600, current_status=2, base=base_b)
+        ]
+        await proc.process_controls("/derp/2")
+
+        assert frozenset({self._FIXED_W, self._MAX_LIM_W}) in set(
+            self._default_modes_sent(dispatcher)
+        ), "the whole default has to come back once nothing is controlling its modes"
+        await proc.shutdown()
+
+    @staticmethod
+    def _rejecting(device: str):
+        """A dispatcher that refuses one device and accepts the rest."""
+
+        def apply_control(*args, **kwargs):
+            if args and args[0] == device:
+                raise ConnectorValueError("the device would not take it")
+            return None
+
+        dispatcher = AsyncMock()
+        dispatcher.apply_control.side_effect = apply_control
+        return dispatcher
+
+    @pytest.mark.asyncio
+    async def test_a_device_that_rejected_the_event_still_gets_its_default(self):
+        """An event registered on a sibling is not controlling this device.
+
+        One program, two devices, one event. The device that refused it is
+        under no event at all, so the default has to reach it whole. This is
+        the case `_apply_initial_dderc` is written to prevent, where a rejected
+        device would otherwise sit under neither the event nor the default.
+        """
+        now = int(time.time())
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[
+                _make_derc(
+                    0x02,
+                    start=now - 10,
+                    duration=3600,
+                    base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+                )
+            ],
+            dderc=DefaultDercontrol(
+                m_rid=MRidtype(value=b"\x20" * 16),
+                dercontrol_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=9999)),
+            ),
+            device_hrefs=["/edev/1", "/edev/2"],
+        )
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = self._rejecting("/edev/1")
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event())
+        await proc.process_controls("/derp/1")
+        record = proc._store.get(b"\x02" * 16)
+        assert record.rejected_devices == {"/edev/1"}, "the fixture must have one device refuse"
+        assert record.applied_devices == {"/edev/2"}
+
+        dispatcher.reset_mock()
+        proc._dderc_tracker.clear_devices({b"\xaa" * 20})
+        await proc._apply_initial_dderc("/derp/1")
+
+        written = {
+            call.args[0]: get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control.await_args_list
+        }
+        assert written.get("/edev/1") == frozenset({self._MAX_LIM_W}), (
+            "the rejected device is under neither the event nor the default"
+        )
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_fallback_too_keeps_a_rejected_devices_modes(self):
+        """The same, through the end-of-event fallback rather than the initial pass."""
+        now = int(time.time())
+        base_a = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500))
+        base_b = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_a)],
+            dderc=DefaultDercontrol(
+                m_rid=MRidtype(value=b"\x20" * 16),
+                dercontrol_base=DercontrolBase(
+                    op_mod_max_lim_w=PerCentControlType(value=9999),
+                    op_mod_fixed_w=SignedPerCentControlType(value=1000),
+                ),
+            ),
+            device_hrefs=["/edev/1"],
+        )
+        # B covers /edev/1 and /edev/3, and /edev/1 refuses it.
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x02, start=now - 10, duration=3600, base=base_b)],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+        state.device_mapping.add("/derp/2", "/edev/3")
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = self._rejecting("/edev/1")
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event())
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+        assert "/edev/1" in proc._store.get(b"\x02" * 16).rejected_devices
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base_a)
+        ]
+        await proc.process_controls("/derp/1")
+
+        from_fallback = [
+            get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control.await_args_list
+            if call.kwargs.get("cause_mrid") is not None
+        ]
+        assert from_fallback, "the fallback must write to the device"
+        assert all(self._MAX_LIM_W in modes for modes in from_fallback), (
+            "a mode held only on a device that refused the event was kept from the default"
+        )
+        await proc.shutdown()
+
+    _LOCAL_A = "11" * 20
+    _LOCAL_B = "22" * 20
+
+    @pytest.mark.asyncio
+    async def test_a_grouped_default_is_withheld_for_a_mode_held_on_a_sibling_device(self):
+        """Under a group lookup the default reaches further than the device it
+        was chosen for, so what is held must be read that far as well.
+
+        `/derp/1` holds `/edev/1` and `/edev/2` and resolves to both local
+        devices; `/derp/2` holds `/edev/1` alone and resolves to the first.
+        An event on `/derp/2` is running a mode `/derp/1`'s default names. When
+        `/derp/1`'s event ends, the fallback for `/edev/2` -- which holds no
+        such event -- is fanned out to both locals, the first of them being
+        where that mode is being controlled.
+        """
+        now = int(time.time())
+        base_1 = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500))
+        base_2 = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_1)],
+            dderc=self._dderc(DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=9999))),
+            device_hrefs=["/edev/1", "/edev/2"],
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x02, start=now - 10, duration=3600, base=base_2)],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+        groups = {"/derp/1": [self._LOCAL_A, self._LOCAL_B], "/derp/2": [self._LOCAL_A]}
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base_1)
+        ]
+        await proc.process_controls("/derp/1")
+
+        # The fallback is the write that names its cause. Anything it fans out
+        # would land on the local device running op_mod_max_lim_w.
+        from py20305.events.modes_bitmask import get_active_mode_names
+
+        from_fallback = [
+            call
+            for call in dispatcher.apply_default_control_by_lfdi.await_args_list
+            if call.kwargs.get("cause_mrid") is not None
+        ]
+        sent = {get_active_mode_names(call.args[1].dercontrol_base) for call in from_fallback}
+        assert sent <= {frozenset()}, (
+            "the default names a mode an event is running on a device it fans out to"
+        )
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_default_is_applied_when_it_names_nothing_b_is_running(self):
+        """The control: sharing a device is not on its own a reason to withhold."""
+        dispatcher = AsyncMock()
+        proc = await self._a_ends_beside_b(
+            dispatcher,
+            DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=1000)),
+        )
+
+        assert dispatcher.apply_default_control.await_count == 1, (
+            "the default names only the ending event's own mode and must come back"
+        )
+        # The default carries fixed_w, so it reverts it; nothing is disabled.
+        assert dispatcher.disable_modes.await_count == 0
+        await proc.shutdown()
+
+
+class TestTheInitialDefaultAndRunningEvents:
+    """The initial default reaches every local device of its program.
+
+    Eligibility is decided one server-side device at a time: a device with an
+    active event is not a target. Under a group lookup the write is not sent
+    one device at a time, though -- each target fans out to every local device
+    of the program -- so a device correctly left out as a target is written to
+    anyway, as part of another target's fan-out.
+    """
+
+    _LOCAL_A = "11" * 20
+    _LOCAL_B = "22" * 20
+    _MAX_LIM_W = "op_mod_max_lim_w"
+
+    @pytest.mark.asyncio
+    async def test_it_does_not_carry_a_mode_a_local_device_is_running(self):
+        now = int(time.time())
+        base_1 = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500))
+        base_2 = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_1)],
+            dderc=DefaultDercontrol(
+                m_rid=MRidtype(value=b" " * 16),
+                dercontrol_base=DercontrolBase(
+                    op_mod_max_lim_w=PerCentControlType(value=9999),
+                    op_mod_fixed_w=SignedPerCentControlType(value=1000),
+                ),
+            ),
+            device_hrefs=["/edev/1", "/edev/2"],
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x02, start=now - 10, duration=3600, base=base_2)],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+        groups = {"/derp/1": [self._LOCAL_A, self._LOCAL_B], "/derp/2": [self._LOCAL_A]}
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+        dispatcher.reset_mock()
+
+        # /derp/1's event ends. /edev/2 has no active event, so it is eligible
+        # for /derp/1's default -- which fans out to both locals, and the first
+        # of them is where /derp/2's event is running op_mod_max_lim_w.
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base_1)
+        ]
+        await proc.process_controls("/derp/1")
+
+        from py20305.events.modes_bitmask import get_active_mode_names
+
+        carried_to_a = [
+            get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control_by_lfdi.await_args_list
+            if call.args[0] == self._LOCAL_A
+        ]
+        assert all(self._MAX_LIM_W not in modes for modes in carried_to_a), (
+            "a default carrying op_mod_max_lim_w reached the device running it"
+        )
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_default_naming_only_a_running_mode_is_not_sent_at_all(self):
+        """Masking can empty a default, and an empty one is not worth sending.
+
+        The program's default names one mode and a running event controls it,
+        so there is nothing left to set. Sending the emptied copy would be a
+        write to every local device that says nothing.
+        """
+        now = int(time.time())
+        base_1 = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500))
+        base_2 = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_1)],
+            dderc=DefaultDercontrol(
+                m_rid=MRidtype(value=b" " * 16),
+                dercontrol_base=DercontrolBase(
+                    op_mod_max_lim_w=PerCentControlType(value=9999)
+                ),
+            ),
+            device_hrefs=["/edev/1", "/edev/2"],
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x02, start=now - 10, duration=3600, base=base_2)],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+        groups = {"/derp/1": [self._LOCAL_A, self._LOCAL_B], "/derp/2": [self._LOCAL_A]}
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base_1)
+        ]
+        await proc.process_controls("/derp/1")
+
+        initial = [
+            call
+            for call in dispatcher.apply_default_control_by_lfdi.await_args_list
+            if call.kwargs.get("cause_mrid") is None
+        ]
+        assert initial == [], "an emptied default was sent, which sets nothing"
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_mode_running_under_another_program_s_href_is_protected(self):
+        """A group lookup maps programs, not devices, onto local devices.
+
+        `/derp/3` covers a server-side device `/derp/1` never names, and still
+        resolves to the same local device. Reading what is running from
+        `/derp/1`'s own devices would miss it, and the default would land on
+        the local device carrying the mode `/derp/3` is running there.
+        """
+        now = int(time.time())
+        base_1 = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500))
+        base_3 = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_1)],
+            dderc=DefaultDercontrol(
+                m_rid=MRidtype(value=b" " * 16),
+                dercontrol_base=DercontrolBase(
+                    op_mod_max_lim_w=PerCentControlType(value=9999),
+                    op_mod_fixed_w=SignedPerCentControlType(value=1000),
+                ),
+            ),
+            device_hrefs=["/edev/1", "/edev/2"],
+        )
+        state.der_programs["/derp/3"] = DerProgramState(
+            program=_make_program("/derp/3", 0),
+            href="/derp/3",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x03, start=now - 10, duration=3600, base=base_3)],
+        )
+        state.device_mapping.add("/derp/3", "/edev/9")
+        groups = {"/derp/1": [self._LOCAL_A, self._LOCAL_B], "/derp/3": [self._LOCAL_A]}
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/3")
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base_1)
+        ]
+        await proc.process_controls("/derp/1")
+
+        from py20305.events.modes_bitmask import get_active_mode_names
+
+        reaching_a = [
+            get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control_by_lfdi.await_args_list
+            if call.args[0] == self._LOCAL_A
+        ]
+        assert reaching_a, "the fixture must write to the shared local device"
+        assert all(self._MAX_LIM_W not in modes for modes in reaching_a), (
+            "a default carrying the mode another program's event runs reached its device"
+        )
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_an_event_out_of_reach_does_not_hold_a_mode_back(self):
+        """Protection is for what the write touches, not for every running event.
+
+        `/derp/3` runs the mode but resolves to a local device this default
+        never reaches. Holding the mode back on its account would leave it
+        unset on the devices that do get the write, although nothing there is
+        controlling it.
+        """
+        now = int(time.time())
+        base_1 = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500))
+        base_3 = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_1)],
+            dderc=DefaultDercontrol(
+                m_rid=MRidtype(value=b" " * 16),
+                dercontrol_base=DercontrolBase(
+                    op_mod_max_lim_w=PerCentControlType(value=9999),
+                    op_mod_fixed_w=SignedPerCentControlType(value=1000),
+                ),
+            ),
+            device_hrefs=["/edev/1"],
+        )
+        state.der_programs["/derp/3"] = DerProgramState(
+            program=_make_program("/derp/3", 0),
+            href="/derp/3",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x03, start=now - 10, duration=3600, base=base_3)],
+        )
+        state.device_mapping.add("/derp/3", "/edev/9")
+        # No local device in common: /derp/1 writes to A, /derp/3 occupies B.
+        groups = {"/derp/1": [self._LOCAL_A], "/derp/3": [self._LOCAL_B]}
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/3")
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base_1)
+        ]
+        await proc.process_controls("/derp/1")
+
+        from py20305.events.modes_bitmask import get_active_mode_names
+
+        reaching_a = [
+            get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control_by_lfdi.await_args_list
+            if call.args[0] == self._LOCAL_A
+        ]
+        assert reaching_a, "the fixture must write to the device the default is for"
+        assert any(self._MAX_LIM_W in modes for modes in reaching_a), (
+            "the mode was held back for an event on a device this write never reaches"
+        )
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_reach_is_the_default_s_program_not_the_ending_event_s(self):
+        """The default that comes back need not belong to the ending event.
+
+        `/derp/1`'s event ends on a program with no default of its own, so the
+        fallback picks `/derp/2`'s, which fans out to `/derp/2`'s local devices
+        -- a wider set than `/derp/1`'s. Reading what is running from the
+        ending event's program would miss `/derp/3` on the device only the
+        chosen default reaches.
+        """
+        now = int(time.time())
+        base_1 = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500))
+        base_3 = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_1)],
+            dderc=None,
+            device_hrefs=["/edev/1"],
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=DefaultDercontrol(
+                m_rid=MRidtype(value=b"!" * 16),
+                dercontrol_base=DercontrolBase(
+                    op_mod_max_lim_w=PerCentControlType(value=9999),
+                    op_mod_fixed_w=SignedPerCentControlType(value=1000),
+                ),
+            ),
+            der_controls=[],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+        state.der_programs["/derp/3"] = DerProgramState(
+            program=_make_program("/derp/3", 0),
+            href="/derp/3",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x03, start=now - 10, duration=3600, base=base_3)],
+        )
+        state.device_mapping.add("/derp/3", "/edev/9")
+        # /derp/1 reaches A only; the default's program /derp/2 reaches A and B;
+        # /derp/3 occupies B, so only the default's own reach sees it.
+        groups = {
+            "/derp/1": [self._LOCAL_A],
+            "/derp/2": [self._LOCAL_A, self._LOCAL_B],
+            "/derp/3": [self._LOCAL_B],
+        }
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/3")
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base_1)
+        ]
+        await proc.process_controls("/derp/1")
+
+        from py20305.events.modes_bitmask import get_active_mode_names
+
+        sent = [
+            get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control_by_lfdi.await_args_list
+        ]
+        assert sent, "the fixture must apply the other program's default"
+        assert all(self._MAX_LIM_W not in modes for modes in sent), (
+            "the default fanned out carrying a mode running on a device only it reaches"
+        )
         await proc.shutdown()
 
 

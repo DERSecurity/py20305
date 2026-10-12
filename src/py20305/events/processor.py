@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable, Coroutine, Iterable
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Sequence
 from dataclasses import replace
 from functools import cache, partial
 from typing import Any
@@ -41,7 +41,7 @@ from py20305.json_form import (
     serialize_default_der_control,
     serialize_der_control,
 )
-from py20305.models.csipaus.elements import DOE_LIMIT_NAMES, doe_limits
+from py20305.models.csipaus.elements import DOE_LIMIT_NAMES, doe_element_name, doe_limits
 from py20305.models.sep.sep import DefaultDercontrol, Dercontrol1
 
 logger = logging.getLogger(__name__)
@@ -1491,7 +1491,7 @@ class EventProcessor:
         # For each device, find the highest-priority program with a DDERC.
         # A shared device may belong to multiple programs; on event completion,
         # it should revert to the best (lowest primacy number) DDERC available.
-        dderc_targets: list[tuple[str, bytes, DerProgramState]] = []
+        dderc_targets: list[tuple[str, bytes, DerProgramState, DefaultDercontrol, bool]] = []
         # Modes the ended event set that the default does not carry. The
         # default only writes the modes it names, so these would stay in
         # effect on the device unless they are disabled here.
@@ -1524,12 +1524,46 @@ class EventProcessor:
             dderc = best.default_dercontrol
             assert dderc is not None  # guaranteed by _best_dderc_program_for_device
             carried = get_active_mode_names(dderc.dercontrol_base)
-            default_modes |= carried
-            uncovered = released - carried
+            # A default is the baseline for the modes no event is controlling,
+            # and this project does not let it override one. The default is
+            # written whole, so where it names a mode an event that is still
+            # running holds, applying it would take that mode from the event
+            # that owns it. Withhold it there and disable what this event
+            # released instead: the event still holding the device keeps what
+            # is its, and its own end brings the default back for everything at
+            # once. Recorded as a decision rather than quoted from the standard
+            # -- see the note on `_modes_running_in`.
+            # The default belongs to ``best.href``, which need not be the ending
+            # event's program: under a group lookup it fans out to *that*
+            # program's local devices, so that is what the write reaches.
+            held = self._modes_running_in(
+                self._reach_of(best.href, [dev_href]), active_events
+            )
+            taken = carried & held
+            if taken:
+                logger.debug(
+                    "Event %s: sending the default for %s without %s, which "
+                    "another running event is controlling",
+                    record.mrid.hex()[:8],
+                    dev_href,
+                    sorted(taken),
+                )
+            # Taken here rather than in the dispatch loop below, which is still
+            # before any await: a refresh during dispatch can replace the
+            # program's default, and recording the replacement would have the
+            # next pass skip a default the device never received.
+            effective = self._default_without(dderc, taken) if taken else dderc
+            written = carried - taken
+            default_modes |= written
+            uncovered = released - written
             if uncovered:
                 withdraw_targets.append((dev_href, uncovered))
-            if self._dderc_tracker.should_apply(lfdi, best.href, best.primacy):
-                dderc_targets.append((dev_href, lfdi, best))
+            # Nothing left to send only when the default had modes and every one
+            # of them is being controlled. A default that names nothing still
+            # goes out: it always did, and masking cannot have emptied it.
+            emptied = bool(carried) and not written
+            if not emptied and self._dderc_tracker.should_apply(lfdi, best.href, best.primacy):
+                dderc_targets.append((dev_href, lfdi, best, effective, bool(taken)))
 
         # Dispatch DDERC in parallel, then update tracker for successes.
         # With a group lookup supplied, each server-side EDev resolves
@@ -1538,18 +1572,18 @@ class EventProcessor:
         # change the fan-out width between the build and attribution loops.
         if dderc_targets:
             plans: list[
-                tuple[str, bytes, DerProgramState, list[str] | None, DefaultDercontrol]
-            ] = []
-            for dev_href, lfdi, best_prog in dderc_targets:
-                # Taken before any await, and both sent and recorded from here.
-                # A refresh during dispatch can replace the program's default,
-                # and recording the replacement would have the next pass skip a
-                # default the device never received.
-                dderc = best_prog.default_dercontrol
-                assert dderc is not None  # guaranteed by _best_dderc_program_for_device
-                plans.append(
-                    (dev_href, lfdi, best_prog, self._group_local_lfdis(best_prog.href), dderc)
+                tuple[str, bytes, DerProgramState, list[str] | None, DefaultDercontrol, bool]
+            ] = [
+                (
+                    dev_href,
+                    lfdi,
+                    best_prog,
+                    self._group_local_lfdis(best_prog.href),
+                    effective,
+                    is_partial,
                 )
+                for dev_href, lfdi, best_prog, effective, is_partial in dderc_targets
+            ]
             # Both reasons land on the same DDERC write, and they read very
             # differently in an audit trail: "an event ended so the default came
             # back" versus "the upstream went away so we fell to the planning
@@ -1559,7 +1593,7 @@ class EventProcessor:
                 CommandOrigin.COMMS_LOSS if self._comms_loss.active else CommandOrigin.DDERC_REAPPLY
             )
             coros: list[Coroutine[Any, Any, None]] = []
-            for dev_href, _, best_prog, local_lfdis, dderc in plans:
+            for dev_href, _, best_prog, local_lfdis, dderc, _is_partial in plans:
                 if local_lfdis is not None:
                     coros.extend(
                         self._dispatcher.apply_default_control_by_lfdi(
@@ -1587,7 +1621,7 @@ class EventProcessor:
             # per dderc_target); collapse per-fan-out results down to one
             # success per target so the tracker isn't double-recorded.
             idx = 0
-            for dev_href, lfdi, best_prog, local_lfdis, dderc in plans:
+            for dev_href, lfdi, best_prog, local_lfdis, dderc, is_partial in plans:
                 n = len(local_lfdis) if local_lfdis is not None else 1
                 target_results = results[idx : idx + n]
                 idx += n
@@ -1601,10 +1635,13 @@ class EventProcessor:
                         dev_href,
                         failure,
                     )
-                else:
+                elif not is_partial:
                     # The default's mRID, not the ended event's: the
                     # initial-default pass compares against it to skip a
-                    # default that is already in place.
+                    # default that is already in place. Not recorded for a
+                    # default sent without some of its modes -- the device does
+                    # not have that default, and the event still running has to
+                    # be able to bring the whole of it back when it ends.
                     self._dderc_tracker.record_application(
                         lfdi, best_prog.href, dderc.m_rid.value, best_prog.primacy
                     )
@@ -1757,6 +1794,35 @@ class EventProcessor:
             logger.debug("Initial DDERC skip %s: no eligible devices", program_href)
             return
 
+        # A device with an active event is not a target, which is decided one
+        # server-side device at a time. Under a group lookup the write is not
+        # sent that way: each target fans out to every local device of the
+        # program, so a device correctly left out as a target is written to
+        # anyway as part of another target's fan-out. Send the default without
+        # the modes those events are running, as the end-of-event fallback does.
+        held = self._modes_running_in(
+            self._reach_of(program_href, [device for device, _ in targets]), active_events
+        )
+        carried = get_active_mode_names(derp_state.default_dercontrol.dercontrol_base)
+        taken = carried & held
+        if carried and not (carried - taken):
+            logger.debug(
+                "Initial DDERC skip %s: every mode it names is being controlled",
+                program_href,
+            )
+            return
+        dderc = (
+            self._default_without(derp_state.default_dercontrol, taken)
+            if taken
+            else derp_state.default_dercontrol
+        )
+        if taken:
+            logger.debug(
+                "Initial DDERC from %s sent without %s, which a running event controls",
+                program_href,
+                sorted(taken),
+            )
+
         logger.info(
             "Applying initial DDERC from %s to %d device(s)",
             program_href,
@@ -1769,17 +1835,11 @@ class EventProcessor:
         for dev_href, _ in targets:
             if local_lfdis is not None:
                 coros.extend(
-                    self._dispatcher.apply_default_control_by_lfdi(
-                        lfdi, derp_state.default_dercontrol, curves
-                    )
+                    self._dispatcher.apply_default_control_by_lfdi(lfdi, dderc, curves)
                     for lfdi in local_lfdis
                 )
             else:
-                coros.append(
-                    self._dispatcher.apply_default_control(
-                        dev_href, derp_state.default_dercontrol, curves
-                    )
-                )
+                coros.append(self._dispatcher.apply_default_control(dev_href, dderc, curves))
         results = await asyncio.gather(*coros, return_exceptions=True)
 
         per_target_n = len(local_lfdis) if local_lfdis is not None else 1
@@ -1796,6 +1856,79 @@ class EventProcessor:
                 self._dderc_tracker.record_application(
                     lfdi, program_href, dderc_mrid, derp_state.primacy
                 )
+
+    @staticmethod
+    def _default_without(dderc: DefaultDercontrol, modes: frozenset[str]) -> DefaultDercontrol:
+        """The default with ``modes`` taken out of it.
+
+        A default is written whole, so the only way to let it set the modes no
+        event is controlling without disturbing the ones an event is, is to
+        send a copy that does not name them. Base modes are cleared by field
+        name and the CSIP-AUS limits by element name, which is the pair
+        :func:`get_active_mode_names` returns them in.
+        """
+        base = dderc.dercontrol_base
+        cleared: dict[str, Any] = {
+            name: None for name in modes if name in type(base).model_fields
+        }
+        kept = [
+            element
+            for element in (base.other_element or [])
+            if doe_element_name(element) not in modes
+        ]
+        if len(kept) != len(base.other_element or []):
+            cleared["other_element"] = kept
+        return dderc.model_copy(update={"dercontrol_base": base.model_copy(update=cleared)})
+
+    def _reach_of(self, program_href: str, devices: Sequence[str]) -> frozenset[str]:
+        """What a write made for ``devices`` of ``program_href`` actually touches.
+
+        Under a group lookup a program's write goes to its group's local
+        devices whichever of its server-side devices it was decided for, so the
+        group is the reach and the server-side device it was decided for says
+        nothing about where it lands. Without one the write goes to the device
+        it names. The two are tagged apart because a local LFDI and a device
+        href are both strings and nothing stops them colliding.
+        """
+        local_lfdis = self._group_local_lfdis(program_href)
+        if local_lfdis is not None:
+            return frozenset(f"lfdi:{lfdi}" for lfdi in local_lfdis)
+        return frozenset(f"href:{device}" for device in devices)
+
+    def _modes_running_in(
+        self, reach: frozenset[str], active_events: list[EventRecord]
+    ) -> frozenset[str]:
+        """The modes running events hold on anything ``reach`` touches.
+
+        Asked of every active event rather than of a device list, because a
+        group lookup maps *programs* to local devices: another program can
+        cover server-side devices this one never names and still resolve to the
+        same local device, and its modes are as much at risk from a write that
+        lands there.
+        """
+        held: set[str] = set()
+        for record in active_events:
+            devices = list(self._state.device_mapping.program_to_devices.get(
+                record.program_href, []
+            ))
+            if not reach & self._reach_of(record.program_href, devices):
+                continue
+            # Its registrations on the devices this write touches, not on all
+            # of the program's. Without a group lookup the write lands on one
+            # device, and an event registered on that program's other devices
+            # may not be registered on this one -- rejected there, or
+            # superseded there before it started. Counting those would hold a
+            # mode back on a device nothing is controlling it on, and the
+            # device would sit under neither the event nor the default.
+            # With a group lookup the registrations are keyed by server-side
+            # device while the write lands on local ones, so there is no
+            # per-device correspondence to make and all of them count.
+            one = frozenset({record.mrid})
+            grouped = self._group_local_lfdis(record.program_href) is not None
+            for device in devices:
+                if grouped or f"href:{device}" in reach:
+                    held |= self._mode_tracker.covered_among(device, one)
+        return frozenset(held)
 
     def _device_has_other_active(
         self, dev_href: str, exclude_mrid: bytes, active_events: list[EventRecord]
