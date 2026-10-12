@@ -4105,24 +4105,91 @@ class TestADefaultDoesNotOverrideAnActiveEvent:
         await proc.process_controls("/derp/1")
         return proc
 
+    @staticmethod
+    def _default_modes_sent(dispatcher: AsyncMock) -> list[frozenset[str]]:
+        from py20305.events.modes_bitmask import get_active_mode_names
+
+        return [
+            get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control.await_args_list
+        ]
+
     @pytest.mark.asyncio
-    async def test_the_default_is_withheld_when_it_names_a_mode_b_is_running(self):
+    async def test_the_default_goes_out_without_the_mode_b_is_running(self):
+        """The default sets what no event is setting, and leaves the rest alone.
+
+        Sending it whole would take op_mod_max_lim_w from B. Withholding it
+        whole would leave op_mod_fixed_w off, although the program says what it
+        should be, for as long as B runs. It goes out naming only the modes
+        nobody is controlling.
+        """
+        dispatcher = AsyncMock()
+        proc = await self._a_ends_beside_b(
+            dispatcher,
+            DercontrolBase(
+                op_mod_max_lim_w=PerCentControlType(value=9999),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+
+        assert self._default_modes_sent(dispatcher) == [frozenset({self._FIXED_W})], (
+            "the default must set the released mode and not the one B is running"
+        )
+        assert dispatcher.disable_modes.await_count == 0, (
+            "the default carries the released mode, so there is nothing to switch off"
+        )
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_default_naming_only_b_s_mode_sends_nothing_and_disables_the_rest(self):
+        """With nothing left to write, there is no write, and the mode this
+        event released has to be switched off instead."""
         dispatcher = AsyncMock()
         proc = await self._a_ends_beside_b(
             dispatcher,
             DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=9999)),
         )
 
-        assert dispatcher.apply_default_control.await_count == 0, (
-            "the default would have written op_mod_max_lim_w over the event holding it"
-        )
-        # A's own mode still has to go somewhere: with the default withheld it
-        # is disabled rather than left on the device.
+        assert dispatcher.apply_default_control.await_count == 0
         disabled = {
             call.args[0]: frozenset(call.args[1])
             for call in dispatcher.disable_modes.await_args_list
         }
         assert disabled == {"/edev/1": frozenset({self._FIXED_W})}
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_whole_default_comes_back_when_the_other_event_ends(self):
+        """The masked mode is not lost: B's own end writes the whole default.
+
+        This pins the outcome, not the bookkeeping that is meant to protect it.
+        The partial application is deliberately not recorded as the program's
+        default being in place -- the device never received that default -- but
+        B's end reaches the same place through its own fallback whether or not
+        the recording is skipped, so no test here distinguishes the two.
+        """
+        now = int(time.time())
+        dispatcher = AsyncMock()
+        proc = await self._a_ends_beside_b(
+            dispatcher,
+            DercontrolBase(
+                op_mod_max_lim_w=PerCentControlType(value=9999),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+        assert self._default_modes_sent(dispatcher) == [frozenset({self._FIXED_W})]
+        dispatcher.reset_mock()
+
+        base_b = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = proc._state
+        state.der_programs["/derp/2"].der_controls = [
+            _make_derc(0x02, start=now - 10, duration=3600, current_status=2, base=base_b)
+        ]
+        await proc.process_controls("/derp/2")
+
+        assert frozenset({self._FIXED_W, self._MAX_LIM_W}) in set(
+            self._default_modes_sent(dispatcher)
+        ), "the whole default has to come back once nothing is controlling its modes"
         await proc.shutdown()
 
     _LOCAL_A = "11" * 20
@@ -4175,12 +4242,15 @@ class TestADefaultDoesNotOverrideAnActiveEvent:
 
         # The fallback is the write that names its cause. Anything it fans out
         # would land on the local device running op_mod_max_lim_w.
+        from py20305.events.modes_bitmask import get_active_mode_names
+
         from_fallback = [
             call
             for call in dispatcher.apply_default_control_by_lfdi.await_args_list
             if call.kwargs.get("cause_mrid") is not None
         ]
-        assert from_fallback == [], (
+        sent = {get_active_mode_names(call.args[1].dercontrol_base) for call in from_fallback}
+        assert sent <= {frozenset()}, (
             "the default names a mode an event is running on a device it fans out to"
         )
         await proc.shutdown()

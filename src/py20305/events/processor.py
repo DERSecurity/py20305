@@ -41,7 +41,7 @@ from py20305.json_form import (
     serialize_default_der_control,
     serialize_der_control,
 )
-from py20305.models.csipaus.elements import DOE_LIMIT_NAMES, doe_limits
+from py20305.models.csipaus.elements import DOE_LIMIT_NAMES, doe_element_name, doe_limits
 from py20305.models.sep.sep import DefaultDercontrol, Dercontrol1
 
 logger = logging.getLogger(__name__)
@@ -1468,7 +1468,7 @@ class EventProcessor:
         # For each device, find the highest-priority program with a DDERC.
         # A shared device may belong to multiple programs; on event completion,
         # it should revert to the best (lowest primacy number) DDERC available.
-        dderc_targets: list[tuple[str, bytes, DerProgramState]] = []
+        dderc_targets: list[tuple[str, bytes, DerProgramState, DefaultDercontrol, bool]] = []
         # Modes the ended event set that the default does not carry. The
         # default only writes the modes it names, so these would stay in
         # effect on the device unless they are disabled here.
@@ -1511,23 +1511,31 @@ class EventProcessor:
             # once. Recorded as a decision rather than quoted from the standard
             # -- see the note on `_held_by_running_events`.
             held = self._held_by_running_events(best.href, dev_href, all_devices, active_events)
-            if carried & held:
+            taken = carried & held
+            if taken:
                 logger.debug(
-                    "Event %s: holding back the default for %s, it names %s which "
-                    "another active event is controlling",
+                    "Event %s: sending the default for %s without %s, which "
+                    "another running event is controlling",
                     record.mrid.hex()[:8],
                     dev_href,
-                    sorted(carried & held),
+                    sorted(taken),
                 )
-                if released:
-                    withdraw_targets.append((dev_href, released))
-                continue
-            default_modes |= carried
-            uncovered = released - carried
+            # Taken here rather than in the dispatch loop below, which is still
+            # before any await: a refresh during dispatch can replace the
+            # program's default, and recording the replacement would have the
+            # next pass skip a default the device never received.
+            effective = self._default_without(dderc, taken) if taken else dderc
+            written = carried - taken
+            default_modes |= written
+            uncovered = released - written
             if uncovered:
                 withdraw_targets.append((dev_href, uncovered))
-            if self._dderc_tracker.should_apply(lfdi, best.href, best.primacy):
-                dderc_targets.append((dev_href, lfdi, best))
+            # Nothing left to send only when the default had modes and every one
+            # of them is being controlled. A default that names nothing still
+            # goes out: it always did, and masking cannot have emptied it.
+            emptied = bool(carried) and not written
+            if not emptied and self._dderc_tracker.should_apply(lfdi, best.href, best.primacy):
+                dderc_targets.append((dev_href, lfdi, best, effective, bool(taken)))
 
         # Dispatch DDERC in parallel, then update tracker for successes.
         # With a group lookup supplied, each server-side EDev resolves
@@ -1536,18 +1544,18 @@ class EventProcessor:
         # change the fan-out width between the build and attribution loops.
         if dderc_targets:
             plans: list[
-                tuple[str, bytes, DerProgramState, list[str] | None, DefaultDercontrol]
-            ] = []
-            for dev_href, lfdi, best_prog in dderc_targets:
-                # Taken before any await, and both sent and recorded from here.
-                # A refresh during dispatch can replace the program's default,
-                # and recording the replacement would have the next pass skip a
-                # default the device never received.
-                dderc = best_prog.default_dercontrol
-                assert dderc is not None  # guaranteed by _best_dderc_program_for_device
-                plans.append(
-                    (dev_href, lfdi, best_prog, self._group_local_lfdis(best_prog.href), dderc)
+                tuple[str, bytes, DerProgramState, list[str] | None, DefaultDercontrol, bool]
+            ] = [
+                (
+                    dev_href,
+                    lfdi,
+                    best_prog,
+                    self._group_local_lfdis(best_prog.href),
+                    effective,
+                    partial,
                 )
+                for dev_href, lfdi, best_prog, effective, partial in dderc_targets
+            ]
             # Both reasons land on the same DDERC write, and they read very
             # differently in an audit trail: "an event ended so the default came
             # back" versus "the upstream went away so we fell to the planning
@@ -1557,7 +1565,7 @@ class EventProcessor:
                 CommandOrigin.COMMS_LOSS if self._comms_loss.active else CommandOrigin.DDERC_REAPPLY
             )
             coros: list[Coroutine[Any, Any, None]] = []
-            for dev_href, _, best_prog, local_lfdis, dderc in plans:
+            for dev_href, _, best_prog, local_lfdis, dderc, _partial in plans:
                 if local_lfdis is not None:
                     coros.extend(
                         self._dispatcher.apply_default_control_by_lfdi(
@@ -1585,7 +1593,7 @@ class EventProcessor:
             # per dderc_target); collapse per-fan-out results down to one
             # success per target so the tracker isn't double-recorded.
             idx = 0
-            for dev_href, lfdi, best_prog, local_lfdis, dderc in plans:
+            for dev_href, lfdi, best_prog, local_lfdis, dderc, partial in plans:
                 n = len(local_lfdis) if local_lfdis is not None else 1
                 target_results = results[idx : idx + n]
                 idx += n
@@ -1599,10 +1607,13 @@ class EventProcessor:
                         dev_href,
                         failure,
                     )
-                else:
+                elif not partial:
                     # The default's mRID, not the ended event's: the
                     # initial-default pass compares against it to skip a
-                    # default that is already in place.
+                    # default that is already in place. Not recorded for a
+                    # default sent without some of its modes -- the device does
+                    # not have that default, and the event still running has to
+                    # be able to bring the whole of it back when it ends.
                     self._dderc_tracker.record_application(
                         lfdi, best_prog.href, dderc.m_rid.value, best_prog.primacy
                     )
@@ -1794,6 +1805,29 @@ class EventProcessor:
                 self._dderc_tracker.record_application(
                     lfdi, program_href, dderc_mrid, derp_state.primacy
                 )
+
+    @staticmethod
+    def _default_without(dderc: DefaultDercontrol, modes: frozenset[str]) -> DefaultDercontrol:
+        """The default with ``modes`` taken out of it.
+
+        A default is written whole, so the only way to let it set the modes no
+        event is controlling without disturbing the ones an event is, is to
+        send a copy that does not name them. Base modes are cleared by field
+        name and the CSIP-AUS limits by element name, which is the pair
+        :func:`get_active_mode_names` returns them in.
+        """
+        base = dderc.dercontrol_base
+        cleared: dict[str, Any] = {
+            name: None for name in modes if name in type(base).model_fields
+        }
+        kept = [
+            element
+            for element in (base.other_element or [])
+            if doe_element_name(element) not in modes
+        ]
+        if len(kept) != len(base.other_element or []):
+            cleared["other_element"] = kept
+        return dderc.model_copy(update={"dercontrol_base": base.model_copy(update=cleared)})
 
     def _held_by_running_events(
         self,
