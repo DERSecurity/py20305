@@ -4183,6 +4183,25 @@ class TestPartlySupersededEvent:
         # A owned one mode and B took it, so A has nothing left to release and
         # must not write: B's activation already moved the device.
         assert self._disabled(dispatcher) == {}
+        # But A must still be out of the tracker. A registration left behind
+        # would read as coverage to B, so B's own end would release nothing and
+        # the mode would stay on the device for good.
+        assert proc._mode_tracker.covered("/edev/1") == frozenset({"op_mod_max_lim_w"}), (
+            "only B should still hold the mode it took over"
+        )
+
+        dispatcher.reset_mock()
+        state.der_programs["/derp/2"].der_controls = [
+            self._cancelled(
+                0x02, now, DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+            )
+        ]
+        await proc.process_controls("/derp/2")
+
+        assert self._disabled(dispatcher) == {"/edev/1": frozenset({"op_mod_max_lim_w"})}, (
+            "B's end must release the mode it took from A"
+        )
+        assert proc._mode_tracker.covered("/edev/1") == frozenset()
         await proc.shutdown()
 
     @pytest.mark.asyncio

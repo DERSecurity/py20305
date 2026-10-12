@@ -1439,26 +1439,7 @@ class EventProcessor:
         opting out every active event reverts the device to its planning limit.
         """
         all_devices = self._unique_devices(record.program_href)
-        # Leave out a device another event took over *entirely*: there the
-        # superseding event's own activation is the write that moves it, and a
-        # fallback here would name this event as the cause of a setpoint it no
-        # longer sets.
-        #
-        # Only entirely, though. A device goes into ``superseded_devices`` when
-        # another event takes over any one of this event's modes there, so
-        # skipping every such device would skip the modes that event never took:
-        # they would stay on the device, and the registration saying so would
-        # outlive this event and read as coverage to the next one to release
-        # them. Compared per mode, not per device.
         owned = get_active_mode_names(record.derc.dercontrol_base)
-        devices = [
-            d
-            for d in all_devices
-            if not (
-                d in record.superseded_devices
-                and record.superseded_modes.get(d, frozenset()) >= owned
-            )
-        ]
         active_events = [r for r in self._store.by_state(EventState.ACTIVE) if not r.opted_out]
         # Devices with no DDERC anywhere: cleared to the connector safe-default
         # only in the comms-loss opt-out flow; the completion path leaves
@@ -1468,9 +1449,25 @@ class EventProcessor:
         # Unregister modes and compute per-device fallback needs
         needs_fallback: list[str] = []
         released_modes: dict[str, frozenset[str]] = {}
-        for dev_href in devices:
+        for dev_href in all_devices:
+            # Unregistered for every device, superseded ones included. Leaving
+            # the registration would have the tracker believe this event still
+            # owns those modes, so the event that took them over would release
+            # nothing when it ends and they would stay on the device for good.
             released = self._mode_tracker.unregister(dev_href, record.mrid)
             released_modes[dev_href] = released
+            # Dispatching is the separate question. A device another event took
+            # over *entirely* is left to it: its activation is the write that
+            # moves the device, and a fallback here would name this event as the
+            # cause of a setpoint it no longer sets. Entirely, though -- a device
+            # goes into ``superseded_devices`` when another event takes over any
+            # one of this event's modes there, and the modes that event never
+            # took are still this event's to release. Compared per mode.
+            if (
+                dev_href in record.superseded_devices
+                and record.superseded_modes.get(dev_href, frozenset()) >= owned
+            ):
+                continue
             if released:
                 # Some modes were released and not covered by other events
                 needs_fallback.append(dev_href)
