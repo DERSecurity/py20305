@@ -41,15 +41,15 @@ from py20305.json_form import (
     serialize_default_der_control,
     serialize_der_control,
 )
+from py20305.models.csipaus.elements import DOE_LIMIT_NAMES, doe_limits
 from py20305.models.sep.sep import DefaultDercontrol, Dercontrol1
 
 logger = logging.getLogger(__name__)
 
 #: CSIP-AUS Dynamic-Operating-Envelope limit fields. They ride in
-#: ``DERControlBase.other_element`` as parsed extension objects (each with
-#: ``.value`` / ``.multiplier``), not as first-class base attributes -- mirrors
-#: ``connectors.modes._translate_csipaus_power_limit``.
-_DOE_ENVELOPE_NAMES = ("opModExpLimW", "opModImpLimW", "opModGenLimW", "opModLoadLimW")
+#: ``DERControlBase.other_element``, not as first-class base attributes; see
+#: ``models.csipaus.elements`` for how they are read.
+_DOE_ENVELOPE_NAMES = tuple(sorted(DOE_LIMIT_NAMES))
 
 #: Ceiling on how long a device's activation response waits on its
 #: dispatch. ACTIVE is now posted only after the device's apply returns, so this
@@ -82,28 +82,16 @@ def _extract_doe_envelope(base: Any) -> dict[str, dict[str, int | float]]:
     to decide whether a ``doe`` projection is warranted. ``watts`` is the
     resolved magnitude (``value * 10**multiplier``) so an optimizer doesn't have
     to re-apply the exponent; it is an ``int`` unless a negative multiplier makes
-    it fractional.
+    it fractional. Typed and generic elements are read alike.
     """
-    out: dict[str, dict[str, int | float]] = {}
-    for elem in getattr(base, "other_element", None) or []:
-        meta = getattr(getattr(elem, "Meta", None), "name", None) or getattr(
-            getattr(getattr(elem, "__class__", None), "Meta", None), "name", None
-        )
-        if meta not in _DOE_ENVELOPE_NAMES:
-            continue
-        if not (hasattr(elem, "value") and hasattr(elem, "multiplier")):
-            continue
-        multiplier = elem.multiplier
-        if hasattr(multiplier, "value"):
-            multiplier = multiplier.value
-        value = int(elem.value)
-        multiplier = int(multiplier)
-        out[meta] = {
+    return {
+        name: {
             "value": value,
             "multiplier": multiplier,
             "watts": _resolve_watts(value, multiplier),
         }
-    return out
+        for name, (value, multiplier) in doe_limits(base).items()
+    }
 
 
 @cache

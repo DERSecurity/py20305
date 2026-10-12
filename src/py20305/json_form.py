@@ -24,6 +24,8 @@ import logging
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
+from py20305.models.csipaus.elements import doe_element_name, doe_value_multiplier
+
 logger = logging.getLogger(__name__)
 
 # Field names that are generateDS / XSD-binding codegen artifacts rather
@@ -205,6 +207,7 @@ def flatten_multiplier_fields(data: dict[str, Any]) -> dict[str, Any]:
             result[key] = value
     return result
 
+
 def unwrap_value(obj: Any) -> Any:
     """Return ``obj.value`` if ``obj`` is a SEP wrapper (``TimeType``,
     ``MRidtype``, etc.); otherwise return ``obj`` unchanged.
@@ -303,42 +306,22 @@ def _local_name(qname: Any) -> str | None:
 
 
 def _doe_element_name(elem: Any) -> str | None:
-    """CSIP-AUS element name for a DOE control, whether it parsed as a typed
-    model (``Meta.name``) or -- when the csipaus types aren't registered in the
-    parser context -- a generic ``AnyElement`` (Clark-notation ``qname``)."""
-    meta = getattr(elem, "Meta", None) or getattr(getattr(elem, "__class__", None), "Meta", None)
-    name = getattr(meta, "name", None)
-    if isinstance(name, str):
-        return name
-    return _local_name(getattr(elem, "qname", None))
-
-
-def _safe_int(text: Any) -> int | None:
-    try:
-        return int(text)
-    except (TypeError, ValueError):
-        return None
+    """CSIP-AUS element name for a DOE control, typed model or generic element."""
+    return doe_element_name(elem)
 
 
 def _doe_value_multiplier(elem: Any) -> dict[str, Any]:
     """``{value, multiplier}`` for a DOE control. A typed ActivePower-style model
-    exposes them as attributes; a generic ``AnyElement`` carries them as child
-    elements with text."""
+    is serialized whole; a generic ``AnyElement`` is read from its child elements."""
     if getattr(elem, "value", None) is not None:
         serialized = safe_serialize(elem)
         if isinstance(serialized, dict):
             return serialized
-    out: dict[str, Any] = {}
-    for child in getattr(elem, "children", None) or []:
-        cname = _local_name(getattr(child, "qname", None))
-        val = _safe_int(getattr(child, "text", None))
-        if val is None:
-            continue
-        if cname == "value":
-            out["value"] = val
-        elif cname == "multiplier":
-            out["multiplier"] = {"value": val}
-    return out
+    pair = doe_value_multiplier(elem)
+    if pair is None:
+        return {}
+    value, multiplier = pair
+    return {"value": value, "multiplier": {"value": multiplier}}
 
 
 def _serialize_doe_controls(base: Any) -> dict[str, Any]:

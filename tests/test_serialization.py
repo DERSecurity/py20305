@@ -220,3 +220,33 @@ def test_from_xml_wrong_root_element_raises_xml_parse_error():
     err = excinfo.value
     assert err.model_name == "Time"
     assert err.body_length == len(body)
+
+
+def test_csipaus_limits_parse_as_typed_models_in_a_fresh_process():
+    """The parser types an extension element only when its class is imported.
+
+    Importing ``py20305.xml`` registers the CSIP-AUS models, so a limit parses
+    as ``OpModExpLimW`` whichever module loaded first. Run in a fresh
+    interpreter: in this process the models are long since imported.
+    """
+    import subprocess
+    import sys
+
+    script = (
+        "from py20305.xml import from_xml\n"
+        "from py20305.models.sep.sep import Dercontrol1\n"
+        'xml = (\'<DERControl xmlns="urn:ieee:std:2030.5:ns" '
+        'xmlns:csipaus="https://csipaus.org/ns">\'\n'
+        "  '<mRID>0EE636B34F9D1068005092C41C70C83E</mRID><creationTime>1</creationTime>'\n"
+        "  '<EventStatus><currentStatus>1</currentStatus><dateTime>1</dateTime>'\n"
+        "  '<potentiallySuperseded>false</potentiallySuperseded></EventStatus>'\n"
+        "  '<interval><duration>600</duration><start>1</start></interval>'\n"
+        "  '<DERControlBase><csipaus:opModExpLimW><multiplier>3</multiplier>'\n"
+        "  '<value>2000</value></csipaus:opModExpLimW></DERControlBase></DERControl>')\n"
+        "control = from_xml(xml.encode(), Dercontrol1)\n"
+        "print(type(control.dercontrol_base.other_element[0]).__name__)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True, timeout=120
+    )
+    assert result.stdout.strip() == "OpModExpLimW"

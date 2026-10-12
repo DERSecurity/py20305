@@ -83,3 +83,22 @@ class TestGetActiveModeNames:
         assert "op_mod_connect" in names
         assert "op_mod_energize" in names
         assert len(names) == 2
+
+    def test_a_csipaus_limit_is_named_whether_typed_or_generic(self):
+        from xsdata.formats.dataclass.models.generics import AnyElement
+
+        from py20305.models.csipaus.csipaus_ext import OpModExpLimW
+        from py20305.models.sep.sep import PowerOfTenMultiplierType
+
+        typed = OpModExpLimW(value=2000, multiplier=PowerOfTenMultiplierType(value=3))
+        assert get_active_mode_names(DercontrolBase(other_element=[typed])) == frozenset(
+            {"opModExpLimW"}
+        )
+        ns = "{https://csipaus.org/ns}"
+        generic = AnyElement(
+            qname=f"{ns}opModGenLimW",
+            children=[AnyElement(qname=f"{ns}value", text="7000")],
+        )
+        assert get_active_mode_names(DercontrolBase(other_element=[generic])) == frozenset(
+            {"opModGenLimW"}
+        )
