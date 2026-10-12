@@ -1557,9 +1557,9 @@ class EventProcessor:
                     best_prog,
                     self._group_local_lfdis(best_prog.href),
                     effective,
-                    partial,
+                    is_partial,
                 )
-                for dev_href, lfdi, best_prog, effective, partial in dderc_targets
+                for dev_href, lfdi, best_prog, effective, is_partial in dderc_targets
             ]
             # Both reasons land on the same DDERC write, and they read very
             # differently in an audit trail: "an event ended so the default came
@@ -1570,7 +1570,7 @@ class EventProcessor:
                 CommandOrigin.COMMS_LOSS if self._comms_loss.active else CommandOrigin.DDERC_REAPPLY
             )
             coros: list[Coroutine[Any, Any, None]] = []
-            for dev_href, _, best_prog, local_lfdis, dderc, _partial in plans:
+            for dev_href, _, best_prog, local_lfdis, dderc, _is_partial in plans:
                 if local_lfdis is not None:
                     coros.extend(
                         self._dispatcher.apply_default_control_by_lfdi(
@@ -1598,7 +1598,7 @@ class EventProcessor:
             # per dderc_target); collapse per-fan-out results down to one
             # success per target so the tracker isn't double-recorded.
             idx = 0
-            for dev_href, lfdi, best_prog, local_lfdis, dderc, partial in plans:
+            for dev_href, lfdi, best_prog, local_lfdis, dderc, is_partial in plans:
                 n = len(local_lfdis) if local_lfdis is not None else 1
                 target_results = results[idx : idx + n]
                 idx += n
@@ -1612,7 +1612,7 @@ class EventProcessor:
                         dev_href,
                         failure,
                     )
-                elif not partial:
+                elif not is_partial:
                     # The default's mRID, not the ended event's: the
                     # initial-default pass compares against it to skip a
                     # default that is already in place. Not recorded for a
