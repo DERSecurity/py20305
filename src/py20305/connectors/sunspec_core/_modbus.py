@@ -157,11 +157,12 @@ _P_LIM_PCT_CONTROLS: dict[str, str] = {
     "gen": "opModGenLimW",
 }
 
-#: The CSIP-AUS DOE limits this connector enforces, as the doeModesSupported /
-#: doeModesEnabled bitmap: opModGenLimW (bit 2) alone. opModExpLimW and
-#: opModImpLimW constrain power at the connection point, which an inverter
-#: cannot measure, and opModLoadLimW has no model 704 register to land on.
-_DOE_MODES = 0x04
+#: The only CSIP-AUS DOE limit this connector can enforce, as its
+#: doeModesSupported / doeModesEnabled bit: opModGenLimW (bit 2). CSIP-AUS v1.1a
+#: Annex B defines opModExpLimW and opModImpLimW at the connection point, which
+#: an inverter cannot measure, and opModLoadLimW has no model 704 register to
+#: land on.
+_GEN_LIM_DOE_BIT = 0x04
 
 
 def _resolve_point(model: Any, dotted: str) -> Any:
@@ -822,7 +823,7 @@ class SunSpecModbusConnector:
         result["CtrlModes"] = model.CtrlModes.cvalue
         # CSIP-AUS doeModesSupported, rather than the all-four default. Only used
         # when the client is in CSIP-AUS mode.
-        result["DoeModesSupported"] = _DOE_MODES
+        result["DoeModesSupported"] = self._doe_modes()
         return result
 
     def _fetch_status_sync(self) -> dict[str, Any]:
@@ -873,8 +874,23 @@ class SunSpecModbusConnector:
         result["CtrlModes"] = model.CtrlModes.cvalue
         # CSIP-AUS doeModesEnabled: the same bits as doeModesSupported, since
         # enabled must not exceed supported, rather than the 0x03 default.
-        result["DoeModesEnabled"] = _DOE_MODES
+        result["DoeModesEnabled"] = self._doe_modes()
         return result
+
+    def _doe_modes(self) -> int:
+        """The doeModesSupported / doeModesEnabled bitmap for this device.
+
+        opModGenLimW lands on 704 WMaxLimPct, so a device without that point
+        advertises nothing rather than a limit it would decline. Read from the
+        scanned model instead of a fresh read: the scan reads every model in
+        full, and which points a device implements does not change between
+        scans. The WMax base the conversion needs is not checked here; the
+        scan-readiness check already guarantees WMaxRtg.
+        """
+        instances = self._target.models.get(704)
+        if not instances or _unimplemented_points(instances[0], ("WMaxLimPct",)):
+            return 0
+        return _GEN_LIM_DOE_BIT
 
     def _update_qv_sync(self, params: dict[str, Any]) -> None:
         model = self._get_model(705)
@@ -1048,21 +1064,25 @@ class SunSpecModbusConnector:
     def _update_gen_lim_sync(self, params: dict[str, Any]) -> None:
         """Apply CSIP-AUS opModGenLimW (the ``"gen"`` slot).
 
-        A watts limit on the DER's own generation. CSIP-AUS reads it for a pure
-        generator the same way as opModMaxLimW, the more restrictive of the two
-        winning, so it is converted to a percent of WMax and merged into 704
-        WMaxLimPct beside it.
+        A watts limit on the DER's own generation. CSIP-AUS v1.1a Annex B (the
+        note under opModLoadLimW) has a pure generator interpret it "in the same
+        manner as opModMaxLimW" and, where both are present, use "the most
+        restrictive value", so it is converted to a percent of WMax and merged
+        into 704 WMaxLimPct beside it.
 
         A clear for a limit that is not set writes nothing: the comms-loss clear
         sends one for every mode, and the register may belong to opModMaxLimW.
+        An enabled payload without a value is not a clear either, and changes
+        nothing, since treating it as one would lift the limit in force.
         """
         enabled = params.get("gen_lim_mode_enable", 0) == 1
         watts = params.get("gen_lim_w")
 
         if enabled and watts is None:
             logger.warning("opModGenLimW enabled but carried no value; nothing to apply")
+            return
 
-        if not enabled or watts is None:
+        if not enabled:
             self._gen_lim_watts = None
             if self._p_lim_slots["gen"] != (False, None):
                 self._apply_inject_pct_slot("gen", False, None)
@@ -1227,8 +1247,11 @@ class SunSpecModbusConnector:
         model_702 = self._get_model(702)
         model_702.WMax.cvalue = self._wmax_baseline
         model_702.write()
-        self._wmax_baseline = None
+        # The baseline is the retry marker: dropped only once an active
+        # generation limit has been re-expressed against the restored WMax, so a
+        # failed 704 write leaves the restore pending for the next clear.
         self._refresh_gen_lim_pct()
+        self._wmax_baseline = None
 
     def _watts_as_pct_of_wmax(self, watts: float, control: str) -> float | None:
         """Express ``watts`` as a percent of the device's max active power.

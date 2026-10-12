@@ -395,6 +395,17 @@ class TestSunSpecFetch:
         assert result["DoeModesSupported"] == 0x04
 
     @pytest.mark.asyncio
+    async def test_doe_modes_are_empty_without_wmaxlimpct(self, sunspec_connector):
+        """opModGenLimW lands on 704 WMaxLimPct. A device without that point
+        would decline the limit, so it must not advertise it either."""
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.WMaxLimPct = MagicMock(value=None, cvalue=None)
+        nameplate = await sunspec_connector.fetch_nameplate()
+        configuration = await sunspec_connector.fetch_configuration()
+        assert nameplate["DoeModesSupported"] == 0
+        assert configuration["DoeModesEnabled"] == 0
+
+    @pytest.mark.asyncio
     async def test_fetch_nameplate_wmax_none_raises(self, sunspec_connector):
         """WMaxRtg=None must raise ConnectorConnectionError (required field)."""
         from py20305.connectors.base import ConnectorConnectionError
@@ -1554,6 +1565,45 @@ class TestSunSpecGenLim:
             await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
 
         model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_enabled_gen_lim_without_a_value_keeps_the_active_limit(
+        self, sunspec_connector
+    ):
+        """A malformed payload is not a clear. Treating it as one would loosen
+        the device from the limit it is holding."""
+        _, model_704 = self._models(sunspec_connector)
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+        model_704.write.reset_mock()
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1})
+        model_704.write.assert_not_called()
+        assert model_704.WMaxLimPct.cvalue == 40
+        assert model_704.WMaxLimPctEna.cvalue == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_refresh_is_retried_by_the_next_inject_clear(
+        self, sunspec_connector
+    ):
+        """WMax is restored before the generation limit is re-expressed. If that
+        second write fails, the restore must still be pending, so the retried
+        clear re-expresses the limit rather than skipping it and leaving the
+        looser percent on the device."""
+        model_702, model_704 = self._models(sunspec_connector)
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+        assert model_704.WMaxLimPct.cvalue == 50
+
+        model_704.write.side_effect = OSError("link dropped")
+        with pytest.raises(OSError):
+            await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        # Record what reaches the device: the failed write above already left
+        # 40 in the point's in-memory value, so the point alone proves nothing.
+        written: list[float] = []
+        model_704.write.side_effect = lambda: written.append(model_704.WMaxLimPct.cvalue)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        assert model_702.WMax.cvalue == 5000
+        assert written and written[-1] == 40
 
     @pytest.mark.asyncio
     async def test_negative_gen_lim_is_refused(self, sunspec_connector):
