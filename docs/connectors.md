@@ -233,3 +233,33 @@ only one of them is anybody's mistake:
 
 Overriding the method is what support means. A connector that overrides nothing
 is not silently credited with accepting every command.
+
+## Reacting to the schedule
+
+The write path delivers setpoints. Separately, the client pushes a connector the
+forward-looking schedule behind those setpoints, so logic that wants to plan (an
+optimizer, a price-aware dispatcher) has it without polling.
+
+Override `on_schedule_notification`, or one of the per-stream convenience hooks
+it fans out to. Each is informational: an exception raised in one is logged and
+swallowed, never affecting dispatch, and none of them apply a setpoint, which
+stays the `update_*` path's job.
+
+| Hook | Fires on |
+|---|---|
+| `notification_control` | a scheduled `DERControl` was added, updated, activated, superseded, cancelled or completed |
+| `notification_default_baseline` | the program's `DefaultDERControl` baseline was added or changed |
+| `notification_doe` | a Dynamic Operating Envelope (export / import / generation / load watt-limit) changed |
+| `notification_price` | the active pricing interval changed (Pricing function set) |
+
+`notification_drlc` and `notification_flow_reservation` exist for streams the
+client does not emit yet.
+
+Each hook receives a `ScheduleNotification`: the `stream`, the `transition` and
+`status` that fired it, the control's `mrid`, `program_href` and `primacy`, the
+post-randomization `start` / `duration` / `end`, the `affected_lfdis` the event
+scopes to, the `randomization` window, and a stream-specific `payload`. For
+`price` the payload carries the tariff profile's price multiplier and the active
+interval's consumption blocks; the relay is global and does not actuate, so the
+hook decides what the price means for the device, for example curtailing export
+when the price goes negative.

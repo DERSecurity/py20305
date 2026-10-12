@@ -27,6 +27,11 @@ factory you supply.
 **Reports back.** DERStatus, DERCapability, DERSettings, DERAvailability and
 metered readings, posted as MirrorUsagePoints.
 
+**Reads the price.** With the Pricing function set switched on, the client walks
+the server's tariff tree and relays each active interval's price to connectors
+as the schedule moves through it. It does not act on the price itself: relaying
+is where the library stops and the connector's price handler begins.
+
 **Optionally, exposes itself.** An HTTP management API for observing and
 nudging a running client, and a forwarder that publishes every captured
 protocol exchange to a monitoring system over MQTT.
