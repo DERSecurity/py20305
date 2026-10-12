@@ -1439,10 +1439,26 @@ class EventProcessor:
         opting out every active event reverts the device to its planning limit.
         """
         all_devices = self._unique_devices(record.program_href)
-        # Exclude devices that were superseded on this event — they were never
-        # owned by this event and their DDERC fallback is handled by whichever
-        # event actually controlled them.
-        devices = [d for d in all_devices if d not in record.superseded_devices]
+        # Leave out a device another event took over *entirely*: there the
+        # superseding event's own activation is the write that moves it, and a
+        # fallback here would name this event as the cause of a setpoint it no
+        # longer sets.
+        #
+        # Only entirely, though. A device goes into ``superseded_devices`` when
+        # another event takes over any one of this event's modes there, so
+        # skipping every such device would skip the modes that event never took:
+        # they would stay on the device, and the registration saying so would
+        # outlive this event and read as coverage to the next one to release
+        # them. Compared per mode, not per device.
+        owned = get_active_mode_names(record.derc.dercontrol_base)
+        devices = [
+            d
+            for d in all_devices
+            if not (
+                d in record.superseded_devices
+                and record.superseded_modes.get(d, frozenset()) >= owned
+            )
+        ]
         active_events = [r for r in self._store.by_state(EventState.ACTIVE) if not r.opted_out]
         # Devices with no DDERC anywhere: cleared to the connector safe-default
         # only in the comms-loss opt-out flow; the completion path leaves
