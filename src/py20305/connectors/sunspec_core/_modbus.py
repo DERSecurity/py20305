@@ -149,6 +149,21 @@ _P_LIM_W_RATINGS: dict[str, str] = {
     "abs": "WChaRteMaxRtg",
 }
 
+#: The control each 704 WMaxLimPct slot belongs to, for naming it when the
+#: device cannot take it.
+_P_LIM_PCT_CONTROLS: dict[str, str] = {
+    "any": "opModMaxLimW",
+    "inj": "opModMaxLimWInject",
+    "gen": "opModGenLimW",
+}
+
+#: The only CSIP-AUS DOE limit this connector can enforce, as its
+#: doeModesSupported / doeModesEnabled bit: opModGenLimW (bit 2). CSIP-AUS v1.1a
+#: Annex B defines opModExpLimW and opModImpLimW at the connection point, which
+#: an inverter cannot measure, and opModLoadLimW has no model 704 register to
+#: land on.
+_GEN_LIM_DOE_BIT = 0x04
+
 
 def _resolve_point(model: Any, dotted: str) -> Any:
     """Return the point at ``dotted`` (e.g. ``"PFWInj.PF"``).
@@ -392,18 +407,27 @@ class SunSpecModbusConnector:
         # event loops.
         self._lock: asyncio.Lock | None = None
         # State for the 704 WMaxLimPct register, which is a percent of WMax.
-        # ``"any"`` is opModMaxLimW, its only routine contributor. ``"inj"`` is
-        # opModMaxLimWInject, which normally writes model 702 WDisChaRteMax
-        # instead and populates this slot only on the fallback route taken when
-        # a device does not implement that register. Tracking them separately
-        # keeps a write to one from clobbering the other;
+        # ``"any"`` is opModMaxLimW and ``"gen"`` is CSIP-AUS opModGenLimW.
+        # ``"inj"`` is opModMaxLimWInject, which normally writes model 702
+        # WDisChaRteMax instead and populates this slot only on the fallback
+        # route taken when a device does not implement that register. Tracking
+        # them separately keeps a write to one from clobbering the others;
         # ``_compute_merged_inject_pct`` collapses them to the effective
         # register value. Every value here is a percent -- nothing else may be
         # stored in these slots, since the merge compares them directly.
         self._p_lim_slots: dict[str, tuple[bool, float | None]] = {
             "any": (False, None),
             "inj": (False, None),
+            "gen": (False, None),
         }
+        # The watts behind an active opModGenLimW. Its slot holds a percent of
+        # WMax, and an inject limit moves WMax, so the percent is worked out
+        # again from these watts whenever that happens.
+        self._gen_lim_watts: float | None = None
+        # A "gen" slot write raised. The enable point is written before the
+        # value, so it may be up with nothing recorded; the next clear runs
+        # regardless to lower it.
+        self._gen_lim_unconfirmed = False
         # Last watts written to each model 702 rate setting (keyed as in
         # ``_P_LIM_W_CONTROLS``), for diagnostics. Held apart from
         # ``_p_lim_slots`` precisely because the units differ: these are raw
@@ -801,14 +825,9 @@ class SunSpecModbusConnector:
         result["NorOpCatRtg"] = model.NorOpCatRtg.cvalue
         result["AbnOpCatRtg"] = model.AbnOpCatRtg.cvalue
         result["CtrlModes"] = model.CtrlModes.cvalue
-        # CSIP-AUS doeModesSupported: advertise export only (opModExpLimW, 0x01)
-        # rather than the all-four default. This connector inherits
-        # ``update_exp_lim`` / ``update_imp_lim`` as no-ops from the base class,
-        # so no DoE mode is actually enforced; 0x01 is the narrowest honest
-        # claim. Widening it is gated on implementing those two methods, not on
-        # which registers the opModMaxLimW* controls reach. Only used when the
-        # client is in CSIP-AUS mode.
-        result["DoeModesSupported"] = 0x01
+        # CSIP-AUS doeModesSupported, rather than the all-four default. Only used
+        # when the client is in CSIP-AUS mode.
+        result["DoeModesSupported"] = self._doe_modes()
         return result
 
     def _fetch_status_sync(self) -> dict[str, Any]:
@@ -857,11 +876,25 @@ class SunSpecModbusConnector:
             if val is not None and mult is not None:
                 result[key] = {val_key: val, "multiplier": mult}
         result["CtrlModes"] = model.CtrlModes.cvalue
-        # CSIP-AUS doeModesEnabled: keep consistent with doeModesSupported
-        # (enabled must not exceed supported), so export only (0x01), not the
-        # 0x03 default. See the rationale in ``_fetch_nameplate_sync``.
-        result["DoeModesEnabled"] = 0x01
+        # CSIP-AUS doeModesEnabled: the same bits as doeModesSupported, since
+        # enabled must not exceed supported, rather than the 0x03 default.
+        result["DoeModesEnabled"] = self._doe_modes()
         return result
+
+    def _doe_modes(self) -> int:
+        """The doeModesSupported / doeModesEnabled bitmap for this device.
+
+        opModGenLimW lands on 704 WMaxLimPct, so a device without that point
+        advertises nothing rather than a limit it would decline. Read from the
+        scanned model instead of a fresh read: the scan reads every model in
+        full, and which points a device implements does not change between
+        scans. The WMax base the conversion needs is not checked here; the
+        scan-readiness check already guarantees WMaxRtg.
+        """
+        instances = self._target.models.get(704)
+        if not instances or _unimplemented_points(instances[0], ("WMaxLimPct",)):
+            return 0
+        return _GEN_LIM_DOE_BIT
 
     def _update_qv_sync(self, params: dict[str, Any]) -> None:
         model = self._get_model(705)
@@ -944,12 +977,13 @@ class SunSpecModbusConnector:
         """Collapse the active inject-direction p-limit slots into the
         single value that goes onto WMaxLimPct.
 
-        ``opModMaxLimW`` ("any") and ``opModMaxLimWInject`` ("inj") are
-        independent constraints on the same physical quantity. When both
-        are active we honour the *more restrictive* of the two (the
-        operator can't loosen one limit by sending a higher value via
-        the other field). When neither slot is active, the inject-
-        direction cap is disabled and WMaxLimPctEna gets driven low.
+        ``opModMaxLimW`` ("any"), ``opModMaxLimWInject`` ("inj") and CSIP-AUS
+        ``opModGenLimW`` ("gen") are independent constraints on the same
+        physical quantity. When several are active we honour the *most
+        restrictive* (the operator can't loosen one limit by sending a higher
+        value via another field; CSIP-AUS requires the same of opModGenLimW
+        against opModMaxLimW). When no slot is active, the inject-direction
+        cap is disabled and WMaxLimPctEna gets driven low.
 
         ``"inj"`` only participates on the fallback route: opModMaxLimWInject
         normally writes model 702 WDisChaRteMax and leaves this slot empty. The
@@ -957,7 +991,7 @@ class SunSpecModbusConnector:
         device that does not implement that register.
         """
         candidates: list[float] = []
-        for slot in ("any", "inj"):
+        for slot in _P_LIM_PCT_CONTROLS:
             enabled, value = self._p_lim_slots[slot]
             if enabled and value is not None:
                 candidates.append(value)
@@ -968,9 +1002,10 @@ class SunSpecModbusConnector:
     def _apply_inject_pct_slot(self, slot: str, enabled: bool, pct: float | None) -> None:
         """Store an inject-direction p-limit slot and (re)write WMaxLimPct.
 
-        ``slot`` is ``"any"`` (opModMaxLimW) or ``"inj"`` (opModMaxLimWInject on
-        the WDisChaRteMax-unavailable fallback route). Both express a percent of
-        WMax; ``_compute_merged_inject_pct`` collapses the active ones to the
+        ``slot`` is ``"any"`` (opModMaxLimW), ``"inj"`` (opModMaxLimWInject on
+        the WDisChaRteMax-unavailable fallback route) or ``"gen"``
+        (opModGenLimW). Each expresses a percent of WMax;
+        ``_compute_merged_inject_pct`` collapses the active ones to the
         most-restrictive value that goes onto the single SunSpec WMaxLimPct
         register. When no inject-direction slot is active the enable bit is
         driven low.
@@ -990,9 +1025,9 @@ class SunSpecModbusConnector:
                 # register they share: "inj" arrives here having been rerouted
                 # off model 702, and reporting it as opModMaxLimW would both
                 # misidentify it and let one control's report suppress the
-                # other's, since the two share a dedup key.
+                # other's, since they would share a dedup key.
                 self._control_unsupported(
-                    "opModMaxLimWInject" if slot == "inj" else "opModMaxLimW",
+                    _P_LIM_PCT_CONTROLS[slot],
                     f"this device does not implement {', '.join(missing)} (model 704)",
                 )
         self._update_enable(
@@ -1029,6 +1064,77 @@ class SunSpecModbusConnector:
         if enabled and pct is not None:
             pct = _require_percent(pct, "opModMaxLimW")
         self._apply_inject_pct_slot("any", enabled, pct)
+
+    def _update_gen_lim_sync(self, params: dict[str, Any]) -> None:
+        """Apply CSIP-AUS opModGenLimW (the ``"gen"`` slot).
+
+        A watts limit on the DER's own generation. CSIP-AUS v1.1a Annex B (the
+        note under opModLoadLimW) has a pure generator interpret it "in the same
+        manner as opModMaxLimW" and, where both are present, use "the most
+        restrictive value", so it is converted to a percent of WMax and merged
+        into 704 WMaxLimPct beside it.
+
+        A clear for a limit that is not set writes nothing: the comms-loss clear
+        sends one for every mode, and the register may belong to opModMaxLimW.
+        An enabled payload without a value is not a clear either, and changes
+        nothing, since treating it as one would lift the limit in force.
+        """
+        enabled = params.get("gen_lim_mode_enable", 0) == 1
+        watts = params.get("gen_lim_w")
+
+        if enabled and watts is None:
+            logger.warning("opModGenLimW enabled but carried no value; nothing to apply")
+            return
+
+        if not enabled:
+            if self._p_lim_slots["gen"] != (False, None) or self._gen_lim_unconfirmed:
+                self._apply_gen_lim_slot(None, None)
+            self._gen_lim_watts = None
+            return
+
+        value = _require_watts(watts, "opModGenLimW")
+        pct = self._watts_as_pct_of_wmax(value, "opModGenLimW")
+        if pct is None:
+            self._control_unsupported(
+                "opModGenLimW",
+                "neither model 702 WMax nor WMaxRtg is available to convert the "
+                "watts to the percent model 704 WMaxLimPct takes",
+            )
+        self._apply_gen_lim_slot(value, pct)
+
+    def _apply_gen_lim_slot(self, watts: float | None, pct: float | None) -> None:
+        """Write the ``"gen"`` slot, and record the limit only once the device has it.
+
+        ``_apply_inject_pct_slot`` stores a slot before it checks the register
+        and writes. A generation limit left recorded after a decline or a failed
+        write would later be put on the device by ``_refresh_gen_lim_pct``,
+        through an unrelated inject limit, after the server was told it was not
+        applied. The previous slot is restored rather than cleared, so an update
+        that fails leaves the earlier limit recorded: that is what the device
+        still holds.
+        """
+        previous = self._p_lim_slots["gen"]
+        try:
+            self._apply_inject_pct_slot("gen", watts is not None, pct)
+        except Exception:
+            self._p_lim_slots["gen"] = previous
+            self._gen_lim_unconfirmed = True
+            raise
+        self._gen_lim_unconfirmed = False
+        self._gen_lim_watts = watts
+
+    def _refresh_gen_lim_pct(self) -> None:
+        """Re-express an active opModGenLimW against the current WMax.
+
+        Called after the connector itself moves WMax. Left alone, a limit set
+        while an inject limit had WMax lowered would allow more than its watts
+        once WMax is restored.
+        """
+        if self._gen_lim_watts is None:
+            return
+        pct = self._watts_as_pct_of_wmax(self._gen_lim_watts, "opModGenLimW")
+        if pct is not None:
+            self._apply_gen_lim_slot(self._gen_lim_watts, pct)
 
     def _update_p_lim_w_sync(self, params: dict[str, Any], slot: str) -> None:
         """Apply opModMaxLimWInject (``"inj"``) / opModMaxLimWAbsorb (``"abs"``).
@@ -1098,6 +1204,8 @@ class SunSpecModbusConnector:
             self._mirror_inject_onto_wmax(model_702, value)
         model_702.write()
         self._p_lim_w_settings[slot] = value
+        if slot == "inj":
+            self._refresh_gen_lim_pct()
 
     def _mirror_inject_onto_wmax(self, model_702: Any, watts: float) -> None:
         """Write an inject limit to WMax as well as WDisChaRteMax.
@@ -1163,6 +1271,10 @@ class SunSpecModbusConnector:
         model_702 = self._get_model(702)
         model_702.WMax.cvalue = self._wmax_baseline
         model_702.write()
+        # The baseline is the retry marker: dropped only once an active
+        # generation limit has been re-expressed against the restored WMax, so a
+        # failed 704 write leaves the restore pending for the next clear.
+        self._refresh_gen_lim_pct()
         self._wmax_baseline = None
 
     def _watts_as_pct_of_wmax(self, watts: float, control: str) -> float | None:
@@ -1573,6 +1685,11 @@ class SunSpecModbusConnector:
     async def update_p_lim_abs(self, params: dict[str, Any]) -> ConnectorPayload:
         async with self._get_lock():
             await asyncio.to_thread(self._update_p_lim_w_sync, params, "abs")
+        return None
+
+    async def update_gen_lim(self, params: dict[str, Any]) -> ConnectorPayload:
+        async with self._get_lock():
+            await asyncio.to_thread(self._update_gen_lim_sync, params)
         return None
 
     async def update_pf(self, params: dict[str, Any]) -> ConnectorPayload:
