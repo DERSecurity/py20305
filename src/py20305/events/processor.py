@@ -1510,7 +1510,12 @@ class EventProcessor:
             # is its, and its own end brings the default back for everything at
             # once. Recorded as a decision rather than quoted from the standard
             # -- see the note on `_held_by_running_events`.
-            held = self._held_by_running_events(best.href, dev_href, all_devices, active_events)
+            # Under a group lookup the default is written to every local device
+            # of its program, so a mode held on any of the program's server-side
+            # devices is within reach of it. Without one the write goes to this
+            # device alone.
+            reach = all_devices if self._group_local_lfdis(best.href) is not None else [dev_href]
+            held = self._modes_running_on(reach, active_events)
             taken = carried & held
             if taken:
                 logger.debug(
@@ -1766,6 +1771,37 @@ class EventProcessor:
             logger.debug("Initial DDERC skip %s: no eligible devices", program_href)
             return
 
+        # A device with an active event is not a target, which is decided one
+        # server-side device at a time. Under a group lookup the write is not
+        # sent that way: each target fans out to every local device of the
+        # program, so a device correctly left out as a target is written to
+        # anyway as part of another target's fan-out. Send the default without
+        # the modes those events are running, as the end-of-event fallback does.
+        # Only a grouped program can write to a device that is not a target.
+        # Without a group lookup each write goes to the one device it was
+        # decided for, and that device has no active event by construction.
+        reach = devices if self._group_local_lfdis(program_href) is not None else []
+        held = self._modes_running_on(reach, active_events)
+        carried = get_active_mode_names(derp_state.default_dercontrol.dercontrol_base)
+        taken = carried & held
+        if carried and not (carried - taken):
+            logger.debug(
+                "Initial DDERC skip %s: every mode it names is being controlled",
+                program_href,
+            )
+            return
+        dderc = (
+            self._default_without(derp_state.default_dercontrol, taken)
+            if taken
+            else derp_state.default_dercontrol
+        )
+        if taken:
+            logger.debug(
+                "Initial DDERC from %s sent without %s, which a running event controls",
+                program_href,
+                sorted(taken),
+            )
+
         logger.info(
             "Applying initial DDERC from %s to %d device(s)",
             program_href,
@@ -1778,17 +1814,11 @@ class EventProcessor:
         for dev_href, _ in targets:
             if local_lfdis is not None:
                 coros.extend(
-                    self._dispatcher.apply_default_control_by_lfdi(
-                        lfdi, derp_state.default_dercontrol, curves
-                    )
+                    self._dispatcher.apply_default_control_by_lfdi(lfdi, dderc, curves)
                     for lfdi in local_lfdis
                 )
             else:
-                coros.append(
-                    self._dispatcher.apply_default_control(
-                        dev_href, derp_state.default_dercontrol, curves
-                    )
-                )
+                coros.append(self._dispatcher.apply_default_control(dev_href, dderc, curves))
         results = await asyncio.gather(*coros, return_exceptions=True)
 
         per_target_n = len(local_lfdis) if local_lfdis is not None else 1
@@ -1829,14 +1859,10 @@ class EventProcessor:
             cleared["other_element"] = kept
         return dderc.model_copy(update={"dercontrol_base": base.model_copy(update=cleared)})
 
-    def _held_by_running_events(
-        self,
-        default_program: str,
-        dev_href: str,
-        all_devices: list[str],
-        active_events: list[EventRecord],
+    def _modes_running_on(
+        self, devices: list[str], active_events: list[EventRecord]
     ) -> frozenset[str]:
-        """The modes still-running events hold where this default would land.
+        """The modes still-running events hold on any of ``devices``.
 
         Two things decide the answer, and getting either wrong lets a default
         through that takes a mode from an event still running.
@@ -1860,10 +1886,8 @@ class EventProcessor:
         interaction outright, so it is recorded here rather than cited.
         """
         running = frozenset(record.mrid for record in active_events)
-        grouped = self._group_local_lfdis(default_program) is not None
-        scope = all_devices if grouped else [dev_href]
         held: set[str] = set()
-        for device in scope:
+        for device in devices:
             held |= self._mode_tracker.covered_among(device, running)
         return frozenset(held)
 
