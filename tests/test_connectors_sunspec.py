@@ -1606,6 +1606,54 @@ class TestSunSpecGenLim:
         assert written and written[-1] == 40
 
     @pytest.mark.asyncio
+    async def test_a_declined_gen_lim_is_not_applied_later_by_an_inject_limit(
+        self, sunspec_connector
+    ):
+        """A limit the server was told is not supported must not be remembered.
+        Remembered, the WMax hook re-enters it on the next inject limit, which
+        then fails as opModGenLimW after model 702 was already written, and the
+        stale slot blocks an unrelated opModMaxLimW clear."""
+        _, model_704 = self._models(sunspec_connector)
+        model_704.WMaxLimPct = MagicMock(value=None, cvalue=None)
+        with pytest.raises(ModeNotSupportedError):
+            await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 0})
+        model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_gen_lim_whose_write_failed_is_not_applied_later(self, sunspec_connector):
+        """The server was told the limit failed, so a later inject limit must
+        not put it on the device."""
+        _, model_704 = self._models(sunspec_connector)
+        model_704.write.side_effect = OSError("link dropped")
+        with pytest.raises(OSError):
+            await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+
+        written: list[float] = []
+        model_704.write.side_effect = lambda: written.append(model_704.WMaxLimPct.cvalue)
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        assert written == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_update_keeps_the_limit_still_on_the_device(self, sunspec_connector):
+        """An update that does not reach the device leaves the earlier limit in
+        force there, and that is the one later re-expressed: 2000 W against the
+        4000 W WMax an inject limit sets is 50%, where the failed 1000 W would
+        be 25%."""
+        _, model_704 = self._models(sunspec_connector)
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+        model_704.write.side_effect = OSError("link dropped")
+        with pytest.raises(OSError):
+            await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 1000})
+
+        written: list[float] = []
+        model_704.write.side_effect = lambda: written.append(model_704.WMaxLimPct.cvalue)
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        assert written and written[-1] == 50
+
+    @pytest.mark.asyncio
     async def test_negative_gen_lim_is_refused(self, sunspec_connector):
         """A negative would become a negative percent, which the register
         clamps to a full curtailment nobody asked for."""

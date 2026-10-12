@@ -1083,9 +1083,9 @@ class SunSpecModbusConnector:
             return
 
         if not enabled:
-            self._gen_lim_watts = None
             if self._p_lim_slots["gen"] != (False, None):
-                self._apply_inject_pct_slot("gen", False, None)
+                self._apply_gen_lim_slot(None, None)
+            self._gen_lim_watts = None
             return
 
         value = _require_watts(watts, "opModGenLimW")
@@ -1096,8 +1096,26 @@ class SunSpecModbusConnector:
                 "neither model 702 WMax nor WMaxRtg is available to convert the "
                 "watts to the percent model 704 WMaxLimPct takes",
             )
-        self._gen_lim_watts = value
-        self._apply_inject_pct_slot("gen", True, pct)
+        self._apply_gen_lim_slot(value, pct)
+
+    def _apply_gen_lim_slot(self, watts: float | None, pct: float | None) -> None:
+        """Write the ``"gen"`` slot, and record the limit only once the device has it.
+
+        ``_apply_inject_pct_slot`` stores a slot before it checks the register
+        and writes. A generation limit left recorded after a decline or a failed
+        write would later be put on the device by ``_refresh_gen_lim_pct``,
+        through an unrelated inject limit, after the server was told it was not
+        applied. The previous slot is restored rather than cleared, so an update
+        that fails leaves the earlier limit recorded: that is what the device
+        still holds.
+        """
+        previous = self._p_lim_slots["gen"]
+        try:
+            self._apply_inject_pct_slot("gen", watts is not None, pct)
+        except Exception:
+            self._p_lim_slots["gen"] = previous
+            raise
+        self._gen_lim_watts = watts
 
     def _refresh_gen_lim_pct(self) -> None:
         """Re-express an active opModGenLimW against the current WMax.
@@ -1110,7 +1128,7 @@ class SunSpecModbusConnector:
             return
         pct = self._watts_as_pct_of_wmax(self._gen_lim_watts, "opModGenLimW")
         if pct is not None:
-            self._apply_inject_pct_slot("gen", True, pct)
+            self._apply_gen_lim_slot(self._gen_lim_watts, pct)
 
     def _update_p_lim_w_sync(self, params: dict[str, Any], slot: str) -> None:
         """Apply opModMaxLimWInject (``"inj"``) / opModMaxLimWAbsorb (``"abs"``).

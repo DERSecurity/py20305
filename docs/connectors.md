@@ -37,6 +37,11 @@ restrictive of the two is written. The device must implement `WMaxLimPct`;
 one that does not answers the control as not supported, and advertises no
 limits in `doeModesSupported`.
 
+The connector treats the limit as applying to the one inverter it controls.
+Where a single EndDevice stands for several inverters, each connector is handed
+the full value; dividing a shared limit between them is up to whatever
+dispatches the control, not this connector.
+
 The export and import limits (`opModExpLimW`, `opModImpLimW`) constrain power
 at the site's connection point, which an inverter cannot measure, and the load
 limit (`opModLoadLimW`) has no model 704 register. The connector leaves all
