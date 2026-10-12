@@ -44,6 +44,14 @@ class ActiveModeTracker:
 
         return owned - still_covered
 
+    def covered(self, device_href: str, *, excluding: bytes | None = None) -> frozenset[str]:
+        """Return the modes registered for ``device_href``, ignoring event ``excluding``."""
+        covered: set[str] = set()
+        for mrid, modes in self._registry.get(device_href, {}).items():
+            if mrid != excluding:
+                covered |= modes
+        return frozenset(covered)
+
     def clear(self) -> None:
         """Clear all tracked state."""
         self._registry.clear()

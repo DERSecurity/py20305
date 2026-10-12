@@ -1485,6 +1485,8 @@ class EventProcessor:
         # default only writes the modes it names, so these would stay in
         # effect on the device unless they are disabled here.
         withdraw_targets: list[tuple[str, frozenset[str]]] = []
+        # Modes carried by the default of a device that falls back to one.
+        default_modes: set[str] = set()
         for dev_href in needs_fallback:
             lfdi = self._get_device_lfdi(dev_href)
             if lfdi is None:
@@ -1510,7 +1512,9 @@ class EventProcessor:
                 continue
             dderc = best.default_dercontrol
             assert dderc is not None  # guaranteed by _best_dderc_program_for_device
-            uncovered = released - get_active_mode_names(dderc.dercontrol_base)
+            carried = get_active_mode_names(dderc.dercontrol_base)
+            default_modes |= carried
+            uncovered = released - carried
             if uncovered:
                 withdraw_targets.append((dev_href, uncovered))
             if self._dderc_tracker.should_apply(lfdi, best.href, best.primacy):
@@ -1600,15 +1604,27 @@ class EventProcessor:
             local_lfdis = self._group_local_lfdis(record.program_href)
             withdraw_coros: list[Coroutine[Any, Any, None]] = []
             if local_lfdis is not None:
-                modes_for_program: frozenset[str] = frozenset().union(
-                    *(modes for _dev_href, modes in withdraw_targets)
+                # A group lookup is keyed by program, so every server-side
+                # device of the program stands for the same local devices. A
+                # mode is disabled on them only when no server-side device
+                # still needs it: none holds it from another event, and no
+                # default restored above carries it. Sending each device's
+                # released modes to every local device would disable a mode
+                # that another event still controls there.
+                still_needed = set(default_modes)
+                for dev_href in all_devices:
+                    still_needed |= self._mode_tracker.covered(dev_href, excluding=record.mrid)
+                modes_for_program: frozenset[str] = (
+                    frozenset().union(*(modes for _dev_href, modes in withdraw_targets))
+                    - still_needed
                 )
-                withdraw_coros.extend(
-                    self._dispatcher.disable_modes_by_lfdi(
-                        local, modes_for_program, cause_mrid=record.mrid
+                if modes_for_program:
+                    withdraw_coros.extend(
+                        self._dispatcher.disable_modes_by_lfdi(
+                            local, modes_for_program, cause_mrid=record.mrid
+                        )
+                        for local in dict.fromkeys(local_lfdis)
                     )
-                    for local in dict.fromkeys(local_lfdis)
-                )
             else:
                 withdraw_coros.extend(
                     self._dispatcher.disable_modes(dev_href, modes, cause_mrid=record.mrid)

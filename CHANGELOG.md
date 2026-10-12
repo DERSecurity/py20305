@@ -15,8 +15,10 @@ below says so explicitly.
   had set and the default did not mention (a fixed setpoint, an export limit)
   stayed in effect on the connector and the device. The processor now disables
   those modes through the dispatcher's new `disable_modes` /
-  `disable_modes_by_lfdi`, with the origin `CommandOrigin.EVENT_END`, and with no
-  default on any program it disables everything the event released instead of
+  `disable_modes_by_lfdi`, with the origin `CommandOrigin.EVENT_END`. Under a
+  group lookup a mode is left alone while another event still holds it on any of
+  the program's devices, or a restored default carries it. With no default on
+  any program the processor disables everything the event released instead of
   taking no action. The CSIP-AUS limits are tracked by element name so they are
   released too. `ControlDispatcher` gains the two methods; a dispatcher of your
   own needs them.
