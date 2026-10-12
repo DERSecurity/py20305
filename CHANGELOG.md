@@ -9,6 +9,74 @@ below says so explicitly.
 
 Nothing yet.
 
+## [0.12.0] - 2026-10-12
+
+### Added
+
+- **The SunSpec connector enforces the CSIP-AUS generation limit, opModGenLimW (#61).**
+  It was accepted and silently ignored. The limit is converted to a percent of WMax
+  and merged into model 704 `WMaxLimPct` with opModMaxLimW, the more restrictive
+  value winning, and it is re-expressed whenever an inject limit moves WMax so the
+  watts it allows stay fixed. A device without `WMaxLimPct`, or without WMax and
+  WMaxRtg, reports the control as not supported (251).
+
+### Fixed
+
+- **A superseded event no longer leaves its modes on the device when it ends
+  (#54).** A device goes into an event's superseded set when another event takes
+  over any one of its modes there, and the end-of-event pass left out every such
+  device, which conflated two things. Nothing was unregistered, so the tracker
+  went on believing the ended event owned those modes and the event that took
+  them over released nothing when it ended. And nothing was released, so on a
+  device taken over for only some of its modes the rest were never disabled
+  either. The event's registration is now removed for every device it targeted,
+  and the device is passed over only while another event is still running on it,
+  so whichever of the two ends last releases it. The fallback write is still
+  withheld for a device another event took over entirely, where the superseding
+  event's own activation is the write that moves it. What counts as "entirely" is
+  measured in the same terms the supersession recorded, which leave out connect
+  and energize and do not reach the CSIP-AUS limits -- measuring it against every
+  mode an event sets would read a device taken over whole as only partly taken
+  over, and for an event carrying nothing but a CSIP-AUS limit it would do so
+  every time.
+
+- **A DefaultDERControl is no longer written over a mode another event is still
+  running (#57).** Two events can hold the same device for different modes
+  without either superseding the other. When one ended, the default that came
+  back was written whole, so a mode the default named and the other event was
+  running was taken from the event that owned it. The default now goes out
+  naming only the modes nothing is controlling: the one still being run is left
+  to the event running it, and the rest are set as the program says. Where the
+  default names nothing but modes another event is running there is nothing to
+  send, and the modes the ending event released are disabled instead so none is
+  left on with no event behind it. A default sent without some of its modes is
+  not recorded as the program's default being in place, so the whole of it is
+  written when the other event ends. Under a group lookup the default reaches
+  every local device of its program, so what counts as being controlled is read
+  across the program's devices rather than the one the default was chosen for.
+
+- **A DefaultDERControl no longer reaches past the devices it was decided for
+  (#58).** Eligibility for a program's initial default is settled one
+  server-side device at a time, and a device with an active event is not a
+  target. Under a group lookup the write is not sent that way: each target fans
+  out to every local device of the program, so a device correctly left out as a
+  target was written to anyway as part of another target's fan-out. What is
+  being controlled is now read from everything the write will touch -- the local
+  devices it fans out to, and the events of any program that resolves to one of
+  them, which need not be a program this one names -- and the default goes out
+  without those modes, or not at all when it names nothing else. The
+  end-of-event fallback reads the same way, from the program whose default was
+  chosen rather than from the event that ended, since those can differ and it is
+  the first that decides where the write lands. What counts as being controlled is read from the devices the write
+  actually lands on: without a group lookup an event registered on a program's
+  other devices is not controlling this one, which it never was where the event
+  was refused there.
+
+- **The SunSpec connector reports `doeModesSupported` and `doeModesEnabled` as
+  opModGenLimW only (`0x04`), or as no limits on a device without model 704
+  `WMaxLimPct` (#61).** It reported opModExpLimW (`0x01`), a limit it never
+  enforced.
+
 ## [0.11.0] - 2026-10-12
 
 ### Added
