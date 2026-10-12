@@ -7,6 +7,44 @@ below says so explicitly.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.11.0] - 2026-10-12
+
+### Added
+
+- **A control audit trail, behind one forwarder switch (#46).** With
+  `forwarders.audit.enabled`, each device write carries `origin`, `applied_mrid`
+  and `cause_mrid` in `protocol_data.extra`, linking it to the event that produced
+  it, and a rejected write carries `error_type`. Event lifecycle transitions
+  (scheduled, active, completed, cancelled, superseded, opted out, expired,
+  skipped), the outcome of a dispatch that missed its deadline, and
+  loss-of-communications entry, recovery and exit are published, in order, as
+  flat JSON records on `out/der-events`. A write the command gate refused is
+  recorded with `error_type: refused`. Every audit record carries the client's
+  `boot_id` and `seq`, so a lost record shows as a gap. The switch publishes writes without device
+  reads; `device_telemetry` keeps publishing reads and writes as before, now with
+  the cause fields. Events dropped while the forwarder is stopped, or by a
+  forwarder whose broker was unreachable at start, are counted in
+  `events_dropped_not_running` and `events_dropped_by_forwarder`. See [Forwarding](docs/forwarding.md).
+
+### Changed
+
+- **`ControlDispatcher` takes a `cause_mrid` keyword on its default-control and
+  clear methods (#46).** `apply_default_control`, `apply_default_control_by_lfdi`,
+  `clear_control` and `clear_control_by_lfdi` gain `cause_mrid: bytes | None =
+  None`, the event whose end or opt-out led to the write, and the event processor
+  passes it. A dispatcher of your own that implements the protocol must accept the
+  keyword, or those calls raise `TypeError`.
+
+  **Device telemetry records a refused write, and the forwarder manager skips a
+  forwarder whose start failed (#46).** With `device_telemetry` on, a write the
+  command gate refused now appears as a write record with `is_valid: false` and
+  `error_type: refused`, where before it was absent. `ForwarderManager` no longer
+  hands messages, telemetry or events to a forwarder whose start raised and has
+  not since been retried successfully; events it skips are counted in
+  `events_dropped_by_forwarder`.
+
 ### Fixed
 
 - **An ended event's modes that the default does not carry are now disabled
@@ -30,6 +68,11 @@ below says so explicitly.
   imports the models, and the translation, the active-mode tracking and the
   JSON form read a typed model and a generic element alike through
   `models.csipaus.elements`.
+
+- **A DefaultDERControl is no longer written to a device twice after an event
+  ends (#47).** The fallback recorded the ended event's mRID where the default's own
+  belonged, so the next poll's initial-default pass took the default for a new
+  one and wrote it again. A default the server actually changes is still applied.
 
 ## [0.10.0] - 2026-10-06
 
