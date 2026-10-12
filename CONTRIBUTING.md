@@ -3,6 +3,10 @@
 Contributions are welcome — bug reports, interop findings from real utility
 servers, connectors, and documentation.
 
+[AGENTS.md](AGENTS.md) has the rules a change is held to, for people and for coding
+agents alike: what decides correctness, what may not be committed, and which
+documentation moves with the code. This page covers setup and how changes land.
+
 ## Before you write code
 
 **For a bug**, open an issue with enough to reproduce it: the server
