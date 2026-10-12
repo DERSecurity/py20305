@@ -4204,6 +4204,121 @@ class TestPartlySupersededEvent:
         assert proc._mode_tracker.covered("/edev/1") == frozenset()
         await proc.shutdown()
 
+    @staticmethod
+    def _one_device_taken_over(dispatcher: AsyncMock, base_a, base_b) -> EventProcessor:
+        """A holds one device; B takes it over whole. A goes to superseded."""
+        now = int(time.time())
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_a)],
+            device_hrefs=["/edev/1"],
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x02, start=now - 10, duration=3600, base=base_b)],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        return EventProcessor(http, state, dispatcher, asyncio.Event())
+
+    @pytest.mark.asyncio
+    async def test_a_csipaus_limit_replaced_by_another_writes_nothing_but_the_control(self):
+        """The ordinary CSIP-AUS case, and the one the mode names cannot see.
+
+        Supersession compares `DERControlBase` fields, which do not reach
+        extension elements, so an event carrying only `opModExpLimW` is compared
+        as carrying nothing. Measuring that against every mode the event sets
+        would read a device taken over whole as only partly taken over, and
+        switch the limit off between one event's write and the next.
+        """
+        limit = (
+            '<DERControlBase xmlns="urn:ieee:std:2030.5:ns" '
+            'xmlns:csipaus="https://csipaus.org/ns">'
+            "<csipaus:opModExpLimW><multiplier>0</multiplier><value>{v}</value>"
+            "</csipaus:opModExpLimW></DERControlBase>"
+        )
+        from py20305.xml import from_xml
+
+        dispatcher = AsyncMock()
+        proc = self._one_device_taken_over(
+            dispatcher,
+            from_xml(limit.format(v=1500).encode(), DercontrolBase),
+            from_xml(limit.format(v=1000).encode(), DercontrolBase),
+        )
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+
+        assert self._disabled(dispatcher) == {}, (
+            "one export limit replacing another must not switch the limit off between them"
+        )
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_an_event_carrying_connect_as_well_writes_nothing_but_the_control(self):
+        """`op_mod_connect` is left out of what supersession compares too."""
+        dispatcher = AsyncMock()
+        proc = self._one_device_taken_over(
+            dispatcher,
+            DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=5000), op_mod_connect=True),
+            DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000), op_mod_connect=True),
+        )
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+
+        assert self._disabled(dispatcher) == {}
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_superseding_event_ending_first_still_leaves_the_device_released(self):
+        """Whoever ends last releases the device.
+
+        B takes `/edev/1` from A and then ends before A does. B's own end can
+        release nothing there, because A is still registered for the mode. If
+        A's end also passed the device over, it would keep B's limit with no
+        event behind it.
+        """
+        now = int(time.time())
+        dispatcher = AsyncMock()
+        base_a = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=5000))
+        base_b = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_a)],
+            device_hrefs=["/edev/1", "/edev/2"],
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x02, start=now - 10, duration=3600, base=base_b)],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event())
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/2"].der_controls = [self._cancelled(0x02, now, base_b)]
+        await proc.process_controls("/derp/2")
+        dispatcher.reset_mock()
+        state.der_programs["/derp/1"].der_controls = [self._cancelled(0x01, now, base_a)]
+        await proc.process_controls("/derp/1")
+
+        assert self._disabled(dispatcher) == {
+            "/edev/1": frozenset({"op_mod_max_lim_w"}),
+            "/edev/2": frozenset({"op_mod_max_lim_w"}),
+        }, "the device B took over is left holding its limit with no event active"
+        await proc.shutdown()
+
     @pytest.mark.asyncio
     async def test_no_registration_outlives_both_events(self):
         """A registration left behind reads as coverage to the next event.

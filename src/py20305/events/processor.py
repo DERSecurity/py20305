@@ -34,7 +34,7 @@ from py20305.events.response import (
     response_code_for_dispatch_error,
 )
 from py20305.events.state_machine import EventRecord, EventState, EventStore
-from py20305.events.supersession import compute_supersession
+from py20305.events.supersession import compared_mode_keys, compute_supersession
 from py20305.events.timers import EventTimerManager
 from py20305.forwarders.audit import AuditEmitter
 from py20305.json_form import (
@@ -1439,7 +1439,13 @@ class EventProcessor:
         opting out every active event reverts the device to its planning limit.
         """
         all_devices = self._unique_devices(record.program_href)
-        owned = get_active_mode_names(record.derc.dercontrol_base)
+        # Asked in the vocabulary the supersession answered in. ``superseded_modes``
+        # is recorded from the keys supersession compares, which leave out connect
+        # and energize and do not reach extension elements, so measuring it against
+        # every mode the event sets would read a device taken over whole as only
+        # partly taken over -- for an event carrying nothing but CSIP-AUS limits,
+        # always.
+        owned = compared_mode_keys(record.derc.dercontrol_base)
         active_events = [r for r in self._store.by_state(EventState.ACTIVE) if not r.opted_out]
         # Devices with no DDERC anywhere: cleared to the connector safe-default
         # only in the comms-loss opt-out flow; the completion path leaves
@@ -1463,9 +1469,13 @@ class EventProcessor:
             # goes into ``superseded_devices`` when another event takes over any
             # one of this event's modes there, and the modes that event never
             # took are still this event's to release. Compared per mode.
+            # ... and only while another event is actually running on the device.
+            # Once the event that took it over has ended too, nothing is left to
+            # bring the device back, so the last event to end releases it.
             if (
                 dev_href in record.superseded_devices
                 and record.superseded_modes.get(dev_href, frozenset()) >= owned
+                and self._device_has_other_active(dev_href, record.mrid, active_events)
             ):
                 continue
             if released:
