@@ -40,6 +40,7 @@ from py20305.models.sep.sep import (
     PowerOfTenMultiplierType,
     PrimacyType,
     Sfditype,
+    SignedPerCentControlType,
     TimeType,
 )
 
@@ -3844,4 +3845,196 @@ class TestFsaScopedClockRegression:
             "with a stale FSA offset the event is classified as already expired"
         )
 
+        await proc.shutdown()
+
+
+class TestModeWithdrawalAtEventEnd:
+    """An ended event's modes that the default does not carry are disabled.
+
+    The default control writes only the modes it names, so a setpoint the event
+    set would otherwise stay on the device after the event is over.
+    """
+
+    @staticmethod
+    def _dderc(base: DercontrolBase) -> DefaultDercontrol:
+        return DefaultDercontrol(m_rid=MRidtype(value=b"\x20" * 16), dercontrol_base=base)
+
+    @staticmethod
+    async def _cancel_active_event(
+        dispatcher: AsyncMock,
+        derc_base: DercontrolBase,
+        dderc: DefaultDercontrol | None,
+        shutdown: asyncio.Event,
+    ) -> EventProcessor:
+        now = int(time.time())
+        derc = _make_derc(0x01, start=now - 10, duration=3600, current_status=0, base=derc_base)
+        state = _setup_state(der_controls=[derc], dderc=dderc)
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        proc = EventProcessor(http, state, dispatcher, shutdown)
+        await proc.process_controls("/derp/1")
+        assert proc._store.get(derc.m_rid.value).state == EventState.ACTIVE
+
+        cancelled = _make_derc(
+            0x01, start=now - 10, duration=3600, current_status=2, base=derc_base
+        )
+        state.der_programs["/derp/1"].der_controls = [cancelled]
+        await proc.process_controls("/derp/1")
+        assert proc._store.get(derc.m_rid.value).state == EventState.CANCELLED
+        return proc
+
+    @pytest.mark.asyncio
+    async def test_a_mode_the_default_does_not_carry_is_disabled(self, shutdown: asyncio.Event):
+        dispatcher = AsyncMock()
+        proc = await self._cancel_active_event(
+            dispatcher,
+            DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500)),
+            self._dderc(DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=10000))),
+            shutdown,
+        )
+        dispatcher.apply_default_control.assert_awaited()
+        dispatcher.disable_modes.assert_awaited_once()
+        args, kwargs = dispatcher.disable_modes.await_args
+        assert args[0] == "/edev/1"
+        assert args[1] == frozenset({"op_mod_fixed_w"})
+        assert kwargs["cause_mrid"] == b"\x01" * 16
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_mode_the_default_carries_is_left_to_the_default(self, shutdown: asyncio.Event):
+        dispatcher = AsyncMock()
+        proc = await self._cancel_active_event(
+            dispatcher,
+            DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=5000)),
+            self._dderc(DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=10000))),
+            shutdown,
+        )
+        dispatcher.apply_default_control.assert_awaited()
+        dispatcher.disable_modes.assert_not_awaited()
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_without_a_default_the_released_modes_are_disabled(self, shutdown: asyncio.Event):
+        dispatcher = AsyncMock()
+        proc = await self._cancel_active_event(
+            dispatcher,
+            DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500)),
+            None,
+            shutdown,
+        )
+        dispatcher.apply_default_control.assert_not_awaited()
+        dispatcher.disable_modes.assert_awaited_once()
+        assert dispatcher.disable_modes.await_args.args[1] == frozenset({"op_mod_fixed_w"})
+        await proc.shutdown()
+
+    _LOCAL_1 = "11" * 20
+    _LOCAL_2 = "22" * 20
+
+    @classmethod
+    async def _cancel_event_on_grouped_program(
+        cls,
+        dispatcher: AsyncMock,
+        shutdown: asyncio.Event,
+        *,
+        other_event_base: DercontrolBase | None = None,
+        other_default: DefaultDercontrol | None = None,
+    ) -> EventProcessor:
+        """Cancel an event on a grouped program that has two server-side devices.
+
+        ``/derp/1`` holds ``/edev/1`` and ``/edev/2`` and resolves to both local
+        devices. ``/derp/2`` has the higher priority, holds ``/edev/1`` only and
+        resolves to the first local device. The cancelled event is on
+        ``/derp/1`` and sets a fixed setpoint and a generation limit.
+        """
+        now = int(time.time())
+        base = DercontrolBase(
+            op_mod_fixed_w=SignedPerCentControlType(value=2500),
+            op_mod_max_lim_w=PerCentControlType(value=5000),
+        )
+        derc = _make_derc(0x01, start=now - 10, duration=3600, base=base)
+        state = _setup_state(primacy=1, der_controls=[derc], device_hrefs=["/edev/1", "/edev/2"])
+        other_controls = (
+            [_make_derc(0x02, start=now - 10, duration=3600, base=other_event_base)]
+            if other_event_base is not None
+            else []
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=other_default,
+            der_controls=other_controls,
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+        groups = {"/derp/1": [cls._LOCAL_1, cls._LOCAL_2], "/derp/2": [cls._LOCAL_1]}
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        proc = EventProcessor(http, state, dispatcher, shutdown, group_lookup=groups.get)
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+        assert proc._store.get(derc.m_rid.value).state == EventState.ACTIVE
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base)
+        ]
+        await proc.process_controls("/derp/1")
+        assert proc._store.get(derc.m_rid.value).state == EventState.CANCELLED
+        return proc
+
+    @staticmethod
+    def _disabled_by_lfdi(dispatcher: AsyncMock) -> dict[str, frozenset[str]]:
+        calls = dispatcher.disable_modes_by_lfdi.await_args_list
+        assert len({call.args[0] for call in calls}) == len(calls)
+        return {call.args[0]: call.args[1] for call in calls}
+
+    @pytest.mark.asyncio
+    async def test_group_lookup_disables_released_modes_on_each_local_device(
+        self, shutdown: asyncio.Event
+    ):
+        dispatcher = AsyncMock()
+        proc = await self._cancel_event_on_grouped_program(dispatcher, shutdown)
+        released = frozenset({"op_mod_fixed_w", "op_mod_max_lim_w"})
+        assert self._disabled_by_lfdi(dispatcher) == {
+            self._LOCAL_1: released,
+            self._LOCAL_2: released,
+        }
+        dispatcher.disable_modes.assert_not_awaited()
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_group_lookup_keeps_a_mode_another_active_event_holds(
+        self, shutdown: asyncio.Event
+    ):
+        """A second event still sets the generation limit on ``/edev/1``."""
+        dispatcher = AsyncMock()
+        proc = await self._cancel_event_on_grouped_program(
+            dispatcher,
+            shutdown,
+            other_event_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+        )
+        assert proc._store.get(b"" * 16).state == EventState.ACTIVE
+        assert self._disabled_by_lfdi(dispatcher) == {
+            self._LOCAL_1: frozenset({"op_mod_fixed_w"}),
+            self._LOCAL_2: frozenset({"op_mod_fixed_w"}),
+        }
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_group_lookup_keeps_a_mode_another_device_default_carries(
+        self, shutdown: asyncio.Event
+    ):
+        """``/edev/1`` falls back to a default that sets the generation limit."""
+        dispatcher = AsyncMock()
+        proc = await self._cancel_event_on_grouped_program(
+            dispatcher,
+            shutdown,
+            other_default=self._dderc(
+                DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=10000))
+            ),
+        )
+        dispatcher.apply_default_control_by_lfdi.assert_awaited()
+        assert self._disabled_by_lfdi(dispatcher) == {
+            self._LOCAL_1: frozenset({"op_mod_fixed_w"}),
+            self._LOCAL_2: frozenset({"op_mod_fixed_w"}),
+        }
         await proc.shutdown()

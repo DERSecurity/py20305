@@ -99,6 +99,31 @@ class ControlDispatcher(Protocol):
         """
         ...
 
+    async def disable_modes(
+        self,
+        device_href: str,
+        modes: frozenset[str],
+        *,
+        cause_mrid: bytes | None = None,
+    ) -> None:
+        """Disable the named modes on a device at the end of an event.
+
+        ``modes`` are the names the event processor tracks (DERControlBase
+        field names and CSIP-AUS limit element names); ``cause_mrid`` names
+        the event that ended.
+        """
+        ...
+
+    async def disable_modes_by_lfdi(
+        self,
+        lfdi: str,
+        modes: frozenset[str],
+        *,
+        cause_mrid: bytes | None = None,
+    ) -> None:
+        """The by-LFDI counterpart of ``disable_modes``."""
+        ...
+
     async def relay_schedule_notification(
         self,
         lfdis: list[str],
@@ -166,6 +191,24 @@ class NullDispatcher:
     async def clear_control_by_lfdi(
         self,
         lfdi: str,
+        *,
+        cause_mrid: bytes | None = None,
+    ) -> None:
+        pass
+
+    async def disable_modes(
+        self,
+        device_href: str,
+        modes: frozenset[str],
+        *,
+        cause_mrid: bytes | None = None,
+    ) -> None:
+        pass
+
+    async def disable_modes_by_lfdi(
+        self,
+        lfdi: str,
+        modes: frozenset[str],
         *,
         cause_mrid: bytes | None = None,
     ) -> None:

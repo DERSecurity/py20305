@@ -211,9 +211,7 @@ class TestCommandGate:
         connector = _Implements()
         dispatcher = _dispatcher(connector, _Gate(CommandOrigin.IEEE2030_5))
 
-        await dispatcher.apply_operation(
-            LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER
-        )
+        await dispatcher.apply_operation(LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER)
 
         assert len(connector.seen) == 1
 
@@ -257,9 +255,7 @@ class TestCommandGate:
         connector = _Implements()
         dispatcher = ConnectorDispatcher(_registry_for(connector), lfdi_resolver=lambda _href: LFDI)
 
-        await dispatcher.apply_operation(
-            LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER
-        )
+        await dispatcher.apply_operation(LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER)
 
         assert len(connector.seen) == 1
 
@@ -273,12 +269,14 @@ class TestAnOriginIsALabel:
     """
 
     def test_the_package_lists_only_the_origins_it_produces(self) -> None:
-        """An IEEE 2030.5 control, and the two times the client reasserts its
-        own state. An application's interfaces are not this package's to list."""
+        """An IEEE 2030.5 control, the two times the client reasserts its own
+        state, and the end of an event. An application's interfaces are not this
+        package's to list."""
         assert {origin.value for origin in CommandOrigin} == {
             "ieee2030_5",
             "dderc_reapply",
             "comms_loss",
+            "event_end",
         }
 
     @pytest.mark.asyncio
