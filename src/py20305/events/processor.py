@@ -1890,9 +1890,21 @@ class EventProcessor:
             ))
             if not reach & self._reach_of(record.program_href, devices):
                 continue
+            # Its registrations on the devices this write touches, not on all
+            # of the program's. Without a group lookup the write lands on one
+            # device, and an event registered on that program's other devices
+            # may not be registered on this one -- rejected there, or
+            # superseded there before it started. Counting those would hold a
+            # mode back on a device nothing is controlling it on, and the
+            # device would sit under neither the event nor the default.
+            # With a group lookup the registrations are keyed by server-side
+            # device while the write lands on local ones, so there is no
+            # per-device correspondence to make and all of them count.
             one = frozenset({record.mrid})
+            grouped = self._group_local_lfdis(record.program_href) is not None
             for device in devices:
-                held |= self._mode_tracker.covered_among(device, one)
+                if grouped or f"href:{device}" in reach:
+                    held |= self._mode_tracker.covered_among(device, one)
         return frozenset(held)
 
     def _device_has_other_active(

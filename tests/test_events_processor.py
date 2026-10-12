@@ -23,6 +23,7 @@ from py20305.connectors.control_errors import (
 from py20305.events import processor as processor_mod
 from py20305.events.comms_loss import CommsLossState
 from py20305.events.dispatch import NullDispatcher
+from py20305.events.modes_bitmask import get_active_mode_names
 from py20305.events.processor import EventProcessor
 from py20305.events.response import ResponseCode
 from py20305.events.state_machine import EventState
@@ -4190,6 +4191,122 @@ class TestADefaultDoesNotOverrideAnActiveEvent:
         assert frozenset({self._FIXED_W, self._MAX_LIM_W}) in set(
             self._default_modes_sent(dispatcher)
         ), "the whole default has to come back once nothing is controlling its modes"
+        await proc.shutdown()
+
+    @staticmethod
+    def _rejecting(device: str):
+        """A dispatcher that refuses one device and accepts the rest."""
+
+        def apply_control(*args, **kwargs):
+            if args and args[0] == device:
+                raise ConnectorValueError("the device would not take it")
+            return None
+
+        dispatcher = AsyncMock()
+        dispatcher.apply_control.side_effect = apply_control
+        return dispatcher
+
+    @pytest.mark.asyncio
+    async def test_a_device_that_rejected_the_event_still_gets_its_default(self):
+        """An event registered on a sibling is not controlling this device.
+
+        One program, two devices, one event. The device that refused it is
+        under no event at all, so the default has to reach it whole. This is
+        the case `_apply_initial_dderc` is written to prevent, where a rejected
+        device would otherwise sit under neither the event nor the default.
+        """
+        now = int(time.time())
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[
+                _make_derc(
+                    0x02,
+                    start=now - 10,
+                    duration=3600,
+                    base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+                )
+            ],
+            dderc=DefaultDercontrol(
+                m_rid=MRidtype(value=b"\x20" * 16),
+                dercontrol_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=9999)),
+            ),
+            device_hrefs=["/edev/1", "/edev/2"],
+        )
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = self._rejecting("/edev/1")
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event())
+        await proc.process_controls("/derp/1")
+        record = proc._store.get(b"\x02" * 16)
+        assert record.rejected_devices == {"/edev/1"}, "the fixture must have one device refuse"
+        assert record.applied_devices == {"/edev/2"}
+
+        dispatcher.reset_mock()
+        proc._dderc_tracker.clear_devices({b"\xaa" * 20})
+        await proc._apply_initial_dderc("/derp/1")
+
+        written = {
+            call.args[0]: get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control.await_args_list
+        }
+        assert written.get("/edev/1") == frozenset({self._MAX_LIM_W}), (
+            "the rejected device is under neither the event nor the default"
+        )
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_fallback_too_keeps_a_rejected_devices_modes(self):
+        """The same, through the end-of-event fallback rather than the initial pass."""
+        now = int(time.time())
+        base_a = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500))
+        base_b = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_a)],
+            dderc=DefaultDercontrol(
+                m_rid=MRidtype(value=b"\x20" * 16),
+                dercontrol_base=DercontrolBase(
+                    op_mod_max_lim_w=PerCentControlType(value=9999),
+                    op_mod_fixed_w=SignedPerCentControlType(value=1000),
+                ),
+            ),
+            device_hrefs=["/edev/1"],
+        )
+        # B covers /edev/1 and /edev/3, and /edev/1 refuses it.
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x02, start=now - 10, duration=3600, base=base_b)],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+        state.device_mapping.add("/derp/2", "/edev/3")
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = self._rejecting("/edev/1")
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event())
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+        assert "/edev/1" in proc._store.get(b"\x02" * 16).rejected_devices
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base_a)
+        ]
+        await proc.process_controls("/derp/1")
+
+        from_fallback = [
+            get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control.await_args_list
+            if call.kwargs.get("cause_mrid") is not None
+        ]
+        assert from_fallback, "the fallback must write to the device"
+        assert all(self._MAX_LIM_W in modes for modes in from_fallback), (
+            "a mode held only on a device that refused the event was kept from the default"
+        )
         await proc.shutdown()
 
     _LOCAL_A = "11" * 20
