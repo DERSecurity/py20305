@@ -1502,16 +1502,15 @@ class EventProcessor:
             assert dderc is not None  # guaranteed by _best_dderc_program_for_device
             carried = get_active_mode_names(dderc.dercontrol_base)
             # A default is the baseline for the modes no event is controlling,
-            # never an override of one. It is written whole, so where it names a
-            # mode another active event holds on this device, applying it would
-            # take that mode from the event that owns it. Withhold it there and
-            # disable what this event released instead: the event still holding
-            # the device keeps what is its, and its own end brings the default
-            # back for everything at once.
-            # This event's own registration is already gone: the loop above
-            # unregistered it for every device that reached here, which is what
-            # makes a plain reading of the tracker the other events' modes.
-            held = self._mode_tracker.covered(dev_href)
+            # and this project does not let it override one. The default is
+            # written whole, so where it names a mode an event that is still
+            # running holds, applying it would take that mode from the event
+            # that owns it. Withhold it there and disable what this event
+            # released instead: the event still holding the device keeps what
+            # is its, and its own end brings the default back for everything at
+            # once. Recorded as a decision rather than quoted from the standard
+            # -- see the note on `_held_by_running_events`.
+            held = self._held_by_running_events(best.href, dev_href, all_devices, active_events)
             if carried & held:
                 logger.debug(
                     "Event %s: holding back the default for %s, it names %s which "
@@ -1795,6 +1794,44 @@ class EventProcessor:
                 self._dderc_tracker.record_application(
                     lfdi, program_href, dderc_mrid, derp_state.primacy
                 )
+
+    def _held_by_running_events(
+        self,
+        default_program: str,
+        dev_href: str,
+        all_devices: list[str],
+        active_events: list[EventRecord],
+    ) -> frozenset[str]:
+        """The modes still-running events hold where this default would land.
+
+        Two things decide the answer, and getting either wrong lets a default
+        through that takes a mode from an event still running.
+
+        *How far the default travels.* Under a group lookup it is written to
+        every local device of its program, so a mode held on any of the
+        program's server-side devices is within reach of it, not only the one
+        being considered. The withdrawal path aggregates the same way and for
+        the same reason. Without a group lookup the write is one-to-one and
+        this device is the whole of it.
+
+        *Which registrations count.* Only events that are still running. A
+        registration left behind by an event that has ended is not something to
+        protect a mode for, and reading it as one would withhold a default that
+        nothing is controlling.
+
+        The rule the caller applies to this -- that a DefaultDERControl is not
+        written over a mode an event holds -- is a decision of this project. It
+        follows from a default being the planning limit a device falls back to,
+        but no clause of IEEE 2030.5 or CSIP consulted here states the
+        interaction outright, so it is recorded here rather than cited.
+        """
+        running = frozenset(record.mrid for record in active_events)
+        grouped = self._group_local_lfdis(default_program) is not None
+        scope = all_devices if grouped else [dev_href]
+        held: set[str] = set()
+        for device in scope:
+            held |= self._mode_tracker.covered_among(device, running)
+        return frozenset(held)
 
     def _device_has_other_active(
         self, dev_href: str, exclude_mrid: bytes, active_events: list[EventRecord]

@@ -4125,6 +4125,66 @@ class TestADefaultDoesNotOverrideAnActiveEvent:
         assert disabled == {"/edev/1": frozenset({self._FIXED_W})}
         await proc.shutdown()
 
+    _LOCAL_A = "11" * 20
+    _LOCAL_B = "22" * 20
+
+    @pytest.mark.asyncio
+    async def test_a_grouped_default_is_withheld_for_a_mode_held_on_a_sibling_device(self):
+        """Under a group lookup the default reaches further than the device it
+        was chosen for, so what is held must be read that far as well.
+
+        `/derp/1` holds `/edev/1` and `/edev/2` and resolves to both local
+        devices; `/derp/2` holds `/edev/1` alone and resolves to the first.
+        An event on `/derp/2` is running a mode `/derp/1`'s default names. When
+        `/derp/1`'s event ends, the fallback for `/edev/2` -- which holds no
+        such event -- is fanned out to both locals, the first of them being
+        where that mode is being controlled.
+        """
+        now = int(time.time())
+        base_1 = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500))
+        base_2 = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_1)],
+            dderc=self._dderc(DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=9999))),
+            device_hrefs=["/edev/1", "/edev/2"],
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x02, start=now - 10, duration=3600, base=base_2)],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+        groups = {"/derp/1": [self._LOCAL_A, self._LOCAL_B], "/derp/2": [self._LOCAL_A]}
+
+        http = AsyncMock()
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=base_1)
+        ]
+        await proc.process_controls("/derp/1")
+
+        # The fallback is the write that names its cause. Anything it fans out
+        # would land on the local device running op_mod_max_lim_w.
+        from_fallback = [
+            call
+            for call in dispatcher.apply_default_control_by_lfdi.await_args_list
+            if call.kwargs.get("cause_mrid") is not None
+        ]
+        assert from_fallback == [], (
+            "the default names a mode an event is running on a device it fans out to"
+        )
+        await proc.shutdown()
+
     @pytest.mark.asyncio
     async def test_the_default_is_applied_when_it_names_nothing_b_is_running(self):
         """The control: sharing a device is not on its own a reason to withhold."""

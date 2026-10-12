@@ -52,6 +52,20 @@ class ActiveModeTracker:
                 covered |= modes
         return frozenset(covered)
 
+    def covered_among(self, device_href: str, mrids: frozenset[bytes]) -> frozenset[str]:
+        """Return the modes ``mrids`` hold for ``device_href``.
+
+        Narrower than :meth:`covered`, which answers for every registration
+        there is. A caller asking what is still being controlled wants the
+        events that are still running, not one that ended and left its
+        registration behind.
+        """
+        covered: set[str] = set()
+        for mrid, modes in self._registry.get(device_href, {}).items():
+            if mrid in mrids:
+                covered |= modes
+        return frozenset(covered)
+
     def clear(self) -> None:
         """Clear all tracked state."""
         self._registry.clear()
