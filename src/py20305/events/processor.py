@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable, Coroutine, Iterable
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Sequence
 from dataclasses import replace
 from functools import cache, partial
 from typing import Any
@@ -1509,13 +1509,13 @@ class EventProcessor:
             # released instead: the event still holding the device keeps what
             # is its, and its own end brings the default back for everything at
             # once. Recorded as a decision rather than quoted from the standard
-            # -- see the note on `_held_by_running_events`.
-            # Under a group lookup the default is written to every local device
-            # of its program, so a mode held on any of the program's server-side
-            # devices is within reach of it. Without one the write goes to this
-            # device alone.
-            reach = all_devices if self._group_local_lfdis(best.href) is not None else [dev_href]
-            held = self._modes_running_on(reach, active_events)
+            # -- see the note on `_modes_running_in`.
+            # The default belongs to ``best.href``, which need not be the ending
+            # event's program: under a group lookup it fans out to *that*
+            # program's local devices, so that is what the write reaches.
+            held = self._modes_running_in(
+                self._reach_of(best.href, [dev_href]), active_events
+            )
             taken = carried & held
             if taken:
                 logger.debug(
@@ -1777,11 +1777,9 @@ class EventProcessor:
         # program, so a device correctly left out as a target is written to
         # anyway as part of another target's fan-out. Send the default without
         # the modes those events are running, as the end-of-event fallback does.
-        # Only a grouped program can write to a device that is not a target.
-        # Without a group lookup each write goes to the one device it was
-        # decided for, and that device has no active event by construction.
-        reach = devices if self._group_local_lfdis(program_href) is not None else []
-        held = self._modes_running_on(reach, active_events)
+        held = self._modes_running_in(
+            self._reach_of(program_href, [device for device, _ in targets]), active_events
+        )
         carried = get_active_mode_names(derp_state.default_dercontrol.dercontrol_base)
         taken = carried & held
         if carried and not (carried - taken):
@@ -1859,36 +1857,42 @@ class EventProcessor:
             cleared["other_element"] = kept
         return dderc.model_copy(update={"dercontrol_base": base.model_copy(update=cleared)})
 
-    def _modes_running_on(
-        self, devices: list[str], active_events: list[EventRecord]
-    ) -> frozenset[str]:
-        """The modes still-running events hold on any of ``devices``.
+    def _reach_of(self, program_href: str, devices: Sequence[str]) -> frozenset[str]:
+        """What a write made for ``devices`` of ``program_href`` actually touches.
 
-        Two things decide the answer, and getting either wrong lets a default
-        through that takes a mode from an event still running.
-
-        *How far the default travels.* Under a group lookup it is written to
-        every local device of its program, so a mode held on any of the
-        program's server-side devices is within reach of it, not only the one
-        being considered. The withdrawal path aggregates the same way and for
-        the same reason. Without a group lookup the write is one-to-one and
-        this device is the whole of it.
-
-        *Which registrations count.* Only events that are still running. A
-        registration left behind by an event that has ended is not something to
-        protect a mode for, and reading it as one would withhold a default that
-        nothing is controlling.
-
-        The rule the caller applies to this -- that a DefaultDERControl is not
-        written over a mode an event holds -- is a decision of this project. It
-        follows from a default being the planning limit a device falls back to,
-        but no clause of IEEE 2030.5 or CSIP consulted here states the
-        interaction outright, so it is recorded here rather than cited.
+        Under a group lookup a program's write goes to its group's local
+        devices whichever of its server-side devices it was decided for, so the
+        group is the reach and the server-side device it was decided for says
+        nothing about where it lands. Without one the write goes to the device
+        it names. The two are tagged apart because a local LFDI and a device
+        href are both strings and nothing stops them colliding.
         """
-        running = frozenset(record.mrid for record in active_events)
+        local_lfdis = self._group_local_lfdis(program_href)
+        if local_lfdis is not None:
+            return frozenset(f"lfdi:{lfdi}" for lfdi in local_lfdis)
+        return frozenset(f"href:{device}" for device in devices)
+
+    def _modes_running_in(
+        self, reach: frozenset[str], active_events: list[EventRecord]
+    ) -> frozenset[str]:
+        """The modes running events hold on anything ``reach`` touches.
+
+        Asked of every active event rather than of a device list, because a
+        group lookup maps *programs* to local devices: another program can
+        cover server-side devices this one never names and still resolve to the
+        same local device, and its modes are as much at risk from a write that
+        lands there.
+        """
         held: set[str] = set()
-        for device in devices:
-            held |= self._mode_tracker.covered_among(device, running)
+        for record in active_events:
+            devices = list(self._state.device_mapping.program_to_devices.get(
+                record.program_href, []
+            ))
+            if not reach & self._reach_of(record.program_href, devices):
+                continue
+            one = frozenset({record.mrid})
+            for device in devices:
+                held |= self._mode_tracker.covered_among(device, one)
         return frozenset(held)
 
     def _device_has_other_active(
