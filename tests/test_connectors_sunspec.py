@@ -17,11 +17,13 @@ from py20305.connectors.base import (
     ConnectorWriteError,
 )
 from py20305.connectors.control_errors import ModeNotSupportedError
-from py20305.connectors.modes import translate_const_q, translate_fixed_w
+from py20305.connectors.modes import translate_const_q, translate_fixed_w, translate_gen_lim
+from py20305.models.csipaus import OpModGenLimW
 from py20305.models.sep.sep import (
     DercontrolBase,
     DerunitRefType,
     FixedVarControlType,
+    PowerOfTenMultiplierType,
     SignedPerCent,
     SignedPerCentControlType,
 )
@@ -384,12 +386,13 @@ class TestSunSpecFetch:
         assert isinstance(result["CtrlModes"], int)
 
     @pytest.mark.asyncio
-    async def test_fetch_nameplate_doe_modes_export_only(self, sunspec_connector):
-        """SunSpec 704 only enforces an export (inject) active-power limit, so it
-        advertises doeModesSupported = export only (0x01). Only sent in CSIP-AUS
-        mode (the DERCapability builder gates the element)."""
+    async def test_fetch_nameplate_doe_modes_generation_only(self, sunspec_connector):
+        """doeModesSupported names opModGenLimW alone (bit 2, 0x04): it is the
+        only CSIP-AUS limit this connector enforces. The export and import
+        limits apply at the connection point, which an inverter cannot measure.
+        Only sent in CSIP-AUS mode (the DERCapability builder gates the element)."""
         result = await sunspec_connector.fetch_nameplate()
-        assert result["DoeModesSupported"] == 0x01
+        assert result["DoeModesSupported"] == 0x04
 
     @pytest.mark.asyncio
     async def test_fetch_nameplate_wmax_none_raises(self, sunspec_connector):
@@ -433,11 +436,11 @@ class TestSunSpecFetch:
         assert "WMax" in result
 
     @pytest.mark.asyncio
-    async def test_fetch_configuration_doe_modes_export_only(self, sunspec_connector):
-        """doeModesEnabled stays consistent with supported -- export only (0x01),
-        since SunSpec 704 can't enforce more."""
+    async def test_fetch_configuration_doe_modes_generation_only(self, sunspec_connector):
+        """doeModesEnabled stays consistent with supported -- generation only
+        (0x04)."""
         result = await sunspec_connector.fetch_configuration()
-        assert result["DoeModesEnabled"] == 0x01
+        assert result["DoeModesEnabled"] == 0x04
 
     @pytest.mark.asyncio
     async def test_fetch_configuration_returns_value_multiplier_dicts(self, sunspec_connector):
@@ -1424,6 +1427,142 @@ class TestSunSpecPLimMerge:
         model = sunspec_connector._target.models[704][0]
         # The fixture's _update_enable readback sees the value we set.
         assert model.WMaxLimPctEna.cvalue == 0
+
+
+class TestSunSpecGenLim:
+    """CSIP-AUS opModGenLimW is a watts limit on the DER's own generation. For a
+    pure generator CSIP-AUS reads it the same way as opModMaxLimW, the most
+    restrictive of the two winning, so it is converted to a percent of WMax and
+    joins the 704 WMaxLimPct merge (fixture WMax and WMaxRtg are 5000 W)."""
+
+    @staticmethod
+    def _models(sunspec_connector):
+        models = sunspec_connector._target.models
+        return models[702][0], models[704][0]
+
+    @pytest.mark.asyncio
+    async def test_gen_lim_writes_a_percent_of_wmax(self, sunspec_connector):
+        _, model_704 = self._models(sunspec_connector)
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+        assert model_704.WMaxLimPct.cvalue == 40
+        assert model_704.WMaxLimPctEna.cvalue == 1
+        model_704.write.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_a_translated_control_reaches_the_register(self, sunspec_connector):
+        """The parameter names the translator emits are the ones the connector
+        reads, so a CSIP-AUS control actually lands rather than enabling a mode
+        with no value."""
+        _, model_704 = self._models(sunspec_connector)
+        elem = OpModGenLimW(value=3, multiplier=PowerOfTenMultiplierType(value=3))
+        translated = translate_gen_lim(DercontrolBase(other_element=[elem]), [])
+        assert translated is not None
+        method, params = translated
+        await getattr(sunspec_connector, method)(params)
+        assert model_704.WMaxLimPct.cvalue == 60
+
+    @pytest.mark.asyncio
+    async def test_the_more_restrictive_of_gen_lim_and_max_lim_wins(self, sunspec_connector):
+        _, model_704 = self._models(sunspec_connector)
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 4000})
+        assert model_704.WMaxLimPct.cvalue == 60
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 1000})
+        assert model_704.WMaxLimPct.cvalue == 20
+
+    @pytest.mark.asyncio
+    async def test_a_max_lim_cannot_loosen_an_active_gen_lim(self, sunspec_connector):
+        _, model_704 = self._models(sunspec_connector)
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 1000})
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 90})
+        assert model_704.WMaxLimPct.cvalue == 20
+
+    @pytest.mark.asyncio
+    async def test_clearing_gen_lim_keeps_an_active_max_lim(self, sunspec_connector):
+        _, model_704 = self._models(sunspec_connector)
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 0})
+        assert model_704.WMaxLimPct.cvalue == 60
+        assert model_704.WMaxLimPctEna.cvalue == 1
+
+    @pytest.mark.asyncio
+    async def test_clearing_the_only_limit_disables_the_register(self, sunspec_connector):
+        _, model_704 = self._models(sunspec_connector)
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 0})
+        assert model_704.WMaxLimPctEna.cvalue == 0
+
+    @pytest.mark.asyncio
+    async def test_clearing_an_unset_gen_lim_leaves_the_register_alone(self, sunspec_connector):
+        """Event-end withdrawal sends a clear for every mode an event set, and a
+        comms-loss clear sends one for every mode. Neither may rewrite a register
+        that opModMaxLimW alone is holding."""
+        _, model_704 = self._models(sunspec_connector)
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        model_704.write.reset_mock()
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 0})
+        model_704.write.assert_not_called()
+        assert model_704.WMaxLimPct.cvalue == 60
+
+    @pytest.mark.asyncio
+    async def test_gen_lim_follows_wmax_lowered_by_an_inject_limit(self, sunspec_connector):
+        """WMaxLimPct is a percent of WMax, and an inject limit mirrors itself
+        onto WMax. The percent is worked out again, so the watts stay put."""
+        model_702, model_704 = self._models(sunspec_connector)
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        assert model_702.WMax.cvalue == 4000
+        assert model_704.WMaxLimPct.cvalue == 50
+
+    @pytest.mark.asyncio
+    async def test_gen_lim_holds_when_an_inject_limit_restores_wmax(self, sunspec_connector):
+        """The direction that overruns. Set while an inject limit has WMax at
+        4000 W, 2000 W is 50%; left at 50% once WMax returns to 5000 W, the
+        device would be allowed 2500 W."""
+        model_702, model_704 = self._models(sunspec_connector)
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+        assert model_704.WMaxLimPct.cvalue == 50
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+        assert model_702.WMax.cvalue == 5000
+        assert model_704.WMaxLimPct.cvalue == 40
+        assert model_704.WMaxLimPctEna.cvalue == 1
+
+    @pytest.mark.asyncio
+    async def test_gen_lim_is_declined_without_wmaxlimpct(self, sunspec_connector):
+        _, model_704 = self._models(sunspec_connector)
+        model_704.WMaxLimPct = MagicMock(value=None, cvalue=None)
+        model_704.WMaxLimPctEna.cvalue = 0
+
+        with pytest.raises(ModeNotSupportedError, match="opModGenLimW"):
+            await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+
+        model_704.write.assert_not_called()
+        assert model_704.WMaxLimPctEna.cvalue == 0
+
+    @pytest.mark.asyncio
+    async def test_gen_lim_is_declined_without_a_wmax_to_scale_by(self, sunspec_connector):
+        """No WMax and no WMaxRtg leaves no way to turn watts into the percent
+        the register takes. Reporting that beats posting success for a limit
+        nothing holds."""
+        model_702, model_704 = self._models(sunspec_connector)
+        model_702.WMax = MagicMock(value=None, cvalue=None)
+        model_702.WMaxRtg = MagicMock(value=None, cvalue=None)
+
+        with pytest.raises(ModeNotSupportedError, match="opModGenLimW"):
+            await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+
+        model_704.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_negative_gen_lim_is_refused(self, sunspec_connector):
+        """A negative would become a negative percent, which the register
+        clamps to a full curtailment nobody asked for."""
+        _, model_704 = self._models(sunspec_connector)
+        with pytest.raises(ConnectorValueError):
+            await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": -100})
+        model_704.write.assert_not_called()
 
 
 class TestSunSpecScanReadiness:
