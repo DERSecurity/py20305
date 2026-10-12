@@ -424,6 +424,10 @@ class SunSpecModbusConnector:
         # WMax, and an inject limit moves WMax, so the percent is worked out
         # again from these watts whenever that happens.
         self._gen_lim_watts: float | None = None
+        # A "gen" slot write raised. The enable point is written before the
+        # value, so it may be up with nothing recorded; the next clear runs
+        # regardless to lower it.
+        self._gen_lim_unconfirmed = False
         # Last watts written to each model 702 rate setting (keyed as in
         # ``_P_LIM_W_CONTROLS``), for diagnostics. Held apart from
         # ``_p_lim_slots`` precisely because the units differ: these are raw
@@ -1083,7 +1087,7 @@ class SunSpecModbusConnector:
             return
 
         if not enabled:
-            if self._p_lim_slots["gen"] != (False, None):
+            if self._p_lim_slots["gen"] != (False, None) or self._gen_lim_unconfirmed:
                 self._apply_gen_lim_slot(None, None)
             self._gen_lim_watts = None
             return
@@ -1114,7 +1118,9 @@ class SunSpecModbusConnector:
             self._apply_inject_pct_slot("gen", watts is not None, pct)
         except Exception:
             self._p_lim_slots["gen"] = previous
+            self._gen_lim_unconfirmed = True
             raise
+        self._gen_lim_unconfirmed = False
         self._gen_lim_watts = watts
 
     def _refresh_gen_lim_pct(self) -> None:

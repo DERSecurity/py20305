@@ -1654,6 +1654,27 @@ class TestSunSpecGenLim:
         assert written and written[-1] == 50
 
     @pytest.mark.asyncio
+    async def test_a_clear_lowers_an_enable_left_up_by_a_failed_write(self, sunspec_connector):
+        """The enable point is written before the value. When the value write
+        fails, the enable stays up with nothing recorded, so the clear has to
+        run anyway rather than finding nothing to do. Once it has, a second
+        clear writes nothing."""
+        _, model_704 = self._models(sunspec_connector)
+        model_704.WMaxLimPctEna.cvalue = 0
+        model_704.write.side_effect = OSError("link dropped")
+        with pytest.raises(OSError):
+            await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 2000})
+        assert model_704.WMaxLimPctEna.cvalue == 1
+        model_704.write.side_effect = None
+
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 0})
+        assert model_704.WMaxLimPctEna.cvalue == 0
+
+        model_704.WMaxLimPctEna.write.reset_mock()
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 0})
+        model_704.WMaxLimPctEna.write.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_negative_gen_lim_is_refused(self, sunspec_connector):
         """A negative would become a negative percent, which the register
         clamps to a full curtailment nobody asked for."""
