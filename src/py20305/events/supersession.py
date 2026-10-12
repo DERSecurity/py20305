@@ -33,8 +33,17 @@ class SupersessionResult:
     affected_modes: frozenset[str] = frozenset()
 
 
-def _extract_param_keys(base: DercontrolBase) -> frozenset[str]:
-    """Return the set of non-None DERControlBase field names, excluding connect/energize."""
+def compared_mode_keys(base: DercontrolBase) -> frozenset[str]:
+    """Return the modes supersession compares, as it compares them.
+
+    `DERControlBase` field names, leaving out connect and energize and not
+    seeing extension elements -- narrower than
+    :func:`~py20305.events.modes_bitmask.get_active_mode_names`, which names
+    every mode an event sets. Anything deciding what a supersession covered
+    has to ask in this vocabulary: ``superseded_modes`` is recorded from it,
+    so comparing it against the wider set says a device was only partly taken
+    over whenever an event carries a mode this cannot see.
+    """
     keys: list[str] = []
     for name in DercontrolBase.model_fields:
         if name in _EXCLUDED_FIELDS:
@@ -93,8 +102,8 @@ def compute_supersession(
 
             # Per-mode supersession: intersecting modes supersede independently.
             # Exact match (including both-empty) or non-empty overlap triggers supersession.
-            params_a = _extract_param_keys(a.derc.dercontrol_base)
-            params_b = _extract_param_keys(b.derc.dercontrol_base)
+            params_a = compared_mode_keys(a.derc.dercontrol_base)
+            params_b = compared_mode_keys(b.derc.dercontrol_base)
             overlap = params_a & params_b
             if params_a != params_b and not overlap:
                 continue
