@@ -45,13 +45,15 @@ and is written as the rating. The device must declare charge-rate limiting
 (`WChaRteMax` implemented and a non-zero `WChaRteMaxRtg`); one that does not
 answers the control as not supported.
 
-**A load limit stays on the device after its event ends.** `WChaRteMax` is a
-setting with no enable, so clearing the limit writes nothing unless
-`opModMaxLimWAbsorb` is still active. The limit is replaced only when the
-DefaultDERControl carries `opModLoadLimW` (or `opModMaxLimWAbsorb`), or another
-control sets one. A 0 W load limit with no such default leaves the battery
-unable to charge until one does, so a program that sends load limits should
-carry one in its DefaultDERControl.
+`WChaRteMax` is a setting with no enable, so a limit is ended by writing a
+value back. Clearing one limit while the other is active writes the other's
+value. When the last charge limit clears, the connector writes back the
+`WChaRteMax` the device held before the first limit, so a 0 W limit does not
+leave a battery unable to charge after its event. A DefaultDERControl that
+carries a charge limit then sets its own value as usual. The device's own value
+is kept in memory, so restarting the connector during an event loses it and
+the event's value stays until another control writes the register. The
+discharge-rate setting written by `opModMaxLimWInject` is not restored yet.
 
 `doeModesSupported` and `doeModesEnabled` name only the limits the device can
 take:

@@ -438,6 +438,10 @@ class SunSpecModbusConnector:
         # ("abs") and CSIP-AUS opModLoadLimW ("load"). Both land on model 702
         # WChaRteMax, which takes the lower of the two -- see _set_charge_limit.
         self._charge_limits: dict[str, float | None] = {"abs": None, "load": None}
+        # The device's own WChaRteMax, captured when the first charge limit is
+        # written and put back when the last one clears. None means no charge
+        # limit is in force, so there is nothing to restore.
+        self._charge_baseline: float | None = None
         # The device's own WMax, captured on the first mirror write of an inject
         # event and written back when the control clears. None means nothing is
         # mirrored, so there is nothing to restore.
@@ -1159,9 +1163,9 @@ class SunSpecModbusConnector:
 
         A device that does not declare charge-rate limiting declines the
         control: model 704 has no charge-direction limit to fall back on, unlike
-        the generation side. Clearing writes nothing unless opModMaxLimWAbsorb is
-        still active, so a limit outlives its event unless the DefaultDERControl
-        carries the next one.
+        the generation side. Clearing hands the register to opModMaxLimWAbsorb
+        if it is still active, and otherwise restores the device's own
+        WChaRteMax -- see ``_set_charge_limit``.
         """
         enabled = params.get("load_lim_mode_enable", 0) == 1
         watts = params.get("load_lim_w")
@@ -1193,9 +1197,17 @@ class SunSpecModbusConnector:
         WChaRteMax is a setting with no enable bit, so a limit cannot be switched
         off, only replaced. While either limit is active the register holds the
         lower of the two, which keeps either control from loosening the other.
-        With neither active nothing is written: the register keeps its last
-        value, so a limit outlives its event unless the DefaultDERControl sets
-        the next one.
+
+        When the last active limit clears, the device's own WChaRteMax is
+        written back: the value it held when the first limit was written. A
+        DefaultDERControl that does not carry a charge limit is a default with
+        no charge limit, and IEEE 2030.5-2018 10.10.4.2, CSIP 4.4.2 and
+        CSIP-AUS 4.4 return the device to the default rather than leave an
+        ended event's value in force -- a 0 W limit would otherwise leave a
+        battery unable to charge. The device's own value is restored rather
+        than WChaRteMaxRtg, so a setting an installer made below the rating
+        survives. The capture is in memory, so a restart during an event
+        forfeits the restore, as for the mirrored WMax.
 
         The value written is held to WChaRteMaxRtg. A limit above what the
         device can charge at is a valid request that simply does not bind, as
@@ -1206,24 +1218,40 @@ class SunSpecModbusConnector:
         fits the register, since the rating is a uint16 at the same scale.
 
         The limit is recorded only once the write goes through. A failed write
-        leaves the earlier value on the device, so the earlier record stands.
+        leaves the earlier value on the device, so the earlier record stands,
+        and a failed restore keeps its baseline for the next clear to retry.
         """
         previous = self._charge_limits[slot]
+        first = all(w is None for w in self._charge_limits.values())
         self._charge_limits[slot] = watts
         active = [w for w in self._charge_limits.values() if w is not None]
-        if not active:
+        if not active and self._charge_baseline is None:
             return
+        captured = False
         try:
             if model_702 is None:
                 model_702 = self._get_model(702)
+            if not active:
+                model_702.WChaRteMax.cvalue = self._charge_baseline
+                model_702.write()
+                self._charge_baseline = None
+                return
+            if first and self._charge_baseline is None:
+                self._charge_baseline = model_702.WChaRteMax.cvalue
+                captured = True
             target = min(active)
             rating = model_702.WChaRteMaxRtg.cvalue
             if rating:
                 target = min(target, rating)
+            # Unreachable while every caller checks the rating first; kept so a
+            # value that cannot be encoded is still refused with a typed error.
+            _require_uint16_watts(target, model_702.W_SF.value, "charge-rate limit")
             model_702.WChaRteMax.cvalue = target
             model_702.write()
         except Exception:
             self._charge_limits[slot] = previous
+            if captured:
+                self._charge_baseline = None
             raise
 
     def _update_p_lim_w_sync(self, params: dict[str, Any], slot: str) -> None:
@@ -1241,12 +1269,11 @@ class SunSpecModbusConnector:
         a device need not implement either; ``_apply_p_lim_w_without_register``
         handles that case.
 
-        Clearing a control writes nothing to model 702. These are settings
-        registers with no enable bit, and the post-event state is governed by the
-        default DERControl rather than by restoring a captured baseline. The one
-        exception is ``WChaRteMax`` while CSIP-AUS opModLoadLimW is also active:
-        the two share it, and clearing one writes the other's value -- see
-        ``_set_charge_limit``.
+        These are settings registers with no enable bit. Clearing the absorb
+        limit goes through ``_set_charge_limit``, which shares ``WChaRteMax``
+        with CSIP-AUS opModLoadLimW and restores the device's own value when the
+        last charge limit clears. Clearing the inject limit writes nothing to
+        ``WDisChaRteMax`` yet (#66).
         """
         if slot not in _P_LIM_W_CONTROLS:
             msg = f"_update_p_lim_w_sync expects 'inj' or 'abs', got {slot!r}"
@@ -1260,11 +1287,12 @@ class SunSpecModbusConnector:
             logger.warning("%s enabled but carried no value; nothing to apply", control)
 
         if not enabled or watts is None:
-            # The rate setting keeps its last written value -- see the
-            # docstring. What the connector put there on its own initiative it
-            # does take back: the mirrored WMax, and an inject cap the fallback
-            # route installed on 704 WMaxLimPct, which would otherwise outlive
-            # the event that imposed it.
+            # WDisChaRteMax keeps its last written value for now (#66); the
+            # absorb limit is cleared through _set_charge_limit below. What the
+            # connector put there on its own initiative it does take back: the
+            # mirrored WMax, and an inject cap the fallback route installed on
+            # 704 WMaxLimPct, which would otherwise outlive the event that
+            # imposed it.
             if slot == "inj":
                 self._p_lim_w_settings[slot] = None
                 self._restore_mirrored_wmax()
@@ -1347,10 +1375,9 @@ class SunSpecModbusConnector:
     def _restore_mirrored_wmax(self) -> None:
         """Put WMax back where the device had it before an inject limit lowered it.
 
-        The rate settings themselves stay where the event left them: an operator
-        limit outliving its event is the DefaultDERControl's problem, and those
-        registers are where the head-end's control actually landed. WMax is
-        different in kind. No head-end control writes it; the connector lowered
+        WDisChaRteMax itself still stays where the event left it (#66);
+        WChaRteMax is restored by ``_set_charge_limit``. WMax is different in
+        kind. No head-end control writes it; the connector lowered
         it on its own initiative to cover devices that honour only WMax, so the
         connector owes the restore -- the same reasoning that has the fallback
         route drive WMaxLimPctEna low on teardown rather than leave a lever it
