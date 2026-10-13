@@ -30,22 +30,34 @@ Install it with the `sunspec` extra.
 ### CSIP-AUS operating envelope limits
 
 Of the four CSIP-AUS limits, the SunSpec connector enforces the generation
-limit, `opModGenLimW`. It converts the watts to a percent of the device's
-`WMax` (model 702, or `WMaxRtg` where `WMax` is not implemented) and writes
-that to `WMaxLimPct` in model 704. When `opModMaxLimW` is active too, the more
-restrictive of the two is written. The device must implement `WMaxLimPct`;
-one that does not answers the control as not supported, and advertises no
-limits in `doeModesSupported`.
+limit, `opModGenLimW`, and the load limit, `opModLoadLimW`.
 
-The connector treats the limit as applying to the one inverter it controls.
+The generation limit is converted to a percent of the device's `WMax` (model
+702, or `WMaxRtg` where `WMax` is not implemented) and written to `WMaxLimPct`
+in model 704. When `opModMaxLimW` is active too, the more restrictive of the
+two is written. The device must implement `WMaxLimPct`; one that does not
+answers the control as not supported.
+
+The load limit is the maximum charge rate of a storage device, written in watts
+to `WChaRteMax` in model 702. When `opModMaxLimWAbsorb` is active too, the lower
+of the two is written. The device must declare charge-rate limiting
+(`WChaRteMax` implemented and a non-zero `WChaRteMaxRtg`); one that does not
+answers the control as not supported. `WChaRteMax` is a setting with no enable,
+so clearing the limit writes nothing unless `opModMaxLimWAbsorb` is still
+active: after an event, the DefaultDERControl sets the next value.
+
+`doeModesSupported` and `doeModesEnabled` name only the limits the device can
+take: `04` for a PV inverter with `WMaxLimPct`, `0C` for a storage inverter that
+also declares charge-rate limiting.
+
+The connector treats a limit as applying to the one inverter it controls.
 Where a single EndDevice stands for several inverters, each connector is handed
 the full value; dividing a shared limit between them is up to whatever
 dispatches the control, not this connector.
 
 The export and import limits (`opModExpLimW`, `opModImpLimW`) constrain power
-at the site's connection point, which an inverter cannot measure, and the load
-limit (`opModLoadLimW`) has no model 704 register. The connector leaves all
-three out of `doeModesSupported` and does not apply them.
+at the site's connection point, which an inverter cannot measure. The connector
+leaves both out of `doeModesSupported` and does not apply them.
 
 ## The print connector
 
