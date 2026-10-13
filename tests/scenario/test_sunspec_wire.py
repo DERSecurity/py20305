@@ -206,6 +206,58 @@ async def test_watts_limits_leave_the_percent_register_alone(modbus):
     assert point_address(modbus.image, 704, "WMaxLimPct") not in written
 
 
+async def test_load_limit_writes_the_charge_rate_setting(modbus):
+    """CSIP-AUS opModLoadLimW is the maximum charge rate, so it lands on the
+    same charge-rate setting as opModMaxLimWAbsorb."""
+    connector = await _resolve(modbus.registry())
+    await connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 2000})
+
+    addr = point_address(modbus.image, 702, "WChaRteMax")
+    assert addr in _written_addresses(modbus.server), "the charge rate was never written"
+    assert modbus.server.registers[addr] == 2000
+
+
+async def test_load_and_absorb_limits_share_the_charge_rate_on_the_wire(modbus):
+    """The lower of the two reaches the register, and clearing the load limit
+    puts the absorb limit back there rather than leaving the lower value."""
+    connector = await _resolve(modbus.registry())
+    addr = point_address(modbus.image, 702, "WChaRteMax")
+
+    await connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
+    await connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 1500})
+    assert modbus.server.registers[addr] == 1500
+
+    await connector.update_load_lim({"load_lim_mode_enable": 0})
+    assert modbus.server.registers[addr] == 2500
+
+
+async def test_load_limit_encodes_against_the_scale_factor():
+    """At W_SF=1 a 3000 W load limit must reach the wire as raw 300 -- not 3000
+    (unscaled) and not 30 (double-scaled)."""
+    handle = await _start_modbus(build_der_image(w_sf=1))
+    try:
+        connector = await _resolve(handle.registry())
+        await connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 3000})
+
+        addr = point_address(handle.image, 702, "WChaRteMax")
+        assert handle.server.registers[addr] == 300
+    finally:
+        await handle.server.close()
+
+
+async def test_load_limit_is_declined_without_a_charge_rate_setting(
+    modbus_without_rate_settings,
+):
+    """Model 704 has no charge-direction limit to fall back on, so a device
+    without the charge-rate setting declines the control and nothing is
+    written."""
+    connector = await _resolve(modbus_without_rate_settings.registry())
+    with pytest.raises(ModeNotSupportedError, match="opModLoadLimW"):
+        await connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 2000})
+
+    assert _written_addresses(modbus_without_rate_settings.server) == set()
+
+
 async def test_inject_encodes_against_the_scale_factor():
     """The rate settings are raw uint16 scaled by model 702's W_SF, and the
     default image uses W_SF=0, where watts and raw registers coincide and a

@@ -47,8 +47,14 @@ so clearing the limit writes nothing unless `opModMaxLimWAbsorb` is still
 active: after an event, the DefaultDERControl sets the next value.
 
 `doeModesSupported` and `doeModesEnabled` name only the limits the device can
-take: `04` for a PV inverter with `WMaxLimPct`, `0C` for a storage inverter that
-also declares charge-rate limiting.
+take:
+
+| Value | Device |
+|---|---|
+| `0C` | Implements `WMaxLimPct` and declares charge-rate limiting, as a storage inverter does |
+| `04` | Implements `WMaxLimPct` only, as a PV inverter does |
+| `08` | Declares charge-rate limiting but does not implement `WMaxLimPct` |
+| `00` | Neither: no CSIP-AUS limit can be applied |
 
 The connector treats a limit as applying to the one inverter it controls.
 Where a single EndDevice stands for several inverters, each connector is handed
