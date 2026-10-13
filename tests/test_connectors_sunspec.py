@@ -1817,6 +1817,54 @@ class TestSunSpecLoadLim:
         assert written == [2000]
 
     @pytest.mark.asyncio
+    async def test_a_load_lim_above_the_rating_is_written_as_the_rating(self, sunspec_connector):
+        """A limit above what the device can charge at does not bind; it is not
+        an error. 10 kW against the fixture's 5 kW rating at W_SF=-1 would
+        encode to 100000, outside the register, so writing it as asked fails a
+        control the device already satisfies (the LOA-02 precondition sends
+        10 kW)."""
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 10000})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_an_absorb_lim_above_the_rating_is_written_as_the_rating(
+        self, sunspec_connector
+    ):
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 10000})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_the_requested_watts_are_compared_not_the_held_value(self, sunspec_connector):
+        """The record keeps what each control asked for. Held to the 5 kW rating,
+        a 10 kW load limit still loses to a 4 kW absorb limit, and once the
+        absorb limit clears the register stays at the rating."""
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 10000})
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        assert model_702.WChaRteMax.cvalue == 4000
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 0})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_a_failed_clear_keeps_the_limit_and_can_be_retried(self, sunspec_connector):
+        """The device still holds 1000 W after a clear whose write failed, so the
+        record does too, and the retried clear hands the register to the absorb
+        limit."""
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 1000})
+        model_702.write.side_effect = OSError("link dropped")
+        with pytest.raises(OSError):
+            await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+
+        written: list[float] = []
+        model_702.write.side_effect = lambda: written.append(model_702.WChaRteMax.cvalue)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+        assert written == [3000]
+
+    @pytest.mark.asyncio
     async def test_load_lim_is_declined_without_wcharte_max(self, sunspec_connector):
         model_702 = self._model_702(sunspec_connector)
         model_702.WChaRteMax = MagicMock(value=None, cvalue=None)

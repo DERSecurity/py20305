@@ -429,11 +429,11 @@ class SunSpecModbusConnector:
         # value, so it may be up with nothing recorded; the next clear runs
         # regardless to lower it.
         self._gen_lim_unconfirmed = False
-        # Last watts written to each model 702 rate setting (keyed as in
-        # ``_P_LIM_W_CONTROLS``), for diagnostics. Held apart from
-        # ``_p_lim_slots`` precisely because the units differ: these are raw
-        # watts and must never reach the percent merge.
-        self._p_lim_w_settings: dict[str, float | None] = {"inj": None, "abs": None}
+        # Last watts opModMaxLimWInject wrote to model 702 WDisChaRteMax, for
+        # diagnostics. Held apart from ``_p_lim_slots`` precisely because the
+        # units differ: these are raw watts and must never reach the percent
+        # merge. The charge-direction limits are recorded in ``_charge_limits``.
+        self._p_lim_w_settings: dict[str, float | None] = {"inj": None}
         # The watts each active charge-direction limit asks for: opModMaxLimWAbsorb
         # ("abs") and CSIP-AUS opModLoadLimW ("load"). Both land on model 702
         # WChaRteMax, which takes the lower of the two -- see _set_charge_limit.
@@ -1152,14 +1152,16 @@ class SunSpecModbusConnector:
 
         CSIP-AUS v1.1a Annex B defines it as "a constraint on the maximum
         allowable charge rate, in Watts", which is model 702 WChaRteMax. That is
-        where opModMaxLimWAbsorb lands too, and where both are present "the most
-        restrictive value is to be used", so the two share the register through
-        ``_set_charge_limit``.
+        where opModMaxLimWAbsorb lands too. The two share the register through
+        ``_set_charge_limit``, the lower applying: the same principle the annex
+        states for a device limit read alongside opModMaxLimW, and the only
+        sound way to hold two caps on one register.
 
         A device that does not declare charge-rate limiting declines the
         control: model 704 has no charge-direction limit to fall back on, unlike
         the generation side. Clearing writes nothing unless opModMaxLimWAbsorb is
-        still active; the DefaultDERControl decides the value after an event.
+        still active, so a limit outlives its event unless the DefaultDERControl
+        carries the next one.
         """
         enabled = params.get("load_lim_mode_enable", 0) == 1
         watts = params.get("load_lim_w")
@@ -1181,7 +1183,6 @@ class SunSpecModbusConnector:
                 "this device declares no charge-rate limiting: model 702 WChaRteMax "
                 "is unimplemented or its WChaRteMaxRtg rating is zero",
             )
-        _require_uint16_watts(value, model_702.W_SF.value, "opModLoadLimW")
         self._set_charge_limit("load", value, model_702)
 
     def _set_charge_limit(
@@ -1193,7 +1194,16 @@ class SunSpecModbusConnector:
         off, only replaced. While either limit is active the register holds the
         lower of the two, which keeps either control from loosening the other.
         With neither active nothing is written: the register keeps its last
-        value until the DefaultDERControl sets the next one.
+        value, so a limit outlives its event unless the DefaultDERControl sets
+        the next one.
+
+        The value written is held to WChaRteMaxRtg. A limit above what the
+        device can charge at is a valid request that simply does not bind, as
+        for the mirrored WMax, while a setting above the rating can be refused
+        by the device, or not fit the uint16 register at all. The record keeps
+        the watts each control asked for, so the two are compared as sent.
+        Every caller has established a non-zero rating, and a value held to it
+        fits the register, since the rating is a uint16 at the same scale.
 
         The limit is recorded only once the write goes through. A failed write
         leaves the earlier value on the device, so the earlier record stands.
@@ -1206,7 +1216,11 @@ class SunSpecModbusConnector:
         try:
             if model_702 is None:
                 model_702 = self._get_model(702)
-            model_702.WChaRteMax.cvalue = min(active)
+            target = min(active)
+            rating = model_702.WChaRteMaxRtg.cvalue
+            if rating:
+                target = min(target, rating)
+            model_702.WChaRteMax.cvalue = target
             model_702.write()
         except Exception:
             self._charge_limits[slot] = previous
@@ -1251,8 +1265,8 @@ class SunSpecModbusConnector:
             # does take back: the mirrored WMax, and an inject cap the fallback
             # route installed on 704 WMaxLimPct, which would otherwise outlive
             # the event that imposed it.
-            self._p_lim_w_settings[slot] = None
             if slot == "inj":
+                self._p_lim_w_settings[slot] = None
                 self._restore_mirrored_wmax()
                 # Guarded: only the fallback route populates this slot. On the
                 # direct route model 704 belongs to opModMaxLimW alone, and
@@ -1279,16 +1293,16 @@ class SunSpecModbusConnector:
             self._apply_p_lim_w_without_register(slot, value, model_702)
             return
 
-        _require_uint16_watts(value, model_702.W_SF.value, control)
         if slot == "abs":
             self._set_charge_limit("abs", value, model_702)
-        else:
-            point.cvalue = value
-            self._mirror_inject_onto_wmax(model_702, value)
-            model_702.write()
+            return
+
+        _require_uint16_watts(value, model_702.W_SF.value, control)
+        point.cvalue = value
+        self._mirror_inject_onto_wmax(model_702, value)
+        model_702.write()
         self._p_lim_w_settings[slot] = value
-        if slot == "inj":
-            self._refresh_gen_lim_pct()
+        self._refresh_gen_lim_pct()
 
     def _mirror_inject_onto_wmax(self, model_702: Any, watts: float) -> None:
         """Write an inject limit to WMax as well as WDisChaRteMax.
@@ -1448,7 +1462,8 @@ class SunSpecModbusConnector:
         surfacing the gap rather than swallowing it.
         """
         # Nothing reaches model 702 on either branch below.
-        self._p_lim_w_settings[slot] = None
+        if slot == "inj":
+            self._p_lim_w_settings[slot] = None
 
         if slot == "abs":
             if not self._p_lim_abs_warned:

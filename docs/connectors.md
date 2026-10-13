@@ -40,11 +40,18 @@ answers the control as not supported.
 
 The load limit is the maximum charge rate of a storage device, written in watts
 to `WChaRteMax` in model 702. When `opModMaxLimWAbsorb` is active too, the lower
-of the two is written. The device must declare charge-rate limiting
+of the two is written. A limit above the device's `WChaRteMaxRtg` does not bind
+and is written as the rating. The device must declare charge-rate limiting
 (`WChaRteMax` implemented and a non-zero `WChaRteMaxRtg`); one that does not
-answers the control as not supported. `WChaRteMax` is a setting with no enable,
-so clearing the limit writes nothing unless `opModMaxLimWAbsorb` is still
-active: after an event, the DefaultDERControl sets the next value.
+answers the control as not supported.
+
+**A load limit stays on the device after its event ends.** `WChaRteMax` is a
+setting with no enable, so clearing the limit writes nothing unless
+`opModMaxLimWAbsorb` is still active. The limit is replaced only when the
+DefaultDERControl carries `opModLoadLimW` (or `opModMaxLimWAbsorb`), or another
+control sets one. A 0 W load limit with no such default leaves the battery
+unable to charge until one does, so a program that sends load limits should
+carry one in its DefaultDERControl.
 
 `doeModesSupported` and `doeModesEnabled` name only the limits the device can
 take:
