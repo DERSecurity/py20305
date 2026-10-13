@@ -157,12 +157,13 @@ _P_LIM_PCT_CONTROLS: dict[str, str] = {
     "gen": "opModGenLimW",
 }
 
-#: The only CSIP-AUS DOE limit this connector can enforce, as its
-#: doeModesSupported / doeModesEnabled bit: opModGenLimW (bit 2). CSIP-AUS v1.1a
+#: The CSIP-AUS DOE limits this connector can enforce, as their
+#: doeModesSupported / doeModesEnabled bits: opModGenLimW (bit 2) on model 704
+#: WMaxLimPct, and opModLoadLimW (bit 3) on model 702 WChaRteMax. CSIP-AUS v1.1a
 #: Annex B defines opModExpLimW and opModImpLimW at the connection point, which
-#: an inverter cannot measure, and opModLoadLimW has no model 704 register to
-#: land on.
+#: an inverter cannot measure.
 _GEN_LIM_DOE_BIT = 0x04
+_LOAD_LIM_DOE_BIT = 0x08
 
 
 def _resolve_point(model: Any, dotted: str) -> Any:
@@ -428,11 +429,15 @@ class SunSpecModbusConnector:
         # value, so it may be up with nothing recorded; the next clear runs
         # regardless to lower it.
         self._gen_lim_unconfirmed = False
-        # Last watts written to each model 702 rate setting (keyed as in
-        # ``_P_LIM_W_CONTROLS``), for diagnostics. Held apart from
-        # ``_p_lim_slots`` precisely because the units differ: these are raw
-        # watts and must never reach the percent merge.
-        self._p_lim_w_settings: dict[str, float | None] = {"inj": None, "abs": None}
+        # Last watts opModMaxLimWInject wrote to model 702 WDisChaRteMax, for
+        # diagnostics. Held apart from ``_p_lim_slots`` precisely because the
+        # units differ: these are raw watts and must never reach the percent
+        # merge. The charge-direction limits are recorded in ``_charge_limits``.
+        self._p_lim_w_settings: dict[str, float | None] = {"inj": None}
+        # The watts each active charge-direction limit asks for: opModMaxLimWAbsorb
+        # ("abs") and CSIP-AUS opModLoadLimW ("load"). Both land on model 702
+        # WChaRteMax, which takes the lower of the two -- see _set_charge_limit.
+        self._charge_limits: dict[str, float | None] = {"abs": None, "load": None}
         # The device's own WMax, captured on the first mirror write of an inject
         # event and written back when the control clears. None means nothing is
         # mirrored, so there is nothing to restore.
@@ -884,17 +889,23 @@ class SunSpecModbusConnector:
     def _doe_modes(self) -> int:
         """The doeModesSupported / doeModesEnabled bitmap for this device.
 
-        opModGenLimW lands on 704 WMaxLimPct, so a device without that point
-        advertises nothing rather than a limit it would decline. Read from the
-        scanned model instead of a fresh read: the scan reads every model in
-        full, and which points a device implements does not change between
+        Each limit is advertised only where the device can take it, rather
+        than advertising one it would decline: opModGenLimW where model 704
+        implements WMaxLimPct, and opModLoadLimW where model 702 declares
+        charge-rate limiting (the same test the load limit applies). Read from
+        the scanned models instead of a fresh read: the scan reads every model
+        in full, and which points a device implements does not change between
         scans. The WMax base the conversion needs is not checked here; the
         scan-readiness check already guarantees WMaxRtg.
         """
+        bits = 0
         instances = self._target.models.get(704)
-        if not instances or _unimplemented_points(instances[0], ("WMaxLimPct",)):
-            return 0
-        return _GEN_LIM_DOE_BIT
+        if instances and not _unimplemented_points(instances[0], ("WMaxLimPct",)):
+            bits |= _GEN_LIM_DOE_BIT
+        instances = self._target.models.get(702)
+        if instances and _rate_setting_is_supported(instances[0], "abs", instances[0].WChaRteMax):
+            bits |= _LOAD_LIM_DOE_BIT
+        return bits
 
     def _update_qv_sync(self, params: dict[str, Any]) -> None:
         model = self._get_model(705)
@@ -1136,6 +1147,95 @@ class SunSpecModbusConnector:
         if pct is not None:
             self._apply_gen_lim_slot(self._gen_lim_watts, pct)
 
+    def _update_load_lim_sync(self, params: dict[str, Any]) -> None:
+        """Apply CSIP-AUS opModLoadLimW, the maximum charge rate.
+
+        CSIP-AUS v1.1a Annex B defines it as "a constraint on the maximum
+        allowable charge rate, in Watts", which is model 702 WChaRteMax. That is
+        where opModMaxLimWAbsorb lands too. The two share the register through
+        ``_set_charge_limit``, the lower applying: the same principle the annex
+        states for a device limit read alongside opModMaxLimW, and the only
+        sound way to hold two caps on one register.
+
+        A device that does not declare charge-rate limiting declines the
+        control: model 704 has no charge-direction limit to fall back on, unlike
+        the generation side. Clearing hands the register to opModMaxLimWAbsorb
+        if it is still active, and otherwise sets it to WChaRteMaxRtg -- see
+        ``_set_charge_limit``.
+        """
+        enabled = params.get("load_lim_mode_enable", 0) == 1
+        watts = params.get("load_lim_w")
+
+        if enabled and watts is None:
+            logger.warning("opModLoadLimW enabled but carried no value; nothing to apply")
+            return
+
+        if not enabled:
+            self._set_charge_limit("load", None)
+            return
+
+        value = _require_watts(watts, "opModLoadLimW")
+        model_702 = self._get_model(702)
+        if not _rate_setting_is_supported(model_702, "abs", model_702.WChaRteMax):
+            self._control_unsupported(
+                "opModLoadLimW",
+                "this device declares no charge-rate limiting: model 702 WChaRteMax "
+                "is unimplemented or its WChaRteMaxRtg rating is zero",
+            )
+        self._set_charge_limit("load", value, model_702)
+
+    def _set_charge_limit(
+        self, slot: str, watts: float | None, model_702: Any | None = None
+    ) -> None:
+        """Record one charge-direction limit and write WChaRteMax to match.
+
+        WChaRteMax is a setting with no enable bit, so a limit cannot be switched
+        off, only replaced. While either limit is active the register holds the
+        lower of the two, which keeps either control from loosening the other.
+
+        With no limit active the register is set to WChaRteMaxRtg, the value
+        for no limit. A device with no charge limit in force runs to its
+        nameplate, bounded by its own protections; a CSIP control only narrows
+        that range. A DefaultDERControl that does not carry a charge limit is a
+        default with none, and IEEE 2030.5-2018 10.10.4.2, CSIP 4.4.2 and
+        CSIP-AUS 4.4 return the device to the default rather than leave an
+        ended event's value in force -- a 0 W limit would otherwise leave a
+        battery unable to charge.
+
+        The rating is written on every clear, also when nothing is recorded.
+        After a restart during an event the record is empty, and the event's
+        own clear is then what puts the register right. The cost is a write
+        each time the dispatcher clears its modes. A device that does not
+        declare charge-rate limiting is never written to.
+
+        The value written is held to WChaRteMaxRtg. A limit above what the
+        device can charge at is a valid request that simply does not bind, as
+        for the mirrored WMax, while a setting above the rating can be refused
+        by the device, or not fit the uint16 register at all. The record keeps
+        the watts each control asked for, so the two are compared as sent.
+
+        The limit is recorded only once the write goes through. A failed write
+        leaves the earlier value on the device, so the earlier record stands.
+        """
+        previous = self._charge_limits[slot]
+        self._charge_limits[slot] = watts
+        active = [w for w in self._charge_limits.values() if w is not None]
+        try:
+            if model_702 is None:
+                model_702 = self._get_model(702)
+            if not _rate_setting_is_supported(model_702, "abs", model_702.WChaRteMax):
+                return
+            rating = model_702.WChaRteMaxRtg.cvalue
+            target = min(min(active), rating) if active else rating
+            # Unreachable while the rating is a uint16 at W_SF, as the support
+            # test leaves it; kept so an unencodable value is still refused typed.
+            _require_uint16_watts(target, model_702.W_SF.value, "charge-rate limit")
+            model_702.WChaRteMax.cvalue = target
+            model_702.write()
+        except Exception:
+            self._charge_limits[slot] = previous
+            raise
+
     def _update_p_lim_w_sync(self, params: dict[str, Any], slot: str) -> None:
         """Apply opModMaxLimWInject (``"inj"``) / opModMaxLimWAbsorb (``"abs"``).
 
@@ -1151,9 +1251,11 @@ class SunSpecModbusConnector:
         a device need not implement either; ``_apply_p_lim_w_without_register``
         handles that case.
 
-        Clearing a control writes nothing to model 702. These are settings
-        registers with no enable bit, and the post-event state is governed by the
-        default DERControl rather than by restoring a captured baseline.
+        These are settings registers with no enable bit. Clearing the absorb
+        limit goes through ``_set_charge_limit``, which shares ``WChaRteMax``
+        with CSIP-AUS opModLoadLimW and sets it to WChaRteMaxRtg when the last
+        charge limit clears. Clearing the inject limit writes nothing to
+        ``WDisChaRteMax`` yet (#66).
         """
         if slot not in _P_LIM_W_CONTROLS:
             msg = f"_update_p_lim_w_sync expects 'inj' or 'abs', got {slot!r}"
@@ -1167,13 +1269,14 @@ class SunSpecModbusConnector:
             logger.warning("%s enabled but carried no value; nothing to apply", control)
 
         if not enabled or watts is None:
-            # The rate setting keeps its last written value -- see the
-            # docstring. What the connector put there on its own initiative it
-            # does take back: the mirrored WMax, and an inject cap the fallback
-            # route installed on 704 WMaxLimPct, which would otherwise outlive
-            # the event that imposed it.
-            self._p_lim_w_settings[slot] = None
+            # WDisChaRteMax keeps its last written value for now (#66); the
+            # absorb limit is cleared through _set_charge_limit below. What the
+            # connector put there on its own initiative it does take back: the
+            # mirrored WMax, and an inject cap the fallback route installed on
+            # 704 WMaxLimPct, which would otherwise outlive the event that
+            # imposed it.
             if slot == "inj":
+                self._p_lim_w_settings[slot] = None
                 self._restore_mirrored_wmax()
                 # Guarded: only the fallback route populates this slot. On the
                 # direct route model 704 belongs to opModMaxLimW alone, and
@@ -1185,6 +1288,7 @@ class SunSpecModbusConnector:
                 # Re-arm the not-applied warning so a future enable is surfaced
                 # once more rather than silently swallowed.
                 self._p_lim_abs_warned = False
+                self._set_charge_limit("abs", None)
             return
 
         # Validated before the route is chosen: the fallback divides this value
@@ -1198,14 +1302,16 @@ class SunSpecModbusConnector:
             self._apply_p_lim_w_without_register(slot, value, model_702)
             return
 
+        if slot == "abs":
+            self._set_charge_limit("abs", value, model_702)
+            return
+
         _require_uint16_watts(value, model_702.W_SF.value, control)
         point.cvalue = value
-        if slot == "inj":
-            self._mirror_inject_onto_wmax(model_702, value)
+        self._mirror_inject_onto_wmax(model_702, value)
         model_702.write()
         self._p_lim_w_settings[slot] = value
-        if slot == "inj":
-            self._refresh_gen_lim_pct()
+        self._refresh_gen_lim_pct()
 
     def _mirror_inject_onto_wmax(self, model_702: Any, watts: float) -> None:
         """Write an inject limit to WMax as well as WDisChaRteMax.
@@ -1250,10 +1356,9 @@ class SunSpecModbusConnector:
     def _restore_mirrored_wmax(self) -> None:
         """Put WMax back where the device had it before an inject limit lowered it.
 
-        The rate settings themselves stay where the event left them: an operator
-        limit outliving its event is the DefaultDERControl's problem, and those
-        registers are where the head-end's control actually landed. WMax is
-        different in kind. No head-end control writes it; the connector lowered
+        WDisChaRteMax itself still stays where the event left it (#66);
+        WChaRteMax returns to its rating through ``_set_charge_limit``. WMax is different in
+        kind. No head-end control writes it; the connector lowered
         it on its own initiative to cover devices that honour only WMax, so the
         connector owes the restore -- the same reasoning that has the fallback
         route drive WMaxLimPctEna low on teardown rather than leave a lever it
@@ -1365,7 +1470,8 @@ class SunSpecModbusConnector:
         surfacing the gap rather than swallowing it.
         """
         # Nothing reaches model 702 on either branch below.
-        self._p_lim_w_settings[slot] = None
+        if slot == "inj":
+            self._p_lim_w_settings[slot] = None
 
         if slot == "abs":
             if not self._p_lim_abs_warned:
@@ -1690,6 +1796,11 @@ class SunSpecModbusConnector:
     async def update_gen_lim(self, params: dict[str, Any]) -> ConnectorPayload:
         async with self._get_lock():
             await asyncio.to_thread(self._update_gen_lim_sync, params)
+        return None
+
+    async def update_load_lim(self, params: dict[str, Any]) -> ConnectorPayload:
+        async with self._get_lock():
+            await asyncio.to_thread(self._update_load_lim_sync, params)
         return None
 
     async def update_pf(self, params: dict[str, Any]) -> ConnectorPayload:

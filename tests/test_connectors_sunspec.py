@@ -17,8 +17,13 @@ from py20305.connectors.base import (
     ConnectorWriteError,
 )
 from py20305.connectors.control_errors import ModeNotSupportedError
-from py20305.connectors.modes import translate_const_q, translate_fixed_w, translate_gen_lim
-from py20305.models.csipaus import OpModGenLimW
+from py20305.connectors.modes import (
+    translate_const_q,
+    translate_fixed_w,
+    translate_gen_lim,
+    translate_load_lim,
+)
+from py20305.models.csipaus import OpModGenLimW, OpModLoadLimW
 from py20305.models.sep.sep import (
     DercontrolBase,
     DerunitRefType,
@@ -386,20 +391,43 @@ class TestSunSpecFetch:
         assert isinstance(result["CtrlModes"], int)
 
     @pytest.mark.asyncio
-    async def test_fetch_nameplate_doe_modes_generation_only(self, sunspec_connector):
-        """doeModesSupported names opModGenLimW alone (bit 2, 0x04): it is the
-        only CSIP-AUS limit this connector enforces. The export and import
+    async def test_fetch_nameplate_doe_modes_generation_and_load(self, sunspec_connector):
+        """A device with 704 WMaxLimPct and declared charge-rate limiting (the
+        fixture: WChaRteMax and WChaRteMaxRtg implemented) advertises
+        opModGenLimW (bit 2) and opModLoadLimW (bit 3). The export and import
         limits apply at the connection point, which an inverter cannot measure.
         Only sent in CSIP-AUS mode (the DERCapability builder gates the element)."""
         result = await sunspec_connector.fetch_nameplate()
-        assert result["DoeModesSupported"] == 0x04
+        assert result["DoeModesSupported"] == 0x0C
 
     @pytest.mark.asyncio
-    async def test_doe_modes_are_empty_without_wmaxlimpct(self, sunspec_connector):
+    async def test_doe_modes_are_generation_only_without_charge_rate_limiting(
+        self, sunspec_connector
+    ):
+        """A PV inverter declares no charge rate (WChaRteMaxRtg 0), so it would
+        decline opModLoadLimW and must not advertise it."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WChaRteMaxRtg = MagicMock(value=0, cvalue=0)
+        nameplate = await sunspec_connector.fetch_nameplate()
+        configuration = await sunspec_connector.fetch_configuration()
+        assert nameplate["DoeModesSupported"] == 0x04
+        assert configuration["DoeModesEnabled"] == 0x04
+
+    @pytest.mark.asyncio
+    async def test_doe_modes_are_load_only_without_wmaxlimpct(self, sunspec_connector):
         """opModGenLimW lands on 704 WMaxLimPct. A device without that point
         would decline the limit, so it must not advertise it either."""
         model_704 = sunspec_connector._target.models[704][0]
         model_704.WMaxLimPct = MagicMock(value=None, cvalue=None)
+        nameplate = await sunspec_connector.fetch_nameplate()
+        assert nameplate["DoeModesSupported"] == 0x08
+
+    @pytest.mark.asyncio
+    async def test_doe_modes_are_empty_without_either_register(self, sunspec_connector):
+        model_704 = sunspec_connector._target.models[704][0]
+        model_704.WMaxLimPct = MagicMock(value=None, cvalue=None)
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WChaRteMax = MagicMock(value=None, cvalue=None)
         nameplate = await sunspec_connector.fetch_nameplate()
         configuration = await sunspec_connector.fetch_configuration()
         assert nameplate["DoeModesSupported"] == 0
@@ -447,11 +475,10 @@ class TestSunSpecFetch:
         assert "WMax" in result
 
     @pytest.mark.asyncio
-    async def test_fetch_configuration_doe_modes_generation_only(self, sunspec_connector):
-        """doeModesEnabled stays consistent with supported -- generation only
-        (0x04)."""
+    async def test_fetch_configuration_doe_modes_generation_and_load(self, sunspec_connector):
+        """doeModesEnabled stays consistent with supported (0x0C here)."""
         result = await sunspec_connector.fetch_configuration()
-        assert result["DoeModesEnabled"] == 0x04
+        assert result["DoeModesEnabled"] == 0x0C
 
     @pytest.mark.asyncio
     async def test_fetch_configuration_returns_value_multiplier_dicts(self, sunspec_connector):
@@ -1171,12 +1198,13 @@ class TestSunSpecPLimWattsRegisters:
         assert model_702.WDisChaRteMax.cvalue == 4000
 
     @pytest.mark.asyncio
-    async def test_clearing_leaves_the_setting_in_place(self, sunspec_connector):
-        """The rate settings have no enable bit, and on teardown they keep the
-        value the event gave them: the post-event state is governed by the
-        default DERControl, not by restoring a captured baseline. Only the
-        mirrored WMax -- which the connector lowered on its own initiative --
-        is put back."""
+    async def test_clearing_restores_the_charge_rate_and_leaves_the_discharge_rate(
+        self, sunspec_connector
+    ):
+        """The rate settings have no enable bit. WChaRteMax goes to its rating
+        when the last charge limit clears; WDisChaRteMax still keeps the event's
+        value (#66). The mirrored WMax -- which the connector lowered on its own
+        initiative -- is put back."""
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
         await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
         model_702 = sunspec_connector._target.models[702][0]
@@ -1189,8 +1217,8 @@ class TestSunSpecPLimWattsRegisters:
         await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 0})
 
         assert model_702.WDisChaRteMax.cvalue == 4000
-        assert model_702.WChaRteMax.cvalue == 2500
-        assert model_702.WMax.cvalue == 5000  # the mirror, and only the mirror
+        assert model_702.WChaRteMax.cvalue == 5000  # the rating
+        assert model_702.WMax.cvalue == 5000  # the mirror
         # Nor may the teardown reach into model 704: on the direct route that
         # register belongs to opModMaxLimW alone.
         model_704.write.assert_not_called()
@@ -1682,6 +1710,258 @@ class TestSunSpecGenLim:
         with pytest.raises(ConnectorValueError):
             await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": -100})
         model_704.write.assert_not_called()
+
+
+class TestSunSpecLoadLim:
+    """CSIP-AUS opModLoadLimW is the maximum charge rate in watts, model 702
+    WChaRteMax. opModMaxLimWAbsorb lands there too; the lower of the two active
+    limits is written. Clearing one hands the register to the other while it is
+    active, and any clear with none active writes the rating. The fixture's
+    WChaRteMax and WChaRteMaxRtg are 5000 W."""
+
+    @staticmethod
+    def _model_702(sunspec_connector):
+        return sunspec_connector._target.models[702][0]
+
+    @pytest.mark.asyncio
+    async def test_load_lim_writes_the_charge_rate_in_watts(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 2000})
+        assert model_702.WChaRteMax.cvalue == 2000
+        model_702.write.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_a_translated_control_reaches_the_register(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        elem = OpModLoadLimW(value=3, multiplier=PowerOfTenMultiplierType(value=3))
+        translated = translate_load_lim(DercontrolBase(other_element=[elem]), [])
+        assert translated is not None
+        method, params = translated
+        await getattr(sunspec_connector, method)(params)
+        assert model_702.WChaRteMax.cvalue == 3000
+
+    @pytest.mark.asyncio
+    async def test_the_lower_of_load_lim_and_absorb_lim_is_written(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 2000})
+        assert model_702.WChaRteMax.cvalue == 2000
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 4000})
+        assert model_702.WChaRteMax.cvalue == 3000
+
+    @pytest.mark.asyncio
+    async def test_an_absorb_lim_cannot_loosen_an_active_load_lim(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 1500})
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 4500})
+        assert model_702.WChaRteMax.cvalue == 1500
+
+    @pytest.mark.asyncio
+    async def test_clearing_load_lim_writes_an_active_absorb_lim(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 1000})
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+        assert model_702.WChaRteMax.cvalue == 3000
+
+    @pytest.mark.asyncio
+    async def test_clearing_absorb_lim_writes_an_active_load_lim(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 2500})
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 1000})
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 0})
+        assert model_702.WChaRteMax.cvalue == 2500
+
+    @pytest.mark.asyncio
+    async def test_clearing_the_last_charge_limit_writes_the_rating(self, sunspec_connector):
+        """A default without a charge limit is a default with none, so the
+        ended event's value must not stay in force. The register goes to the
+        rating, the value for no limit, whatever it held before the event."""
+        model_702 = self._model_702(sunspec_connector)
+        model_702.WChaRteMax.cvalue = 3000
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 0})
+        assert model_702.WChaRteMax.cvalue == 0
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_clearing_the_absorb_limit_alone_writes_the_rating(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 1000})
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 0})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_the_rating_follows_only_the_last_clear(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 2000})
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 1000})
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+        assert model_702.WChaRteMax.cvalue == 1000
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 0})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_a_failed_clear_is_retried_by_the_next_clear(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 2000})
+        model_702.write.side_effect = OSError("link dropped")
+        with pytest.raises(OSError):
+            await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+
+        written: list[float] = []
+        model_702.write.side_effect = lambda: written.append(model_702.WChaRteMax.cvalue)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+        assert written == [5000]
+
+    @pytest.mark.asyncio
+    async def test_a_restart_during_an_event_does_not_strand_the_battery(
+        self, sunspec_connector
+    ):
+        """A restart empties the record while a 0 W limit is on the device. The
+        event's clear finds nothing recorded and must still put the register
+        back, and a later event must not end at 0 W either."""
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 0})
+        assert model_702.WChaRteMax.cvalue == 0
+
+        sunspec_connector._charge_limits = {"abs": None, "load": None}  # the restart
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 2000})
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_clearing_an_unset_load_lim_writes_the_rating(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        model_702.WChaRteMax.cvalue = 0
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_a_clear_writes_nothing_without_charge_rate_limiting(self, sunspec_connector):
+        """A PV inverter answers the dispatcher's clears without a write: it
+        declares no charge rate, so there is no register to set."""
+        model_702 = self._model_702(sunspec_connector)
+        model_702.WChaRteMaxRtg = MagicMock(value=0, cvalue=0)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 0})
+        model_702.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_enabled_load_lim_without_a_value_keeps_the_active_limit(
+        self, sunspec_connector
+    ):
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 1000})
+        model_702.write.reset_mock()
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1})
+        model_702.write.assert_not_called()
+        assert model_702.WChaRteMax.cvalue == 1000
+
+    @pytest.mark.asyncio
+    async def test_a_failed_update_keeps_the_limit_still_on_the_device(self, sunspec_connector):
+        """1000 W did not reach the device, so 2000 W is what holds there, and
+        it is what a later absorb limit is compared with."""
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 2000})
+        model_702.write.side_effect = OSError("link dropped")
+        with pytest.raises(OSError):
+            await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 1000})
+
+        written: list[float] = []
+        model_702.write.side_effect = lambda: written.append(model_702.WChaRteMax.cvalue)
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+        assert written == [2000]
+
+    @pytest.mark.asyncio
+    async def test_a_load_lim_above_the_rating_is_written_as_the_rating(self, sunspec_connector):
+        """A limit above what the device can charge at does not bind; it is not
+        an error. 10 kW against the fixture's 5 kW rating at W_SF=-1 would
+        encode to 100000, outside the register, so writing it as asked fails a
+        control the device already satisfies (the LOA-02 precondition sends
+        10 kW)."""
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 10000})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_an_absorb_lim_above_the_rating_is_written_as_the_rating(
+        self, sunspec_connector
+    ):
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 10000})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_a_clamped_limit_loses_to_a_lower_one_and_returns_to_the_rating(
+        self, sunspec_connector
+    ):
+        """A 10 kW load limit held to the 5 kW rating loses to a 4 kW absorb
+        limit, and once the absorb limit clears the register returns to the
+        rating."""
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 10000})
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        assert model_702.WChaRteMax.cvalue == 4000
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 0})
+        assert model_702.WChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_a_failed_clear_keeps_the_limit_and_can_be_retried(self, sunspec_connector):
+        """The device still holds 1000 W after a clear whose write failed, so the
+        record does too, and the retried clear hands the register to the absorb
+        limit."""
+        model_702 = self._model_702(sunspec_connector)
+        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 1000})
+        model_702.write.side_effect = OSError("link dropped")
+        with pytest.raises(OSError):
+            await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+
+        written: list[float] = []
+        model_702.write.side_effect = lambda: written.append(model_702.WChaRteMax.cvalue)
+        await sunspec_connector.update_load_lim({"load_lim_mode_enable": 0})
+        assert written == [3000]
+
+    def test_an_unencodable_charge_limit_is_refused_typed(self, sunspec_connector):
+        """A value held to the rating fits the register when the rating does. A
+        rating that does not fit at W_SF -1 still gets a typed refusal, and the
+        record is not changed."""
+        model_702 = self._model_702(sunspec_connector)
+        model_702.WChaRteMaxRtg = MagicMock(value=1, cvalue=100000)
+        with pytest.raises(ConnectorValueError):
+            sunspec_connector._set_charge_limit("load", 10000, model_702)
+        assert sunspec_connector._charge_limits["load"] is None
+        model_702.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_load_lim_is_declined_without_wcharte_max(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        model_702.WChaRteMax = MagicMock(value=None, cvalue=None)
+        with pytest.raises(ModeNotSupportedError, match="opModLoadLimW"):
+            await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 2000})
+        model_702.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_load_lim_is_declined_without_a_charge_rate_rating(self, sunspec_connector):
+        """A device mapping WChaRteMax without supporting it reads the register
+        as a number; the zero rating is what says it cannot limit charge."""
+        model_702 = self._model_702(sunspec_connector)
+        model_702.WChaRteMaxRtg = MagicMock(value=0, cvalue=0)
+        with pytest.raises(ModeNotSupportedError, match="opModLoadLimW"):
+            await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 2000})
+        model_702.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_negative_load_lim_is_refused(self, sunspec_connector):
+        model_702 = self._model_702(sunspec_connector)
+        with pytest.raises(ConnectorValueError):
+            await sunspec_connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": -100})
+        model_702.write.assert_not_called()
 
 
 class TestSunSpecScanReadiness:
