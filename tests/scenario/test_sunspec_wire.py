@@ -231,17 +231,17 @@ async def test_load_and_absorb_limits_share_the_charge_rate_on_the_wire(modbus):
     assert modbus.server.registers[addr] == 2500
 
 
-async def test_clearing_the_last_charge_limit_restores_the_register(modbus):
+async def test_clearing_the_last_charge_limit_writes_the_rating(modbus):
     """A 0 W load limit must not outlive its event: once it clears, the
-    register holds what the device had before it."""
+    register holds the rating, the value for no limit."""
     connector = await _resolve(modbus.registry())
     addr = point_address(modbus.image, 702, "WChaRteMax")
-    before = modbus.server.registers[addr]
+    rating = modbus.server.registers[point_address(modbus.image, 702, "WChaRteMaxRtg")]
 
     await connector.update_load_lim({"load_lim_mode_enable": 1, "load_lim_w": 0})
     assert modbus.server.registers[addr] == 0
     await connector.update_load_lim({"load_lim_mode_enable": 0})
-    assert modbus.server.registers[addr] == before
+    assert modbus.server.registers[addr] == rating
 
 
 async def test_load_limit_encodes_against_the_scale_factor():
