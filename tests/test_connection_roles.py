@@ -124,13 +124,13 @@ class TestProducerName:
         assert product["vendor_name"] == "DER Security"
 
     def test_a_host_application_names_itself_as_the_producer(self):
-        emitter, sink = make(coalesce=False, product_name="DERSync", vendor_name="Acme")
+        emitter, sink = make(coalesce=False, product_name="Example Gateway", vendor_name="Example Vendor")
         emitter.record_success(now_ms=1_000)
         southbound_success(emitter, DEVICE_A, 2_000)
         for payload in sink.payloads:
             assert payload["metadata"]["product"] == {
-                "name": "DERSync",
-                "vendor_name": "Acme",
+                "name": "Example Gateway",
+                "vendor_name": "Example Vendor",
                 "version": "9.9",
             }
 
