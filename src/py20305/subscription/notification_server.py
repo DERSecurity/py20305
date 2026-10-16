@@ -16,12 +16,15 @@ from aiohttp import web
 from lxml import etree
 
 from py20305.client.tls import build_cipher_string
+from py20305.forwarders.connection_telemetry import SERVICE_IEEE2030_5, ConnectionRole
+from py20305.forwarders.ocsf import ConnectionDirectionId, Endpoint, NetworkActivityId
 from py20305.models.sep.sep import Notification
 from py20305.xml.serialization import from_xml
 
 if TYPE_CHECKING:
     from py20305.client.tls import TlsConfig
     from py20305.client.traffic_recorder import TrafficRecorder
+    from py20305.forwarders.connection_telemetry import LinkObserver
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,9 @@ class NotificationServer:
         # Set while an operator-triggered comms-loss simulation is running:
         # notifications are still accepted on the wire but are not acted on.
         self._suspended = False
+        #: Receives one connection event per notification request, with the
+        #: ``server`` role. ``None`` reports nothing.
+        self.connection_observer: LinkObserver | None = None
 
     @property
     def on_notification(self) -> NotificationCallback | None:
@@ -245,6 +251,48 @@ class NotificationServer:
             ctx.verify_mode = ssl.CERT_OPTIONAL
         return ctx
 
+    def _report_request(self, request: web.Request, *, rejected: str | None = None) -> None:
+        """Report one inbound notification request to the connection observer.
+
+        Reported per request: aiohttp accepts the connection before any
+        application code runs, so a request is the first point this listener
+        can observe. A TLS handshake that fails never reaches it.
+        """
+        observer = self.connection_observer
+        if observer is None:
+            return
+        try:
+            transport = request.transport
+            peer = transport.get_extra_info("peername") if transport else None
+            local = transport.get_extra_info("sockname") if transport else None
+            src = Endpoint(ip=str(peer[0]), port=int(peer[1])) if peer else None
+            dst = (
+                Endpoint(ip=str(local[0]), port=int(local[1]))
+                if local
+                else Endpoint(ip=self._host, port=self._port)
+            )
+            if rejected is None:
+                observer.record_connection(
+                    role=ConnectionRole.SERVER,
+                    service=SERVICE_IEEE2030_5,
+                    direction=ConnectionDirectionId.INBOUND,
+                    src=src,
+                    dst=dst,
+                )
+            else:
+                observer.record_connection_failure(
+                    role=ConnectionRole.SERVER,
+                    service=SERVICE_IEEE2030_5,
+                    direction=ConnectionDirectionId.INBOUND,
+                    reason=rejected,
+                    activity_id=NetworkActivityId.OPEN,
+                    status_code="401",
+                    src=src,
+                    dst=dst,
+                )
+        except Exception:
+            logger.debug("Could not report the notification connection", exc_info=True)
+
     async def _handle_notify(self, request: web.Request) -> web.Response:
         """Handle POST /notify from the IEEE 2030.5 server."""
         # Client-cert mode check (warn/enforce). With CERT_OPTIONAL the
@@ -269,6 +317,7 @@ class NotificationServer:
                         dedup_key=f"notif_mtls_reject:{remote}",
                         details={"remote": remote},
                     )
+                    self._report_request(request, rejected="No client certificate presented")
                     return web.Response(status=401, text="client certificate required")
                 # warn mode: log and accept
                 report(
@@ -284,6 +333,7 @@ class NotificationServer:
                     details={"remote": remote},
                 )
 
+        self._report_request(request)
         try:
             body = await request.read()
         except Exception:

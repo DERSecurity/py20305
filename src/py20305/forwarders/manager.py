@@ -18,6 +18,7 @@ from py20305.forwarders.base import (
 
 if TYPE_CHECKING:
     from py20305.forwarders.config import ForwarderConfig
+    from py20305.forwarders.connection_telemetry import LinkObserver
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,35 @@ class ForwarderManager:
         #: Events a forwarder did not take -- its start failed, or queueing
         #: raised -- by forwarder.
         self._events_dropped_by_failed: dict[str, int] = {}
+        self._connection_observer: LinkObserver | None = None
+
+    @property
+    def can_deliver_events(self) -> bool:
+        """Return whether an event queued now would reach at least one forwarder.
+
+        A forwarder counts when it started and, if it reports live readiness
+        through ``can_deliver``, is ready now. A forwarder that does not report
+        it counts as ready once started.
+        """
+        return self._running and any(
+            f not in self._failed and getattr(f, "can_deliver", True) for f in self._forwarders
+        )
+
+    @property
+    def connection_observer(self) -> LinkObserver | None:
+        """Where forwarders report their own broker connection outcomes."""
+        return self._connection_observer
+
+    @connection_observer.setter
+    def connection_observer(self, value: LinkObserver | None) -> None:
+        """Set the connection observer and propagate it to forwarders that support it.
+
+        Set it before :meth:`start` so the first broker connection is reported.
+        """
+        self._connection_observer = value
+        for forwarder in self._forwarders:
+            if hasattr(forwarder, "connection_observer"):
+                forwarder.connection_observer = value
 
     @property
     def running(self) -> bool:
@@ -125,6 +155,8 @@ class ForwarderManager:
             forwarder.forwarder_id = self._forwarder_id
         if self._source_host and hasattr(forwarder, "source_host"):
             forwarder.source_host = self._source_host
+        if self._connection_observer is not None and hasattr(forwarder, "connection_observer"):
+            forwarder.connection_observer = self._connection_observer
 
         logger.info("Registered forwarder: %s", forwarder.name)
 

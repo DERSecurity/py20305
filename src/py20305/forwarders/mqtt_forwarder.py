@@ -23,9 +23,16 @@ from py20305.forwarders.base import (
     TelemetryFrame,
 )
 from py20305.forwarders.config import PROTOCOL_MESSAGE_TOPIC_SUFFIX, TELEMETRY_TOPIC_SUFFIX
+from py20305.forwarders.connection_telemetry import (
+    SERVICE_MQTT,
+    ConnectionRole,
+    endpoint_for_host,
+)
+from py20305.forwarders.ocsf import Endpoint
 
 if TYPE_CHECKING:
     from py20305.forwarders.config import MQTTForwarderConfig
+    from py20305.forwarders.connection_telemetry import LinkObserver
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +109,9 @@ class MQTTForwarder(AbstractForwarder):
         # so an arrival publishes immediately rather than on the next poll.
         self._wakeup = asyncio.Event()
         self._connected = False
+        #: Receives this forwarder's broker connection outcomes, with the
+        #: ``telemetry`` role. ``None`` reports nothing.
+        self.connection_observer: LinkObserver | None = None
 
         # Generate unique client ID
         self._client_id = f"{config.client_id_prefix}-{uuid.uuid4().hex[:8]}"
@@ -195,6 +205,7 @@ class MQTTForwarder(AbstractForwarder):
             await self._client.__aenter__()
             self._connected = True
             self._running = True
+            self._report_broker_connected()
 
             # Start publish loop
             self._publish_task = asyncio.create_task(
@@ -226,7 +237,57 @@ class MQTTForwarder(AbstractForwarder):
                 details={"endpoint": endpoint, "port": port, "error": str(e)},
             )
             self._connected = False
+            self._report_broker_failure(e)
             raise
+
+    def _broker_endpoints(self) -> tuple[Endpoint | None, Endpoint | None]:
+        """Return the broker connection's local and remote endpoints.
+
+        Read from the live socket when it is reachable, so the record carries
+        the local port. The remote endpoint keeps the configured host name
+        beside the address it resolved to. Falls back to the configured broker
+        when the socket cannot be read.
+        """
+        configured = endpoint_for_host(self._config.endpoint, self._config.port)
+        try:
+            sock = self._client._client.socket()
+            local = sock.getsockname()
+            remote = sock.getpeername()
+        except Exception:
+            return None, configured
+        hostname = configured.hostname if configured is not None else None
+        return (
+            Endpoint(ip=local[0], port=local[1]),
+            Endpoint(ip=remote[0], hostname=hostname, port=remote[1]),
+        )
+
+    def _report_broker_connected(self) -> None:
+        """Report a successful broker connection to the connection observer."""
+        observer = self.connection_observer
+        if observer is None:
+            return
+        try:
+            src, dst = self._broker_endpoints()
+            observer.record_connection(
+                role=ConnectionRole.TELEMETRY, service=SERVICE_MQTT, src=src, dst=dst
+            )
+        except Exception:
+            logger.debug("Could not report the broker connection", exc_info=True)
+
+    def _report_broker_failure(self, exc: BaseException) -> None:
+        """Report a failed broker connection, with its reason, to the connection observer."""
+        observer = self.connection_observer
+        if observer is None:
+            return
+        try:
+            observer.record_connection_failure(
+                role=ConnectionRole.TELEMETRY,
+                service=SERVICE_MQTT,
+                reason=exc,
+                dst=endpoint_for_host(self._config.endpoint, self._config.port),
+            )
+        except Exception:
+            logger.debug("Could not report the broker connection failure", exc_info=True)
 
     async def stop(self) -> None:
         """Stop the forwarder gracefully.
@@ -509,6 +570,10 @@ class MQTTForwarder(AbstractForwarder):
                     qos=1,
                 )
                 self._record_success()
+                # A publish error that looked like a lost connection cleared
+                # this flag; a publish that succeeds shows the connection works
+                # again. Readiness for connection events depends on it.
+                self._connected = True
                 logger.debug("Published message to %s", topic)
             else:
                 logger.warning("MQTT client not connected")

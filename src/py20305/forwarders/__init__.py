@@ -26,7 +26,11 @@ from py20305.forwarders.config import (
     ForwarderConfig,
     MQTTForwarderConfig,
 )
-from py20305.forwarders.connection_telemetry import ConnectionTelemetryEmitter
+from py20305.forwarders.connection_telemetry import (
+    ConnectionRole,
+    ConnectionTelemetryEmitter,
+    LinkObserver,
+)
 from py20305.forwarders.lfdi_extraction import extract_client_id, extract_lfdi
 from py20305.forwarders.manager import ForwarderManager
 from py20305.forwarders.mqtt_adapter import MQTTForwarderAdapter
@@ -44,12 +48,14 @@ __all__ = [
     "PROTOCOL_MESSAGE_TOPIC_SUFFIX",
     "AbstractForwarder",
     "BaseForwarder",
+    "ConnectionRole",
     "ConnectionTelemetryConfig",
     "ConnectionTelemetryEmitter",
     "DeviceTelemetryConfig",
     "EventFrame",
     "ForwarderConfig",
     "ForwarderManager",
+    "LinkObserver",
     "MQTTForwarder",
     "MQTTForwarderAdapter",
     "MQTTForwarderConfig",

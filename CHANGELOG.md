@@ -9,6 +9,44 @@ below says so explicitly.
 
 Nothing yet.
 
+## [0.13.0] - 2026-10-16
+
+### Added
+
+- **The SunSpec connector enforces the CSIP-AUS load limit, opModLoadLimW, on
+  storage devices (#65).** It was accepted and silently ignored. The limit is the
+  maximum charge rate, written in watts to model 702 `WChaRteMax`; when
+  `opModMaxLimWAbsorb` is active too, the lower of the two is written. A limit
+  above `WChaRteMaxRtg` is written as the rating, for the absorb limit as well,
+  instead of being refused. A device that does not declare charge-rate limiting
+  reports the control as not supported (251).
+
+- **Connection events now say which link they describe, who produced them, and can be logged one per attempt (#67).** Every connection event carries one role label in `metadata.labels` -- `role:northbound`, `role:southbound`, `role:management`, `role:server` or `role:telemetry` -- alongside the direction already in `connection_info.direction_id`, so a consumer can separate the IEEE 2030.5 link from device, console, listener and broker connections without guessing from ports.
+
+  `ConnectionTelemetryEmitter` takes `product_name` and `vendor_name`, so an application embedding the library is named as the producer in `metadata.product` instead of `py20305`; the default is unchanged. Its new `record_connection` and `record_connection_failure` methods report any other link through the same topic, coalescing successes per link (role, direction, service and destination, plus the source address for inbound connections) and never coalescing failures.
+
+  `forwarders.connection_telemetry.coalesce_successes` (default `true`) can be set to `false` where every connection attempt must be logged as its own record. The runner now also reports the forwarder's own broker connection (`role:telemetry`) and each request to the notification listener (`role:server`). `tests/fixtures/connection_events.json` holds one emitted event per role for testing a consumer's parser.
+
+### Changed
+
+- **`doeModesSupported` and `doeModesEnabled` include the load limit (bit 3) on a
+  SunSpec device that declares charge-rate limiting (#65).** A storage inverter
+  with `WMaxLimPct` reports `0C`; a PV inverter still reports `04`.
+
+- **Breaking: a coalescing `Window` carries `src` and `dst` endpoints instead of `socket` (#67).** `CoalescingWindow.record(now_ms, src, dst)` takes the two `Endpoint`s in place of a `SocketPair`, because a window now describes any link, not only the IEEE 2030.5 client's socket. Code that builds `Window` or calls `CoalescingWindow.record` directly passes `src=`/`dst=`; the emitter's own entry points are unchanged.
+
+- **Connection events produced while the broker is unreachable are held and sent when it recovers, instead of being dropped (#67).** This is what lets a failed broker connection be reported at all: its record is delivered once the connection succeeds, with the time it actually failed. The hold keeps up to 1,000 events and drops the oldest beyond that. Held events go out with the next event, or when the host calls `ConnectionTelemetryEmitter.flush_expired()` or `release_held()`.
+
+### Fixed
+
+- **A cleared charge-rate limit no longer stays on a SunSpec device (#65).** When
+  no charge limit (`opModLoadLimW` or `opModMaxLimWAbsorb`) remains, the connector
+  writes `WChaRteMaxRtg` to `WChaRteMax`, as IEEE 2030.5-2018 10.10.4.2, CSIP
+  4.4.2 and CSIP-AUS 4.4 require of a mode the DefaultDERControl does not carry.
+  It does so on every clear, so a clear after a connector restart still releases
+  the battery. Before, the absorb limit left its value in force after the event.
+  The discharge-rate setting `opModMaxLimWInject` writes is not released yet (#66).
+
 ## [0.12.0] - 2026-10-12
 
 ### Added

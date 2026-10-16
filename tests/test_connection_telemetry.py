@@ -79,6 +79,8 @@ def make_emitter(
 SOCKET = SocketPair(
     local=Address(ip="10.0.0.2", port=52511), remote=Address(ip="10.0.0.9", port=8443)
 )
+CLIENT = Endpoint(ip="10.0.0.2", port=52511)
+SERVER = Endpoint(ip="10.0.0.9", port=8443)
 
 
 # -- Classification -----------------------------------------------------------
@@ -243,20 +245,21 @@ class TestCoalescingWindow:
         assert flushed.count == 2
         assert window.flush() is None
 
-    def test_the_window_keeps_the_socket_it_opened_with(self):
-        """The close-time socket belongs to a different request's connection."""
-        opener = SOCKET
-        closer = SocketPair(local=Address(ip="10.0.0.2", port=59999), remote=None)
+    def test_the_window_keeps_the_endpoints_it_opened_with(self):
+        """The close-time endpoints belong to a different request's connection."""
+        opener = Endpoint(ip="10.0.0.2", port=52511)
+        closer = Endpoint(ip="10.0.0.2", port=59999)
         window = CoalescingWindow(60)
-        window.record(1_000, opener)
-        closed = window.record(61_500, closer)
-        assert closed.socket is opener
+        window.record(1_000, opener, SERVER)
+        closed = window.record(61_500, closer, SERVER)
+        assert closed.src is opener
 
-    def test_a_window_opened_blind_adopts_the_first_socket_inside_it(self):
+    def test_a_window_opened_without_a_source_adopts_the_first_one_inside_it(self):
         window = CoalescingWindow(60)
-        window.record(1_000, None)
-        window.record(2_000, SOCKET)
-        assert window.flush().socket is SOCKET
+        window.record(1_000, None, None)
+        window.record(2_000, CLIENT, SERVER)
+        flushed = window.flush()
+        assert (flushed.src, flushed.dst) == (CLIENT, SERVER)
 
     def test_a_negative_window_is_rejected(self):
         with pytest.raises(ValueError):

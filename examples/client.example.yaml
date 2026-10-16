@@ -191,3 +191,6 @@ connection:
 #     # Successes are collapsed into one record per window; failures never
 #     # are. Zero emits one record per success.
 #     coalesce_window_seconds: 60
+#     # Set false where every connection attempt must be logged as its own
+#     # record.
+#     coalesce_successes: true
