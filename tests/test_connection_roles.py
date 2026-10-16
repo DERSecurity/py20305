@@ -315,6 +315,19 @@ class TestLinkFailures:
         assert "Pwxxxx" not in detail
         assert len(detail) <= ct.MAX_STATUS_DETAIL_CHARS
 
+    def test_a_peer_status_code_is_bounded_to_printable_text(self):
+        emitter, sink = make()
+        emitter.record_connection_failure(
+            role=ConnectionRole.NORTHBOUND,
+            service="ieee2030.5",
+            reason="server error",
+            status_code="5" * 100 + "\n\x00",
+            dst=Endpoint(ip="192.0.2.20", port=8443),
+        )
+        code = sink.payloads[0]["status_code"]
+        assert len(code) <= ct.MAX_STATUS_CODE_CHARS
+        assert code.isprintable()
+
     def test_an_exchange_failure_keeps_activity_open(self):
         emitter, sink = make()
         emitter.record_connection_failure(
@@ -455,6 +468,39 @@ class TestForwarderManagerSupport:
         forwarder._connected = False
         assert adapter.can_deliver is False
 
+    async def test_a_real_mqtt_adapter_is_ready_again_after_a_publish_succeeds(self):
+        from py20305.forwarders import MQTTForwarder, MQTTForwarderAdapter, MQTTForwarderConfig
+
+        class FlakyClient:
+            def __init__(self) -> None:
+                self.fail_next = True
+
+            async def publish(self, topic: str, payload: bytes, qos: int = 0) -> None:
+                if self.fail_next:
+                    self.fail_next = False
+                    raise ConnectionError("connection lost")
+
+        forwarder = MQTTForwarder(MQTTForwarderConfig(endpoint="broker.example.com"))
+        adapter = MQTTForwarderAdapter(forwarder)
+        manager = ForwarderManager()
+        manager.add_forwarder(adapter)
+        # Started state without a broker: what start() leaves behind on success.
+        manager._running = True
+        adapter._running = True
+        forwarder._connected = True
+        forwarder._client = FlakyClient()
+        frame = EventFrame(
+            payload={"n": 1}, topic_suffix="out/connection-events", kind="connection-event"
+        )
+
+        await forwarder._publish_item(frame, "out/messages", "out/telemetry")
+        assert adapter.can_deliver is False
+        assert manager.can_deliver_events is False
+
+        await forwarder._publish_item(frame, "out/messages", "out/telemetry")
+        assert adapter.can_deliver is True
+        assert manager.can_deliver_events is True
+
     def test_the_observer_reaches_forwarders_added_before_and_after(self):
         manager = ForwarderManager()
         before, after = self.Forwarder(), self.Forwarder()
@@ -477,3 +523,28 @@ class TestGoldenFixture:
         examples = json.loads(FIXTURE.read_text(encoding="utf-8"))
         roles = {label for e in examples.values() for label in e["metadata"]["labels"]}
         assert roles == {role_label(r) for r in ConnectionRole}
+
+
+class TestRunnerSweep:
+    async def test_the_runner_sweeps_expired_windows_until_stopped(self, monkeypatch):
+        import asyncio
+
+        from py20305 import cli
+
+        monkeypatch.setattr(cli, "CONNECTION_WINDOW_SWEEP_SECONDS", 0.01)
+
+        class Emitter:
+            def __init__(self) -> None:
+                self.sweeps = 0
+
+            def flush_expired(self) -> None:
+                self.sweeps += 1
+
+        emitter = Emitter()
+        stop = asyncio.Event()
+        task = asyncio.create_task(cli._sweep_connection_events(emitter, stop))
+        while emitter.sweeps < 2:
+            await asyncio.sleep(0.01)
+        stop.set()
+        await asyncio.wait_for(task, timeout=1)
+        assert emitter.sweeps >= 2

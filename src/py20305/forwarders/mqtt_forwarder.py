@@ -570,6 +570,10 @@ class MQTTForwarder(AbstractForwarder):
                     qos=1,
                 )
                 self._record_success()
+                # A publish error that looked like a lost connection cleared
+                # this flag; a publish that succeeds shows the connection works
+                # again. Readiness for connection events depends on it.
+                self._connected = True
                 logger.debug("Published message to %s", topic)
             else:
                 logger.warning("MQTT client not connected")

@@ -158,6 +158,11 @@ _request_socket: ContextVar[SocketPair | None] = ContextVar("_request_socket", d
 # identify the failure, not enough to ship a response body through it.
 MAX_STATUS_DETAIL_CHARS = 512
 
+# Upper bound on the status code. The code can come from the peer (an HTTP
+# status, a TLS alert), so it is treated like the reason text: bounded and
+# reduced to printable characters on one line.
+MAX_STATUS_CODE_CHARS = 32
+
 
 def _safe_url_reference(url: str) -> str:
     """A peer-controlled URL reduced to what identifies it: scheme, host, path.
@@ -253,6 +258,14 @@ class Outcome:
         password in place.
         """
         object.__setattr__(self, "detail", _bounded(_scrub_credentials(self.detail)))
+        if self.status_code is not None:
+            object.__setattr__(self, "status_code", _bounded_code(self.status_code))
+
+
+def _bounded_code(code: object) -> str | None:
+    """Return a status code as bounded, printable one-line text, or None when nothing is left."""
+    text = "".join(ch for ch in str(code) if ch.isprintable()).strip()
+    return text[:MAX_STATUS_CODE_CHARS] or None
 
 
 def classify(exc: BaseException) -> Outcome | None:

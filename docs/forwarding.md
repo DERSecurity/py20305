@@ -250,6 +250,11 @@ delivered after the connection recovers, with the time it actually failed.
 Held events go out with the next event, or when the host calls
 `flush_expired()` or `release_held()`.
 
+The bundled client runner calls `flush_expired()` every 10 seconds, so a link
+that goes quiet is reported within about one window length and held events
+go out once the broker is back, and it calls `flush()` at shutdown. An
+application that embeds the emitter does the same on its own timer.
+
 Failures are never coalesced and are not rate-limited by the emitter. Their
 volume follows the rate of connection attempts, which the caller's own retry
 and back-off policy sets. On the transport, the forwarder's publish queue is

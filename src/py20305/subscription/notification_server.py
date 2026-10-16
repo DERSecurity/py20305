@@ -16,6 +16,8 @@ from aiohttp import web
 from lxml import etree
 
 from py20305.client.tls import build_cipher_string
+from py20305.forwarders.connection_telemetry import SERVICE_IEEE2030_5, ConnectionRole
+from py20305.forwarders.ocsf import ConnectionDirectionId, Endpoint, NetworkActivityId
 from py20305.models.sep.sep import Notification
 from py20305.xml.serialization import from_xml
 
@@ -260,12 +262,6 @@ class NotificationServer:
         if observer is None:
             return
         try:
-            from py20305.forwarders.connection_telemetry import (
-                SERVICE_IEEE2030_5,
-                ConnectionRole,
-            )
-            from py20305.forwarders.ocsf import ConnectionDirectionId, Endpoint, NetworkActivityId
-
             transport = request.transport
             peer = transport.get_extra_info("peername") if transport else None
             local = transport.get_extra_info("sockname") if transport else None

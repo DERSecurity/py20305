@@ -87,6 +87,10 @@ EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
 EXIT_CONNECT_FAILED = 3
 
+# How often the runner closes connection-event windows whose length has
+# passed and sends events held during a broker outage.
+CONNECTION_WINDOW_SWEEP_SECONDS = 10.0
+
 
 def setup_logging(config: LoggingConfig) -> None:
     """Configure logging for the runner.
@@ -815,6 +819,12 @@ async def _run_client(
         retry_task = asyncio.create_task(
             _retry_forwarders(forwarder, stop, config.forwarders)
         )
+    sweep_task: asyncio.Task[None] | None = None
+    emitter = _connection_emitter(client)
+    if emitter is not None:
+        sweep_task = asyncio.create_task(
+            _sweep_connection_events(emitter, stop), name="connection-event-sweep"
+        )
     try:
         # Started before connecting, not after. The API's whole value during an
         # outage is reporting that there is one -- and /reconnect exists to cut
@@ -919,7 +929,15 @@ async def _run_client(
             retry_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await retry_task
+        if sweep_task is not None:
+            sweep_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweep_task
         await client.shutdown()
+        # After the client has stopped making connections, and before the
+        # transport stops, so the last windows and any held events are sent.
+        if emitter is not None:
+            emitter.flush()
         # After the client, so exchanges from its shutdown are queued before
         # the transport drains rather than after it has stopped accepting.
         if forwarder is not None:
@@ -1042,6 +1060,29 @@ def _start_telemetry(
         config.telemetry.der_capability_poll_rate_seconds,
     )
     return coordinator
+
+
+def _connection_emitter(client: CsipClient) -> Any:
+    """Return the client's connection telemetry emitter, or None when it has none."""
+    from py20305.forwarders.connection_telemetry import ConnectionTelemetryEmitter
+
+    observer = client.http.connection_observer
+    return observer if isinstance(observer, ConnectionTelemetryEmitter) else None
+
+
+async def _sweep_connection_events(emitter: Any, stop: asyncio.Event) -> None:
+    """Close expired connection-event windows and send held events on a timer, until stopped.
+
+    Windows also close on later activity through the emitter. Without the
+    timer, a link that goes quiet is not reported until the next connection,
+    and events held during a broker outage wait for the next event.
+    """
+    while not stop.is_set():
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=CONNECTION_WINDOW_SWEEP_SECONDS)
+        if stop.is_set():
+            return
+        emitter.flush_expired()
 
 
 async def _retry_forwarders(
