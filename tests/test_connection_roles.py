@@ -297,6 +297,24 @@ class TestLinkFailures:
         assert "s3cret" not in text
         assert "mqtts://broker.example.com:8883/x" in text
 
+    @pytest.mark.parametrize(
+        "exc_type",
+        [ConnectionRefusedError, RuntimeError],
+        ids=["classified", "unclassified"],
+    )
+    def test_a_long_password_is_removed_even_when_the_reason_is_clipped(self, exc_type):
+        password = "Pw" + "x" * 700
+        emitter, sink = make()
+        emitter.record_connection_failure(
+            role=ConnectionRole.TELEMETRY,
+            service="mqtt",
+            reason=exc_type(f"cannot reach mqtts://user:{password}@broker.example.com:8883/x"),
+            dst=Endpoint(hostname="broker.example.com", port=8883),
+        )
+        detail = sink.payloads[0]["status_detail"]
+        assert "Pwxxxx" not in detail
+        assert len(detail) <= ct.MAX_STATUS_DETAIL_CHARS
+
     def test_an_exchange_failure_keeps_activity_open(self):
         emitter, sink = make()
         emitter.record_connection_failure(
@@ -358,6 +376,23 @@ class TestHeldEvents:
         southbound_success(emitter, DEVICE_A, 2_000)
         assert [p["time"] for p in sink.payloads] == [1_000, 2_000]
 
+    def test_flush_sends_held_events_when_no_window_is_open(self):
+        sink = Sink(ready=False)
+        emitter, _ = make(coalesce=False, sink=sink)
+        southbound_success(emitter, DEVICE_A, 1_000)
+        emitter.record_connection_failure(
+            role=ConnectionRole.TELEMETRY,
+            service="mqtt",
+            reason=ConnectionRefusedError("refused"),
+            dst=Endpoint(hostname="broker.example.com", port=8883),
+            now_ms=2_000,
+        )
+        assert sink.events == []
+        sink.can_deliver_events = True
+        emitter.flush()
+        assert [p["time"] for p in sink.payloads] == [1_000, 2_000]
+        assert emitter.held_events == 0
+
     def test_the_hold_drops_its_oldest_event_at_the_bound(self):
         sink = Sink(ready=False)
         emitter, _ = make(coalesce=False, sink=sink, max_held_events=2)
@@ -397,6 +432,28 @@ class TestForwarderManagerSupport:
         failing.fail = False
         await manager.retry_failed()
         assert manager.can_deliver_events is True
+
+    async def test_can_deliver_events_is_false_when_a_started_forwarder_lost_its_connection(self):
+        manager = ForwarderManager()
+        forwarder = self.Forwarder()
+        manager.add_forwarder(forwarder)  # type: ignore[arg-type]
+        await manager.start()
+        assert manager.can_deliver_events is True
+        forwarder.can_deliver = False  # type: ignore[attr-defined]
+        assert manager.can_deliver_events is False
+
+    def test_the_mqtt_adapter_is_ready_only_while_running_and_connected(self):
+        from py20305.forwarders import MQTTForwarder, MQTTForwarderAdapter, MQTTForwarderConfig
+
+        forwarder = MQTTForwarder(MQTTForwarderConfig(endpoint="broker.example.com"))
+        adapter = MQTTForwarderAdapter(forwarder)
+        assert adapter.can_deliver is False
+        adapter._running = True
+        forwarder._connected = True
+        assert adapter.can_deliver is True
+        # A publish error after a successful start clears the connected flag.
+        forwarder._connected = False
+        assert adapter.can_deliver is False
 
     def test_the_observer_reaches_forwarders_added_before_and_after(self):
         manager = ForwarderManager()

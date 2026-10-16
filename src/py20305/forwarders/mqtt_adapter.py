@@ -161,6 +161,15 @@ class MQTTForwarderAdapter(AbstractForwarder):
         """Pass the connection observer to the wrapped forwarder."""
         self._forwarder.connection_observer = value
 
+    @property
+    def can_deliver(self) -> bool:
+        """Return whether an event queued now would be published.
+
+        False while the adapter is stopped or the broker connection is down,
+        including a connection lost after a successful start.
+        """
+        return self._running and self._forwarder.connected
+
     async def start(self) -> None:
         """Start the adapter and underlying forwarder."""
         await self._forwarder.start()

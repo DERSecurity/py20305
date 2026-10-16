@@ -61,8 +61,15 @@ class ForwarderManager:
 
     @property
     def can_deliver_events(self) -> bool:
-        """Return whether an event queued now would reach at least one started forwarder."""
-        return self._running and any(f not in self._failed for f in self._forwarders)
+        """Return whether an event queued now would reach at least one forwarder.
+
+        A forwarder counts when it started and, if it reports live readiness
+        through ``can_deliver``, is ready now. A forwarder that does not report
+        it counts as ready once started.
+        """
+        return self._running and any(
+            f not in self._failed and getattr(f, "can_deliver", True) for f in self._forwarders
+        )
 
     @property
     def connection_observer(self) -> LinkObserver | None:

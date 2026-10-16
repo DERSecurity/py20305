@@ -245,8 +245,14 @@ class Outcome:
     status_code: str | None = None
 
     def __post_init__(self) -> None:
-        """Bound the reason text at the boundary, so no caller can bypass it."""
-        object.__setattr__(self, "detail", _bounded(self.detail))
+        """Remove URL credentials from the reason text, then bound it.
+
+        Done at the boundary so no caller can bypass it. The order matters:
+        clipping first can cut off the ``@`` that ends a URL's userinfo, and
+        the scrubber then no longer recognizes the URL and leaves the
+        password in place.
+        """
+        object.__setattr__(self, "detail", _bounded(_scrub_credentials(self.detail)))
 
 
 def classify(exc: BaseException) -> Outcome | None:
@@ -783,7 +789,7 @@ def link_outcome(
         code = None
     return Outcome(
         NetworkActivityId(activity_id) if activity_id is not None else activity,
-        _scrub_credentials(detail),
+        detail,
         status_code if status_code is not None else code,
     )
 
@@ -1197,6 +1203,9 @@ class ConnectionTelemetryEmitter:
                 self._close_link(key)
         except Exception:
             self._record_emit_failure("flush")
+        # With per-attempt logging there may be no open window to close, so
+        # closing windows alone would not send events held during an outage.
+        self.release_held()
 
     def release_held(self) -> None:
         """Send held events if the transport can deliver them now."""
