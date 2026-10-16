@@ -241,14 +241,25 @@ class Product:
 
 @dataclass(kw_only=True)
 class Metadata:
-    """OCSF ``metadata`` object -- required on every OCSF event."""
+    """OCSF ``metadata`` object -- required on every OCSF event.
+
+    Attributes:
+        product: The software that produced the event.
+        version: The OCSF schema version the event conforms to.
+        labels: Free-form labels. Connection telemetry uses one
+            ``role:<role>`` label to say which link an event describes.
+    """
 
     product: Product
     version: str = OCSF_SCHEMA_VERSION
+    labels: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to an OCSF ``metadata`` object."""
-        return {"product": self.product.to_dict(), "version": self.version}
+        """Serialize to an OCSF ``metadata`` object; empty labels are omitted."""
+        result: dict[str, Any] = {"product": self.product.to_dict(), "version": self.version}
+        if self.labels:
+            result["labels"] = list(self.labels)
+        return result
 
 
 @dataclass(kw_only=True)

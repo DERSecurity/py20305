@@ -364,11 +364,16 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
                 base_url=config.server.url,
             )
             client.http.connection_observer = emitter
+            # The forwarder reports its own broker connection through the same
+            # emitter. Attached before the forwarder starts, so the first
+            # connection attempt is reported too.
+            forwarder.connection_observer = emitter
 
     # Subscribe/notify. Attached after construction because the manager needs
     # the client's transport, which exists only once the client does. The
     # client starts and stops the listener with its own lifecycle.
     if config.subscription.enabled:
+        from py20305.forwarders.connection_telemetry import ConnectionTelemetryEmitter
         from py20305.subscription.manager import SubscriptionManager
         from py20305.subscription.notification_server import NotificationServer
 
@@ -378,6 +383,10 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
             tls=tls,
             client_cert_mode=config.subscription.notification_client_cert_mode,
         )
+        # Inbound notification requests are connections too; report them
+        # through the same emitter when connection telemetry is on.
+        if isinstance(client.http.connection_observer, ConnectionTelemetryEmitter):
+            notification_server.connection_observer = client.http.connection_observer
         # The validator guarantees external_host when enabled.
         external_host = config.subscription.notification_external_host
         assert external_host is not None

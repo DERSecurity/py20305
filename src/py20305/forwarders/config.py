@@ -130,6 +130,14 @@ class ConnectionTelemetryConfig(_StrictForwarderModel):
         default="out/connection-events",
         description="Topic to publish connection events on, relative to the forwarder topic base",
     )
+    coalesce_successes: bool = Field(
+        default=True,
+        description=(
+            "Whether successful connections on one link are collapsed into one event per "
+            "window. Set false where every connection attempt must be logged as its own "
+            "record. Failures are never coalesced."
+        ),
+    )
     coalesce_window_seconds: float = Field(
         default=60.0,
         description=(

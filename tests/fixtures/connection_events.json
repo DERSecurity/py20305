@@ -1,0 +1,317 @@
+{
+  "management_inbound_success": {
+    "activity_id": 1,
+    "activity_name": "Open",
+    "category_name": "Network Activity",
+    "category_uid": 4,
+    "class_name": "Network Activity",
+    "class_uid": 4001,
+    "connection_info": {
+      "direction": "Inbound",
+      "direction_id": 1,
+      "protocol_name": "tcp"
+    },
+    "dst_endpoint": {
+      "ip": "192.0.2.10",
+      "port": 8443,
+      "svc_name": "https"
+    },
+    "metadata": {
+      "labels": [
+        "role:management"
+      ],
+      "product": {
+        "name": "example-gateway",
+        "vendor_name": "Example Vendor",
+        "version": "1.2.3"
+      },
+      "version": "1.9.0"
+    },
+    "severity": "Informational",
+    "severity_id": 1,
+    "src_endpoint": {
+      "ip": "192.0.2.77",
+      "port": 61002
+    },
+    "status": "Success",
+    "status_id": 1,
+    "time": 1760000030000,
+    "type_uid": 400101
+  },
+  "northbound_coalesced_success": {
+    "activity_id": 1,
+    "activity_name": "Open",
+    "category_name": "Network Activity",
+    "category_uid": 4,
+    "class_name": "Network Activity",
+    "class_uid": 4001,
+    "connection_info": {
+      "direction": "Outbound",
+      "direction_id": 2,
+      "protocol_name": "tcp"
+    },
+    "count": 3,
+    "dst_endpoint": {
+      "ip": "203.0.113.5",
+      "port": 8443,
+      "svc_name": "ieee2030.5"
+    },
+    "duration": 10000,
+    "end_time": 1760000010000,
+    "metadata": {
+      "labels": [
+        "role:northbound"
+      ],
+      "product": {
+        "name": "example-gateway",
+        "vendor_name": "Example Vendor",
+        "version": "1.2.3"
+      },
+      "version": "1.9.0"
+    },
+    "severity": "Informational",
+    "severity_id": 1,
+    "src_endpoint": {
+      "ip": "192.0.2.10",
+      "port": 50412
+    },
+    "start_time": 1760000000000,
+    "status": "Success",
+    "status_id": 1,
+    "time": 1760000000000,
+    "type_uid": 400101,
+    "url": {
+      "url_string": "https://utility.example.com:8443"
+    }
+  },
+  "northbound_exchange_failure": {
+    "activity_id": 1,
+    "activity_name": "Open",
+    "category_name": "Network Activity",
+    "category_uid": 4,
+    "class_name": "Network Activity",
+    "class_uid": 4001,
+    "connection_info": {
+      "direction": "Outbound",
+      "direction_id": 2,
+      "protocol_name": "tcp"
+    },
+    "dst_endpoint": {
+      "hostname": "utility.example.com",
+      "port": 8443,
+      "svc_name": "ieee2030.5"
+    },
+    "metadata": {
+      "labels": [
+        "role:northbound"
+      ],
+      "product": {
+        "name": "example-gateway",
+        "vendor_name": "Example Vendor",
+        "version": "1.2.3"
+      },
+      "version": "1.9.0"
+    },
+    "severity": "Medium",
+    "severity_id": 3,
+    "status": "Failure",
+    "status_code": "500",
+    "status_detail": "Server returned an unexpected status: HTTP 500",
+    "status_id": 2,
+    "time": 1760000015000,
+    "type_uid": 400101,
+    "url": {
+      "url_string": "https://utility.example.com:8443"
+    }
+  },
+  "server_inbound_success": {
+    "activity_id": 1,
+    "activity_name": "Open",
+    "category_name": "Network Activity",
+    "category_uid": 4,
+    "class_name": "Network Activity",
+    "class_uid": 4001,
+    "connection_info": {
+      "direction": "Inbound",
+      "direction_id": 1,
+      "protocol_name": "tcp"
+    },
+    "dst_endpoint": {
+      "ip": "192.0.2.10",
+      "port": 502,
+      "svc_name": "modbus"
+    },
+    "metadata": {
+      "labels": [
+        "role:server"
+      ],
+      "product": {
+        "name": "example-gateway",
+        "vendor_name": "Example Vendor",
+        "version": "1.2.3"
+      },
+      "version": "1.9.0"
+    },
+    "severity": "Informational",
+    "severity_id": 1,
+    "src_endpoint": {
+      "ip": "192.0.2.80",
+      "port": 53114
+    },
+    "status": "Success",
+    "status_id": 1,
+    "time": 1760000031000,
+    "type_uid": 400101
+  },
+  "southbound_failure": {
+    "activity_id": 5,
+    "activity_name": "Refuse",
+    "category_name": "Network Activity",
+    "category_uid": 4,
+    "class_name": "Network Activity",
+    "class_uid": 4001,
+    "connection_info": {
+      "direction": "Outbound",
+      "direction_id": 2,
+      "protocol_name": "tcp"
+    },
+    "dst_endpoint": {
+      "ip": "192.0.2.50",
+      "port": 502,
+      "svc_name": "modbus"
+    },
+    "metadata": {
+      "labels": [
+        "role:southbound"
+      ],
+      "product": {
+        "name": "example-gateway",
+        "vendor_name": "Example Vendor",
+        "version": "1.2.3"
+      },
+      "version": "1.9.0"
+    },
+    "severity": "Medium",
+    "severity_id": 3,
+    "status": "Failure",
+    "status_detail": "Connection refused: [Errno 111] Connection refused",
+    "status_id": 2,
+    "time": 1760000021000,
+    "type_uid": 400105
+  },
+  "southbound_success": {
+    "activity_id": 1,
+    "activity_name": "Open",
+    "category_name": "Network Activity",
+    "category_uid": 4,
+    "class_name": "Network Activity",
+    "class_uid": 4001,
+    "connection_info": {
+      "direction": "Outbound",
+      "direction_id": 2,
+      "protocol_name": "tcp"
+    },
+    "dst_endpoint": {
+      "ip": "192.0.2.50",
+      "port": 502,
+      "svc_name": "modbus"
+    },
+    "metadata": {
+      "labels": [
+        "role:southbound"
+      ],
+      "product": {
+        "name": "example-gateway",
+        "vendor_name": "Example Vendor",
+        "version": "1.2.3"
+      },
+      "version": "1.9.0"
+    },
+    "severity": "Informational",
+    "severity_id": 1,
+    "src_endpoint": {
+      "ip": "192.0.2.10",
+      "port": 49822
+    },
+    "status": "Success",
+    "status_id": 1,
+    "time": 1760000020000,
+    "type_uid": 400101
+  },
+  "telemetry_failure": {
+    "activity_id": 4,
+    "activity_name": "Fail",
+    "category_name": "Network Activity",
+    "category_uid": 4,
+    "class_name": "Network Activity",
+    "class_uid": 4001,
+    "connection_info": {
+      "direction": "Outbound",
+      "direction_id": 2,
+      "protocol_name": "tcp"
+    },
+    "dst_endpoint": {
+      "hostname": "broker.example.com",
+      "port": 8883,
+      "svc_name": "mqtt"
+    },
+    "metadata": {
+      "labels": [
+        "role:telemetry"
+      ],
+      "product": {
+        "name": "example-gateway",
+        "vendor_name": "Example Vendor",
+        "version": "1.2.3"
+      },
+      "version": "1.9.0"
+    },
+    "severity": "Medium",
+    "severity_id": 3,
+    "status": "Failure",
+    "status_detail": "Connection timed out: timed out",
+    "status_id": 2,
+    "time": 1760000041000,
+    "type_uid": 400104
+  },
+  "telemetry_success": {
+    "activity_id": 1,
+    "activity_name": "Open",
+    "category_name": "Network Activity",
+    "category_uid": 4,
+    "class_name": "Network Activity",
+    "class_uid": 4001,
+    "connection_info": {
+      "direction": "Outbound",
+      "direction_id": 2,
+      "protocol_name": "tcp"
+    },
+    "dst_endpoint": {
+      "hostname": "broker.example.com",
+      "ip": "198.51.100.20",
+      "port": 8883,
+      "svc_name": "mqtt"
+    },
+    "metadata": {
+      "labels": [
+        "role:telemetry"
+      ],
+      "product": {
+        "name": "example-gateway",
+        "vendor_name": "Example Vendor",
+        "version": "1.2.3"
+      },
+      "version": "1.9.0"
+    },
+    "severity": "Informational",
+    "severity_id": 1,
+    "src_endpoint": {
+      "ip": "192.0.2.10",
+      "port": 40001
+    },
+    "status": "Success",
+    "status_id": 1,
+    "time": 1760000040000,
+    "type_uid": 400101
+  }
+}

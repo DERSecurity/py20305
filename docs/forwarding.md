@@ -150,13 +150,110 @@ What becomes an event:
 - **Successes** are coalesced: within `coalesce_window_seconds` (60 by
   default) they collapse into one record carrying the window's bounds and an
   attempt count, so a polling client does not out-publish the passive capture
-  beside it. Zero disables coalescing. Failures are never coalesced -- each
-  keeps its own reason.
+  beside it. Failures are never coalesced -- each keeps its own reason.
 
 A 204 No Content counts as a success: it is a validated contact that happens
 to signal itself by raising. Outcomes are reported per logical request, not
 per retry attempt, and the open success window is flushed when the client
 closes.
+
+### Logging every connection attempt
+
+Deployments that must log every connection attempt as its own record turn
+coalescing off:
+
+```yaml
+forwarders:
+  connection_telemetry:
+    enabled: true
+    coalesce_successes: false
+```
+
+Every successful connection then produces its own event, with its own time
+and source port. Volume grows with the polling rate, so leave coalescing on
+unless a per-attempt log is required. Setting `coalesce_window_seconds: 0`
+has the same effect.
+
+A coalesced record names the source port of the first connection in its
+window only; the attempt count and window bounds account for the rest.
+
+### Roles, direction and producer
+
+Every event carries one role label in `metadata.labels`, which says which
+link the connection belongs to:
+
+| Label | Link |
+|---|---|
+| `role:northbound` | The IEEE 2030.5 client's connection to the utility server |
+| `role:southbound` | A connection to a DER device (SunSpec Modbus, DNP3, OCPP and others) |
+| `role:management` | An inbound connection to the host's management console or API |
+| `role:server` | An inbound connection to one of the host's own protocol listeners, such as the notification listener |
+| `role:telemetry` | The connection to the broker that carries this telemetry |
+
+The direction is in `connection_info.direction_id`: `1` (Inbound) for a
+connection the host accepted, `2` (Outbound) for one it opened. The service
+is in `dst_endpoint.svc_name` (`ieee2030.5`, `modbus`, `dnp3`, `ocpp`,
+`mqtt`, `http`, `https`).
+
+Successes are coalesced per link: per role, direction, service and
+destination, and for inbound connections also per source address, so
+connections from different clients are never merged into one record.
+
+The runner reports the northbound client, the broker connection, and
+requests to the notification listener. The notification listener reports
+per request, because a request is the first point it can observe; a TLS
+handshake that fails never reaches it.
+
+`metadata.product` names `py20305` by default. An application embedding the
+library names itself instead, so a consumer can tell which product produced
+each record:
+
+```python
+from py20305.forwarders.connection_telemetry import (
+    ConnectionRole,
+    ConnectionTelemetryEmitter,
+)
+from py20305.forwarders.ocsf import ConnectionDirectionId, Endpoint
+
+emitter = ConnectionTelemetryEmitter(
+    manager, config, product_name="MyGateway", product_version="2.1.0"
+)
+client.http.connection_observer = emitter  # northbound
+manager.connection_observer = emitter      # broker; set before manager.start()
+
+# Any other link:
+emitter.record_connection(
+    role=ConnectionRole.SOUTHBOUND,
+    service="modbus",
+    dst=Endpoint(ip="192.0.2.50", port=502),
+)
+emitter.record_connection_failure(
+    role=ConnectionRole.MANAGEMENT,
+    service="https",
+    direction=ConnectionDirectionId.INBOUND,
+    reason=exc,
+    src=Endpoint(ip="192.0.2.77", port=61002),
+    dst=Endpoint(ip="192.0.2.10", port=8443),
+)
+```
+
+`tests/fixtures/connection_events.json` holds one example event per role,
+produced by the emitter, for testing a consumer's parser.
+
+### When the broker is unreachable
+
+Events produced while the transport cannot deliver them -- the broker is
+down, or the forwarder has not started yet -- are held and sent once it
+can, oldest first. The hold keeps up to 1,000 events and drops the oldest
+beyond that. A failed broker connection is reported this way: its record is
+delivered after the connection recovers, with the time it actually failed.
+Held events go out with the next event, or when the host calls
+`flush_expired()` or `release_held()`.
+
+Failures are never coalesced and are not rate-limited by the emitter. Their
+volume follows the rate of connection attempts, which the caller's own retry
+and back-off policy sets. On the transport, the forwarder's publish queue is
+bounded and drops its oldest record when full.
 
 Embedders not using the runner attach the same machinery through the
 client's observer seam: construct a

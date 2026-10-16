@@ -27,6 +27,7 @@ from py20305.forwarders.types import (
 )
 
 if TYPE_CHECKING:
+    from py20305.forwarders.connection_telemetry import LinkObserver
     from py20305.forwarders.mqtt_forwarder import MQTTForwarder
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,16 @@ class MQTTForwarderAdapter(AbstractForwarder):
     def source_host(self, value: str | None) -> None:
         """Set source hostname for client endpoint in ProtocolMessages."""
         self._source_host = value
+
+    @property
+    def connection_observer(self) -> LinkObserver | None:
+        """Where the wrapped forwarder reports its broker connection outcomes."""
+        return self._forwarder.connection_observer
+
+    @connection_observer.setter
+    def connection_observer(self, value: LinkObserver | None) -> None:
+        """Pass the connection observer to the wrapped forwarder."""
+        self._forwarder.connection_observer = value
 
     async def start(self) -> None:
         """Start the adapter and underlying forwarder."""
