@@ -2969,7 +2969,7 @@ class TestDispatchGatedResponses:
 
     @pytest.mark.asyncio
     async def test_not_configured_reports_not_applicable(self, shutdown: asyncio.Event):
-        """DeviceNotConfiguredError is the one failure that maps to 252."""
+        """DeviceNotConfiguredError maps to 252, as a gate refusal does."""
         now = int(time.time())
         derc = _make_derc(0x01, start=now + 50, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
