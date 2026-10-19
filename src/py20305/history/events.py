@@ -79,7 +79,10 @@ class EventHistory:
         self, database: HistoryDatabase, *, clock: Callable[[], float] = time.time
     ) -> None:
         self._db = database
-        self._clock = clock
+        #: "Now" for an event still running. Events are timed on the server's
+        #: timebase, so a client that follows the server's clock sets this to
+        #: the same timebase (``History.use_timebase`` does).
+        self.clock = clock
         database.register_table("event_records", "at", _RECORD_DDL)
         database.register_table("event_responses", "at", _RESPONSE_DDL)
 
@@ -102,7 +105,7 @@ class EventHistory:
             duration = stored.get("effective_duration")
             end = start + duration if start is not None and duration is not None else None
             row = (
-                float(stored.get("at") or self._clock()),
+                float(stored.get("at") or self.clock()),
                 str(stored.get("kind", "")),
                 stored.get("event_mrid"),
                 stored.get("program_href"),
@@ -239,7 +242,7 @@ class EventHistory:
         trail = self.records(event_mrid=event_mrid, kind="der_event")
         if not trail:
             return None
-        return summarize(trail, self.responses(event_mrid=event_mrid), now=self._clock())
+        return summarize(trail, self.responses(event_mrid=event_mrid), now=self.clock())
 
     def control_windows(self, since: float, until: float) -> list[tuple[float, float]]:
         """Each event's time under control, as ``(from, to)``, inside a range.
@@ -261,7 +264,17 @@ def summarize(  # pylint: disable=too-many-locals
     first = trail[0]
     last = trail[-1]
     control = next((r["control"] for r in trail if "control" in r), None)
-    active = next((r for r in reversed(trail) if r.get("to_state") == "active"), None)
+    # The last move into active. An active -> active record (a partial
+    # supersession) notes a change to a running event; it is not a new start
+    # and carries no dispatch outcomes.
+    active = next(
+        (
+            r
+            for r in reversed(trail)
+            if r.get("to_state") == "active" and r.get("from_state") != "active"
+        ),
+        None,
+    )
     ended = next((r for r in trail if r.get("to_state") in TERMINAL_STATES), None)
     start = last.get("effective_start")
     duration = last.get("effective_duration")

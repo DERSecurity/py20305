@@ -5,15 +5,21 @@ deletes one thing. Each part registers its own tables and names the column its
 rows age by; the database prunes all of them against one retention period.
 
 Writes come from the control path: an event changing state, a device write, a
-completed measurement interval. None of them may fail because the history did.
-Every write here catches its own database error, counts it and logs the first,
-and reports failure as a return value rather than an exception.
+completed measurement interval. None of them may wait on the disk or fail
+because the history did. So a write only queues its rows, and one writer thread
+runs every statement. The queue is bounded: when the disk cannot keep up, rows
+are dropped and counted rather than held in memory without limit. A database
+error is counted and logged once, in the writer, and never reaches the caller.
+
+Reads see every write queued before them: a read waits for the queue to drain.
+Reads are for the management API and reports, which run off the event loop.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
+import queue
 import sqlite3
 import threading
 import time
@@ -27,6 +33,13 @@ logger = logging.getLogger(__name__)
 #: Pruning on every write would scan the time indexes once per row.
 PRUNE_INTERVAL_SECONDS = 3600.0
 
+#: Most write batches waiting for the writer thread. Past this the rows are
+#: dropped and counted; a few minutes of a busy client's writes fit easily.
+MAX_PENDING_WRITES = 10000
+
+#: How long closing waits for queued writes to reach the disk.
+CLOSE_TIMEOUT_SECONDS = 10.0
+
 #: The path that keeps the database in memory, for tests and for hosts that
 #: want the query API without a file.
 MEMORY = ":memory:"
@@ -36,9 +49,9 @@ MEMORY = ":memory:"
 class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
     """One SQLite connection shared by the history parts.
 
-    The connection is opened with ``check_same_thread=False`` and every call
-    takes one lock, because device writes can be recorded from a connector's
-    worker thread while the event loop records an event transition.
+    The writer thread runs every write. Reads run on the caller's thread. Both
+    use the one connection, opened with ``check_same_thread=False``, under one
+    lock.
     """
 
     def __init__(
@@ -70,6 +83,15 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
         #: Failed writes by table. A history that stopped recording must not
         #: look like a client with nothing to record.
         self.write_failures: dict[str, int] = {}
+        #: Write batches dropped because the queue was full, by table.
+        self.dropped: dict[str, int] = {}
+        self._queue: queue.Queue[tuple[str, str, list[Sequence[Any]]] | None] = queue.Queue(
+            maxsize=MAX_PENDING_WRITES
+        )
+        self._writer = threading.Thread(
+            target=self._write_queued, name="py20305-history-writer", daemon=True
+        )
+        self._writer.start()
 
     def register_table(self, table: str, time_column: str, ddl: Iterable[str]) -> None:
         """Create a table and its indexes, and prune it by ``time_column``."""
@@ -79,29 +101,36 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
         self._aged_tables.append((table, time_column))
 
     def write(self, table: str, sql: str, params: Sequence[Any]) -> bool:
-        """Run one write statement. Return False when it failed."""
+        """Queue one write statement. Return False when it could not be queued."""
         return self.write_many(table, sql, [params])
 
     def write_many(self, table: str, sql: str, rows: Sequence[Sequence[Any]]) -> bool:
-        """Run one write statement per row in a single transaction."""
+        """Queue one write statement per row, run later in a single transaction.
+
+        Returns at once. False means the rows were not queued: the history is
+        closed, or the queue is full and the rows were dropped and counted.
+        """
         if not rows:
             return True
-        with self._lock:
-            if self._closed:
-                return False
-            try:
-                self._conn.execute("BEGIN")
-                self._conn.executemany(sql, rows)
-                self._conn.execute("COMMIT")
-            except sqlite3.Error:
-                self._rollback()
-                self._failed(table)
-                return False
-            self._prune_if_due()
+        if self._closed:
+            return False
+        try:
+            self._queue.put_nowait((table, sql, list(rows)))
+        except queue.Full:
+            self.dropped[table] = self.dropped.get(table, 0) + 1
+            if self.dropped[table] == 1:
+                logger.warning("History write queue is full; dropping writes to %s", table)
+            return False
         return True
 
+    def drain(self) -> None:
+        """Wait until every queued write has been run."""
+        if self._writer.is_alive():
+            self._queue.join()
+
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
-        """Run one read statement and return its rows."""
+        """Run one read statement, after the writes queued before it."""
+        self.drain()
         with self._lock:
             if self._closed:
                 return []
@@ -114,15 +143,47 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
 
     def prune(self, now: float | None = None) -> int:
         """Delete rows older than the retention period. Return how many went."""
+        self.drain()
         with self._lock:
+            if self._closed:
+                return 0
             return self._prune(self._clock() if now is None else now)
 
     def close(self) -> None:
-        """Close the connection. Later writes return False and reads return nothing."""
+        """Run the queued writes, then close the connection.
+
+        Later writes return False and reads return nothing.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._queue.put(None)
+        self._writer.join(timeout=CLOSE_TIMEOUT_SECONDS)
+        if self._writer.is_alive():
+            logger.warning("History writer did not finish within %.0f s", CLOSE_TIMEOUT_SECONDS)
         with self._lock:
-            if not self._closed:
-                self._closed = True
-                self._conn.close()
+            self._conn.close()
+
+    def _write_queued(self) -> None:
+        """The writer thread: run each queued batch until close() queues None."""
+        while True:
+            item = self._queue.get()
+            try:
+                if item is None:
+                    return
+                table, sql, rows = item
+                with self._lock:
+                    try:
+                        self._conn.execute("BEGIN")
+                        self._conn.executemany(sql, rows)
+                        self._conn.execute("COMMIT")
+                    except sqlite3.Error:
+                        self._rollback()
+                        self._failed(table)
+                    else:
+                        self._prune_if_due()
+            finally:
+                self._queue.task_done()
 
     def _prune_if_due(self) -> None:
         now = self._clock()

@@ -496,6 +496,13 @@ class TelemetryManager:
         cares about it -- the management API describes the same failure
         differently.
         """
+        # The device could not be read, so its last reading stops counting:
+        # holding it across the failure would report energy nobody measured.
+        if self._intervals is not None:
+            try:
+                self._intervals.interrupt(lfdi)
+            except Exception:
+                logger.debug("Interval history failed for %s", lfdi[:8], exc_info=True)
         if error is None:
             return
 

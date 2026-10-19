@@ -229,15 +229,17 @@ def create_client_router(
     # -----------------------------------------------------------------
     # Operations history
     # -----------------------------------------------------------------
+    # Plain functions, not coroutines: FastAPI runs them in its thread pool, so
+    # a history read never holds up the event loop that applies controls.
 
     @router.get("/history")
-    async def get_history_status() -> dict[str, Any]:
+    def get_history_status() -> dict[str, Any]:
         """Return which parts of the operations history are on, and their size."""
         service = service_getter()
         return {"enabled": False} if service is None else service.get_history_status()
 
     @router.get("/history/events")
-    async def get_history_events(
+    def get_history_events(
         since: float | None = Query(None, description="Epoch seconds; window start."),
         until: float | None = Query(None, description="Epoch seconds; window end."),
         program_href: str | None = Query(None, description="Only this DERProgram."),
@@ -252,7 +254,7 @@ def create_client_router(
         )
 
     @router.get("/history/events/{event_mrid}", response_model=None)
-    async def get_history_event(event_mrid: str) -> dict[str, Any] | JSONResponse:
+    def get_history_event(event_mrid: str) -> dict[str, Any] | JSONResponse:
         """Return an event's summary, audit records, responses and device writes."""
         service = service_getter()
         if service is None:
@@ -263,7 +265,7 @@ def create_client_router(
         return body
 
     @router.get("/history/writes")
-    async def get_history_writes(
+    def get_history_writes(
         event_mrid: str | None = Query(None, description="Writes this event applied or caused."),
         lfdi: str | None = Query(None),
         control: str | None = Query(None, description="Connector operation, e.g. p_lim."),
@@ -285,7 +287,7 @@ def create_client_router(
         )
 
     @router.get("/history/intervals")
-    async def get_history_intervals(
+    def get_history_intervals(
         lfdi: str | None = Query(None),
         since: float | None = Query(None),
         until: float | None = Query(None),
@@ -298,7 +300,7 @@ def create_client_router(
         return service.get_history_intervals(lfdi=lfdi, since=since, until=until, limit=limit)
 
     @router.get("/history/baseline", response_model=None)
-    async def get_history_baseline(
+    def get_history_baseline(
         start: float = Query(..., description="Epoch seconds; start of the window."),
         end: float = Query(..., description="Epoch seconds; end of the window."),
         lfdi: str | None = Query(None, description="One device; omitted sums all devices."),

@@ -100,9 +100,15 @@ class History:
         return history
 
     def use_timebase(self, timebase: ServerTimebase) -> None:
-        """Time device writes on the server's timebase, as events and readings are."""
+        """Follow the server's timebase, as events and readings do.
+
+        Device writes are moved onto it, and a running event's time so far is
+        measured against it.
+        """
         if self.writes is not None:
             self.writes.offset = timebase.offset
+        if self.events is not None:
+            self.events.clock = timebase.now
 
     # The options of IntervalHistory.baseline, passed through.
     def baseline(  # pylint: disable=too-many-arguments
@@ -165,6 +171,7 @@ class History:
                 if on
             },
             "write_failures": dict(db.write_failures),
+            "dropped_writes": dict(db.dropped),
         }
 
     def close(self) -> None:

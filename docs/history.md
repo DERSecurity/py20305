@@ -57,8 +57,19 @@ and runs without a history. Set `history.path` to a writable location, or switch
 to silence it.
 
 The file uses SQLite's write-ahead log, so a `-wal` and a `-shm` file sit
-beside it while the client runs. Copy all three, or stop the client first, to
-back it up.
+beside it while the client runs. Copying the files while the client writes can
+produce a copy that is missing records or cannot be opened. Back it up with
+SQLite's own backup, which is safe while the client runs:
+
+```bash
+sqlite3 py20305-history.sqlite3 ".backup history-backup.sqlite3"
+```
+
+or stop the client and copy the file.
+
+Writes never wait on the disk. They are queued and written by one background
+thread; if the disk falls far behind, writes are dropped and counted in
+`GET /api/v1/history` rather than slowing the client.
 
 ### In a container
 
@@ -116,7 +127,7 @@ the telemetry cycle reads.
   apart in the connector's own sign, so they do not cancel inside an interval.
 - **Curtailment.** `wh_curtailed` is available power minus actual output,
   never below zero, while the device reports its available power
-  (`statWAvail`). It is `null` for an interval with no available-power reading.
+  (`statWAvail`). It is `null` unless output was measured while available power was known.
   It assumes positive real power means output. Available power is read with
   the DERAvailability report, so it is present only when the server exposes
   that resource.
@@ -134,8 +145,9 @@ recent earlier weekdays that qualify. A day qualifies when no recorded event
 had devices under control on it, and every interval was measured for at least
 half its length on every device.
 
-The result lists the days used, and the baseline, actual and difference for
-each interval and in total. A program that settles on a different rule can
+The window can be at most one day. The result lists the days used, and the
+baseline, actual and difference for each interval and in total. An interval of
+the window measured for less than half its length has no actual value. A program that settles on a different rule can
 compute it from the intervals directly.
 
 ## Reading it

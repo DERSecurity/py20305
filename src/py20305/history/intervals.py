@@ -46,6 +46,7 @@ _DDL = (
         vars_negative REAL NOT NULL,
         avail_seconds REAL NOT NULL,
         avail_ws REAL NOT NULL,
+        curtail_seconds REAL NOT NULL,
         curtailed_ws REAL NOT NULL,
         PRIMARY KEY (lfdi, start, seconds)
     )""",
@@ -58,8 +59,8 @@ _DDL = (
 _UPSERT = """
 INSERT INTO device_intervals (lfdi, start, seconds, covered_seconds, samples, ws_positive,
     ws_negative, w_min, w_max, var_seconds, vars_positive, vars_negative, avail_seconds,
-    avail_ws, curtailed_ws)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    avail_ws, curtail_seconds, curtailed_ws)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (lfdi, start, seconds) DO UPDATE SET
     covered_seconds = covered_seconds + excluded.covered_seconds,
     samples = samples + excluded.samples,
@@ -76,8 +77,18 @@ ON CONFLICT (lfdi, start, seconds) DO UPDATE SET
     vars_negative = vars_negative + excluded.vars_negative,
     avail_seconds = avail_seconds + excluded.avail_seconds,
     avail_ws = avail_ws + excluded.avail_ws,
+    curtail_seconds = curtail_seconds + excluded.curtail_seconds,
     curtailed_ws = curtailed_ws + excluded.curtailed_ws
 """
+
+#: Most interval starts read in one statement, well under SQLite's limit on
+#: bound parameters.
+_BATCH = 500
+
+#: Longest window a baseline is computed for. A baseline compares one event's
+#: hours with the same hours on other days, so a day is the most it needs, and
+#: a bound keeps a bad request from allocating without limit.
+MAX_BASELINE_SECONDS = 86400.0
 
 _COLUMNS = (
     "covered_seconds",
@@ -89,8 +100,10 @@ _COLUMNS = (
     "vars_negative",
     "avail_seconds",
     "avail_ws",
+    "curtail_seconds",
     "curtailed_ws",
 )
+_SELECT = "lfdi, start, w_min, w_max, " + ", ".join(_COLUMNS)
 
 
 # One running sum per stored column.
@@ -109,6 +122,7 @@ class _Bucket:  # pylint: disable=too-many-instance-attributes
     vars_negative: float = 0.0
     avail_seconds: float = 0.0
     avail_ws: float = 0.0
+    curtail_seconds: float = 0.0
     curtailed_ws: float = 0.0
 
 
@@ -222,6 +236,8 @@ class IntervalHistory:
             bucket = self._bucket(device, t0)
             if device.w is not None:
                 bucket.covered_seconds += dt
+                bucket.w_min = device.w if bucket.w_min is None else min(bucket.w_min, device.w)
+                bucket.w_max = device.w if bucket.w_max is None else max(bucket.w_max, device.w)
                 if device.w >= 0:
                     bucket.ws_positive += device.w * dt
                 else:
@@ -236,6 +252,7 @@ class IntervalHistory:
                 bucket.avail_seconds += dt
                 bucket.avail_ws += avail * dt
                 if device.w is not None:
+                    bucket.curtail_seconds += dt
                     bucket.curtailed_ws += max(0.0, avail - max(device.w, 0.0)) * dt
             t0 = end
 
@@ -268,6 +285,7 @@ class IntervalHistory:
             b.vars_negative,
             b.avail_seconds,
             b.avail_ws,
+            b.curtail_seconds,
             b.curtailed_ws,
         )
 
@@ -298,28 +316,66 @@ class IntervalHistory:
             clauses.append("start < ?")
             params.append(until)
         rows = self._db.query(
-            "SELECT lfdi, start, w_min, w_max, " + ", ".join(_COLUMNS) + " FROM device_intervals "
+            f"SELECT {_SELECT} FROM device_intervals "
             f"WHERE {' AND '.join(clauses)} ORDER BY start, lfdi LIMIT ?",
             [*params, max(1, limit)],
         )
+        low = self._floor(since) if since is not None else None
+        merged = self._with_unfinished(
+            rows,
+            lambda name, start: (lfdi is None or name == lfdi.lower())
+            and (low is None or start >= low)
+            and (until is None or start < until),
+        )
+        ordered = sorted(merged.values(), key=lambda r: (r["start"], r["lfdi"]))
+        return [self._present(row) for row in ordered[: max(1, limit)]]
+
+    def _with_unfinished(
+        self, rows: Iterable[Any], keep: Callable[[str, float], bool]
+    ) -> dict[tuple[str, float], dict[str, Any]]:
+        """Stored rows (``sqlite3.Row`` or mappings), keyed by device and start,
+        plus the unfinished intervals ``keep`` picks.
+        """
         merged: dict[tuple[str, float], dict[str, Any]] = {
             (row["lfdi"], row["start"]): dict(row) for row in rows
         }
         for name, device in self._devices.items():
-            if lfdi is not None and name != lfdi.lower():
-                continue
             for start, bucket in device.buckets.items():
-                if (since is not None and start < self._floor(since)) or (
-                    until is not None and start >= until
-                ):
+                if not keep(name, start):
                     continue
                 pending = {"lfdi": name, "start": start, "w_min": bucket.w_min}
                 pending["w_max"] = bucket.w_max
                 pending.update({col: getattr(bucket, col) for col in _COLUMNS})
                 stored = merged.get((name, start))
                 merged[(name, start)] = pending if stored is None else _add(stored, pending)
-        ordered = sorted(merged.values(), key=lambda r: (r["start"], r["lfdi"]))
-        return [self._present(row) for row in ordered[: max(1, limit)]]
+        return merged
+
+    def _at(self, starts: list[float], lfdi: str | None) -> list[dict[str, Any]]:
+        """Every interval starting at one of ``starts``, read in bounded batches.
+
+        Reads exactly the intervals a baseline compares, so a long history
+        cannot crowd the recent days out of a row limit.
+        """
+        wanted = set(starts)
+        rows: list[Any] = []
+        ordered = sorted(wanted)
+        for i in range(0, len(ordered), _BATCH):
+            batch = ordered[i : i + _BATCH]
+            params: list[Any] = [self.interval_seconds, *batch]
+            device_clause = ""
+            if lfdi is not None:
+                device_clause = " AND lfdi = ?"
+                params.append(lfdi.lower())
+            rows += self._db.query(
+                f"SELECT {_SELECT} FROM device_intervals WHERE seconds = ? "
+                f"AND start IN ({', '.join('?' * len(batch))}){device_clause}",
+                params,
+            )
+        merged = self._with_unfinished(
+            rows,
+            lambda name, start: (lfdi is None or name == lfdi.lower()) and start in wanted,
+        )
+        return [self._present(row) for row in merged.values()]
 
     def _present(self, row: Mapping[str, Any]) -> dict[str, Any]:
         covered = row["covered_seconds"]
@@ -345,7 +401,9 @@ class IntervalHistory:
             "varh_positive": row["vars_positive"] / 3600.0,
             "varh_negative": row["vars_negative"] / 3600.0,
             "w_avail_avg": row["avail_ws"] / avail_seconds if avail_seconds else None,
-            "wh_curtailed": row["curtailed_ws"] / 3600.0 if avail_seconds else None,
+            # Unknown, not zero, unless output was measured while available
+            # power was known.
+            "wh_curtailed": row["curtailed_ws"] / 3600.0 if row["curtail_seconds"] else None,
         }
 
     # The options of the baseline rule.
@@ -378,18 +436,26 @@ class IntervalHistory:
         or, when the window has no readings yet, those measured before it.
         ``delta_w`` is actual minus baseline, in the connector's sign.
         """
+        if not (math.isfinite(start) and math.isfinite(end)):
+            raise ValueError("start and end must be finite")
         if end <= start:
             raise ValueError("end must be after start")
+        if end - start > MAX_BASELINE_SECONDS:
+            raise ValueError(f"the window may be at most {MAX_BASELINE_SECONDS:.0f} seconds")
         if days < 1 or lookback_days < 1:
             raise ValueError("days and lookback_days must be at least 1")
         s = self.interval_seconds
         first = self._floor(start)
         slots = [first + i * s for i in range(math.ceil((end - first) / s))]
 
-        actual_rows = self.query(lfdi=lfdi, since=slots[0], until=slots[-1] + s)
-        history = self.query(
-            lfdi=lfdi, since=slots[0] - (lookback_days + 1) * 86400.0, until=slots[0]
-        )
+        first_day = datetime.fromtimestamp(slots[0], tz).date()
+        candidates = [
+            _same_local_time(slot, first_day - timedelta(days=back), tz, self._floor)
+            for back in range(1, lookback_days + 1)
+            for slot in slots
+        ]
+        actual_rows = self._at(slots, lfdi)
+        history = self._at(candidates, lfdi)
         # The devices measured in the window. A window not yet measured (an
         # upcoming event, or one that just started) takes the devices from
         # the comparison days, so its baseline can still be computed.
@@ -444,7 +510,10 @@ class IntervalHistory:
             if weekdays_only and day.weekday() >= 5:
                 continue
             day_start = datetime.combine(day, datetime.min.time(), tz).timestamp()
-            day_end = day_start + 86400.0
+            # The next local midnight: a day with a clock change is 23 or 25 hours.
+            day_end = datetime.combine(
+                day + timedelta(days=1), datetime.min.time(), tz
+            ).timestamp()
             if any(a < day_end and b > day_start for a, b in excluded):
                 continue
             power = measured.day([_same_local_time(slot, day, tz, self._floor) for slot in slots])
@@ -468,24 +537,29 @@ class _Measured:
         self.min_seconds = min_seconds
 
     def slot(self, slot: float) -> float | None:
-        """Summed average power for one slot, or None when a device has no value."""
+        """Summed average power for one slot.
+
+        None when any device is missing the slot or was measured for less than
+        the minimum: an interval measured for a minute is not a measured
+        interval.
+        """
         total = 0.0
         for device in self.devices:
             row = self.rows.get((device, slot))
-            if row is None or row["w_avg"] is None:
+            if row is None or row["w_avg"] is None or row["covered_seconds"] < self.min_seconds:
                 return None
             total += row["w_avg"]
         return total
 
     def day(self, slots: list[float]) -> list[float] | None:
         """Summed power per slot, or None when any slot is missing or too short."""
+        out = []
         for slot in slots:
-            for device in self.devices:
-                row = self.rows.get((device, slot))
-                if row is None or row["covered_seconds"] < self.min_seconds:
-                    return None
-        out = [self.slot(slot) for slot in slots]
-        return None if any(v is None for v in out) else [v for v in out if v is not None]
+            value = self.slot(slot)
+            if value is None:
+                return None
+            out.append(value)
+        return out
 
 
 def _compare(

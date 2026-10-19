@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -31,6 +32,8 @@ from py20305.config import ClientConfig
 from py20305.connectors.base import BaseConnector
 from py20305.connectors.dispatcher import ConnectorDispatcher
 from py20305.history import MEMORY, History, HistoryConfig, build_history
+from py20305.history import database as database_module
+from py20305.history import intervals as intervals_module
 from py20305.history.database import HistoryDatabase
 from py20305.history.events import EventHistory
 from py20305.history.intervals import IntervalHistory
@@ -439,8 +442,41 @@ class TestDatabaseFailures:
     def test_a_failed_write_is_counted_and_does_not_raise(self):
         database = HistoryDatabase(MEMORY)
 
-        assert database.write("missing", "INSERT INTO missing VALUES (?)", (1,)) is False
+        assert database.write("missing", "INSERT INTO missing VALUES (?)", (1,)) is True
+        database.drain()
+
         assert database.write_failures == {"missing": 1}
+
+    def test_a_write_returns_without_waiting_for_the_database(self):
+        history = _memory()
+        assert history.events is not None
+        database = history.database
+        # Hold the database the way a slow disk or another writer would.
+        database._lock.acquire()
+        try:
+            started = time.monotonic()
+            queued = history.events.record(_transition(HEX_1, None, "scheduled", T0, T0))
+            assert queued is True
+            assert time.monotonic() - started < 0.5, "the caller did not wait on the lock"
+        finally:
+            database._lock.release()
+
+        assert [r["event_mrid"] for r in history.events.records()] == [HEX_1]
+
+    def test_writes_beyond_the_queue_are_dropped_and_counted(self, monkeypatch):
+        monkeypatch.setattr(database_module, "MAX_PENDING_WRITES", 1)
+        database = HistoryDatabase(MEMORY)
+        database.register_table("t", "at", ["CREATE TABLE t (at REAL)"])
+        database._lock.acquire()
+        try:
+            now = time.time()
+            results = [database.write("t", "INSERT INTO t VALUES (?)", (now,)) for _ in range(4)]
+        finally:
+            database._lock.release()
+
+        assert results.count(False) >= 2, "one batch in the writer, one queued, the rest dropped"
+        assert database.dropped == {"t": results.count(False)}
+        assert database.count("t") == results.count(True)
 
     def test_a_closed_history_accepts_writes_without_storing_them(self):
         history = _memory()
@@ -820,3 +856,215 @@ class TestRunnerClosesTheHistory:
         assert history.events.record(_transition(HEX_1, None, "scheduled", T0, T0)) is False, (
             "the file is closed once the runner stops"
         )
+
+
+# -- Review fixes ------------------------------------------------------------------------
+
+
+class _Pacific2026(tzinfo):
+    """US Pacific time around the 2026-11-01 fall-back, without the zone database.
+
+    Local times before 01:00 on 2026-11-01 are daylight time (UTC-7); from then
+    on, standard time (UTC-8). So 2026-11-01 is a 25-hour local day.
+    """
+
+    _CHANGE = datetime(2026, 11, 1, 1, 0)
+
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        return timedelta(hours=-8) + self.dst(dt)
+
+    def dst(self, dt: datetime | None) -> timedelta:
+        assert dt is not None
+        return timedelta(hours=1) if dt.replace(tzinfo=None) < self._CHANGE else timedelta(0)
+
+    def tzname(self, dt: datetime | None) -> str:
+        return "PDT" if self.dst(dt) else "PST"
+
+
+class _Timebase:
+    """A server timebase running a fixed offset from the local clock."""
+
+    def __init__(self, offset: float) -> None:
+        self._offset = offset
+
+    def offset(self, fsa_href: str | None = None) -> float:
+        return self._offset
+
+    def now(self, fsa_href: str | None = None) -> float:
+        return time.time() + self._offset
+
+
+class TestReviewFixes:
+    def test_a_running_event_is_timed_on_the_server_timebase(self):
+        history = _memory()
+        assert history.events is not None
+        history.use_timebase(_Timebase(offset=600.0))  # type: ignore[arg-type]
+        server_now = time.time() + 600.0
+        history.events.record(_transition(HEX_1, None, "active", server_now - 300, server_now))
+
+        summary = history.events.event(HEX_1)
+
+        assert summary is not None
+        assert summary["ran_seconds"] == pytest.approx(300, abs=5)
+
+    def test_a_partial_supersession_does_not_restart_the_event(self):
+        history = _memory()
+        events = history.events
+        assert events is not None
+        events.record(
+            _transition(
+                HEX_1, "scheduled", "active", T0, T0,
+                applied_lfdis=[LFDI_1.hex()], rejected_lfdis=[LFDI_2.hex()],
+            )
+        )
+        events.record(
+            _transition(
+                HEX_1, "active", "active", T0 + 600, T0,
+                superseded_by="02" * 16, superseded_lfdis=[LFDI_1.hex()],
+            )
+        )
+
+        summary = events.event(HEX_1)
+
+        assert summary is not None
+        assert summary["active_at"] == T0
+        assert summary["applied_lfdis"] == [LFDI_1.hex()]
+        assert summary["rejected_lfdis"] == [LFDI_2.hex()]
+
+    def test_a_held_reading_sets_the_extremes_of_each_interval_it_is_held_in(self):
+        history = History.open(MEMORY, max_gap_seconds=2000)
+        assert history.intervals is not None
+        history.intervals.observe(DEV, T0 + 850, {"W": 1200})
+        history.intervals.observe(DEV, T0 + 950, {"W": 0})
+        history.intervals.observe(DEV, T0 + 2850, {"W": 0})
+
+        second = _interval(history, T0 + 900)
+        assert (second["w_min"], second["w_max"]) == (0, 1200)
+        crossed = _interval(history, T0 + 1800)
+        assert crossed["samples"] == 0
+        assert (crossed["w_min"], crossed["w_max"]) == (0, 0), "held through, never sampled"
+
+    def test_curtailment_is_unknown_when_output_was_not_measured(self):
+        history = _memory()
+        assert history.intervals is not None
+        history.intervals.observe_availability(DEV, T0, {"value": 2000, "multiplier": 0})
+        for t in range(0, 961, 60):
+            history.intervals.observe(DEV, T0 + t, {"Var": 0.0})
+
+        row = _interval(history, T0)
+        assert row["w_avail_avg"] == pytest.approx(2000.0)
+        assert row["wh_curtailed"] is None
+
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [(T0, T0 + 2 * DAY), (0.0, 1e12), (float("nan"), T0), (T0, float("inf"))],
+    )
+    def test_a_baseline_window_must_be_finite_and_at_most_a_day(self, start, end):
+        with pytest.raises(ValueError):
+            _memory().baseline(start, end)
+
+    def test_a_baseline_reads_its_comparison_days_in_batches(self, monkeypatch):
+        monkeypatch.setattr(intervals_module, "_BATCH", 3)
+        history = _memory()
+        assert history.intervals is not None
+        for back in range(21, 0, -1):
+            _feed(history.intervals, T0 - back * DAY, T0 - back * DAY + 900, 1000.0)
+        _feed(history.intervals, T0, T0 + 900, 400.0)
+
+        result = history.baseline(T0, T0 + 900)
+
+        assert len(result["days_used"]) == 10
+        assert result["days_used"][0] == "2026-10-13", "the most recent days, not the oldest"
+        assert result["slots"][0]["baseline_w"] == pytest.approx(1000.0)
+
+    def test_an_event_in_the_last_hour_of_a_25_hour_day_excludes_that_day(self):
+        tz = _Pacific2026()
+        history = _memory()
+        assert history.intervals is not None
+        noon = [datetime(2026, 10, d, 12, 0, tzinfo=tz).timestamp() for d in range(25, 32)]
+        noon.append(datetime(2026, 11, 1, 12, 0, tzinfo=tz).timestamp())
+        for start in noon:
+            _feed(history.intervals, start, start + 900, 1000.0)
+        event_day = datetime(2026, 11, 2, 12, 0, tzinfo=tz).timestamp()
+        late = datetime(2026, 11, 1, 23, 15, tzinfo=tz).timestamp()
+
+        result = history.intervals.baseline(
+            event_day,
+            event_day + 900,
+            lfdi=DEV,
+            days=1,
+            weekdays_only=False,
+            excluded=[(late, late + 1800)],
+            tz=tz,
+        )
+
+        assert result["days_used"] == ["2026-10-31"]
+
+    def test_a_window_interval_measured_too_briefly_has_no_actual_value(self):
+        history = _memory()
+        assert history.intervals is not None
+        for back in range(14, 0, -1):
+            _feed(history.intervals, T0 - back * DAY, T0 - back * DAY + 1800, 1000.0)
+        _feed(history.intervals, T0, T0 + 900, 400.0)
+        history.intervals.interrupt(DEV)
+        _feed(history.intervals, T0 + 900, T0 + 960, 400.0)
+
+        result = history.baseline(T0, T0 + 1800)
+
+        first, second = result["slots"]
+        assert first["actual_w"] == pytest.approx(400.0)
+        assert second["actual_w"] is None, "measured for 60 of 900 seconds"
+        assert result["actual_wh"] == pytest.approx(100.0), "only the measured interval counts"
+
+    @pytest.mark.asyncio
+    async def test_a_connector_that_cannot_be_resolved_ends_the_hold(self):
+        base = time.time()
+        times = iter([base, base + 120])
+        connector = AsyncMock(spec=BaseConnector)
+        connector.fetch_monitoring = AsyncMock(return_value={"W": 1000.0})
+        connector.fetch_status = AsyncMock(return_value={"alarmStatus": 0})
+        failing = {"now": False}
+
+        async def resolve(lfdi: str) -> BaseConnector:
+            if failing["now"]:
+                raise ConnectionError("serial line busy")
+            return connector
+
+        client = AsyncMock()
+        client.post_bytes = AsyncMock(return_value="/mup/1")
+        history = _memory()
+        manager = TelemetryManager(
+            client,
+            "/mup",
+            resolve,
+            source=DirectConnectorSource(resolve, clock=lambda: next(times)),
+            interval_history=history.intervals,
+        )
+        manager.start_metering(DEV, post_rate=300)
+
+        await manager._metering_cycle(DEV)
+        failing["now"] = True
+        await manager._metering_cycle(DEV)
+        failing["now"] = False
+        await manager._metering_cycle(DEV)
+        await manager.shutdown()
+
+        assert history.intervals is not None
+        rows = history.intervals.query(lfdi=DEV)
+        assert sum(r["samples"] for r in rows) == 2
+        assert sum(r["covered_seconds"] for r in rows) == 0, "the failure was not bridged"
+
+    def test_history_reads_run_off_the_event_loop(self):
+        seen: list[str] = []
+        history = _memory()
+        api = _api(history)
+        original = history.status
+
+        def status() -> dict[str, Any]:
+            seen.append(threading.current_thread().name)
+            return original()
+
+        history.status = status  # type: ignore[method-assign]
+
+        assert api.get("/api/v1/history").status_code == 200
+        assert seen and seen[0] != "MainThread"
