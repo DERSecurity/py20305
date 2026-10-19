@@ -299,7 +299,16 @@ class ConnectorDispatcher:
         *,
         origin: str = CommandOrigin.IEEE2030_5,
     ) -> None:
-        """Apply a DERControl's settings to a device."""
+        """Apply a DERControl's settings to a device.
+
+        Raises:
+            CommandNotPermittedError: the gate refused at least one mode, so the
+                device did not receive the control as sent. The event processor
+                reports the device as rejected rather than started (IEEE
+                2030.5-2023 Table 31). With a gate that answers the same for a
+                device and origin throughout, as :class:`CommandGate` requires,
+                no mode was written.
+        """
         connector = await self._resolve_connector(device_href)
         await self._apply_control_to_connector(
             connector,
@@ -318,7 +327,11 @@ class ConnectorDispatcher:
         *,
         origin: str = CommandOrigin.IEEE2030_5,
     ) -> None:
-        """Apply a DERControl directly to a device identified by LFDI."""
+        """Apply a DERControl directly to a device identified by LFDI.
+
+        Raises:
+            CommandNotPermittedError: as for :meth:`apply_control`.
+        """
         connector = await self._resolve_connector_by_lfdi(lfdi)
         await self._apply_control_to_connector(
             connector, derc, curves, lfdi=lfdi, device_href=None, origin=origin
@@ -355,11 +368,12 @@ class ConnectorDispatcher:
             for _method, p in translations:
                 p["ramp_tms"] = ramp_tms
 
+        refused: list[str] = []
         for method_name, params in translations:
             method, reason = self._control_support(connector, method_name)
             if method is not None:
                 logger.debug("  %s.%s(%s)", connector.connector_name, method_name, params)
-                await self._apply_one(
+                applied = await self._apply_one(
                     method,
                     method_name,
                     params,
@@ -369,6 +383,8 @@ class ConnectorDispatcher:
                     applied_mrid=derc_mrid,
                     cause_mrid=derc_mrid,
                 )
+                if not applied:
+                    refused.append(method_name.removeprefix("update_"))
             elif reason == BY_DESIGN:
                 # This connector has no register for the mode and never claimed
                 # one. Nothing an operator can do, so it does not belong in a
@@ -383,6 +399,15 @@ class ConnectorDispatcher:
                 self._report_unimplemented_mode(
                     connector, lfdi=lfdi, device_href=device_href, method_name=method_name
                 )
+        # Every mode is offered to the gate first, so each refused write is
+        # recorded. The event processor then reports the device as rejected:
+        # a status 2 (Active) would tell the server the device runs a control
+        # that was never written (IEEE 2030.5-2023 Table 31).
+        if refused:
+            raise CommandNotPermittedError(
+                f"{origin} may not command {label}: another interface holds the "
+                f"command role, so {', '.join(refused)} was not applied"
+            )
 
     async def _apply_one(
         self,
@@ -400,9 +425,9 @@ class ConnectorDispatcher:
         """Apply one translated mode and report it to the command observer.
 
         Returns True when the control reached the connector, False when the gate
-        refused it. A caller dispatching a server-issued control ignores the
-        result, since a refusal there is reported rather than raised; a caller
-        that named one control needs to tell the two apart.
+        refused it. The DERControl and named-control callers raise
+        ``CommandNotPermittedError`` on a refusal; the default-control and clear
+        callers report it and go on.
 
         Stamped before the call, like an acquisition: the write shadow compares
         this against when a readback *started*, so a command has to be marked at
@@ -438,10 +463,8 @@ class ConnectorDispatcher:
                     error=f"{origin} does not hold the command role for this device",
                     error_type="refused",
                 )
-                # Recorded as a write that did not happen: an event's activation
-                # still reports the device as started -- the refusal honors the
-                # configuration rather than failing the event -- so without this
-                # the trail would show a device as applied with nothing written.
+                # Recorded as a write that did not happen, so the trail shows the
+                # refusal beside the rejection the event processor reports.
                 if self._telemetry is not None:
                     self._telemetry.record_write(
                         label,

@@ -13,6 +13,7 @@ from py20305.events.modes_bitmask import build_modes_responded
 
 if TYPE_CHECKING:
     from py20305.client.http import Sep2Client
+from py20305.commands import CommandNotPermittedError
 from py20305.connectors.base import ConnectorValueError
 from py20305.connectors.control_errors import (
     DeviceNotConfiguredError,
@@ -113,11 +114,20 @@ def response_required_allows(response_required: bytes | None, code: ResponseCode
 #: connectors; ``InvalidControlValueError`` is the same condition arriving from a
 #: an out-of-process connector, and both must map to the same code.
 #:
+#: ``CommandNotPermittedError`` means the device takes its setpoints from
+#: another interface, so IEEE 2030.5 controls are not applicable to it as
+#: configured. It reports 252 (Not Applicable), the code for a control the device
+#: is not set up to take, as ``DeviceNotConfiguredError`` does. Table 31 has no
+#: code for a refusal by local configuration, and 251 (Not Supported) would say
+#: the device lacks the function. 4 (Opt-Out) is a user's choice about one
+#: event, not standing configuration about which interface commands the device.
+#:
 #: A rejection says the client cannot claim the event started, not that it
 #: gave up applying the control: a dispatch that merely outran the activation
 #: ceiling is left running and can still reach the device.
 _DISPATCH_ERROR_CODES: tuple[tuple[type[BaseException], ResponseCode], ...] = (
     (OptOutError, ResponseCode.OPT_OUT),
+    (CommandNotPermittedError, ResponseCode.NOT_APPLICABLE),
     (DeviceNotConfiguredError, ResponseCode.NOT_APPLICABLE),
     (ConnectorValueError, ResponseCode.INVALID),
     (InvalidControlValueError, ResponseCode.INVALID),
