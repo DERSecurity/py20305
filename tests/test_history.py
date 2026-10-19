@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 import time
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -1055,16 +1054,20 @@ class TestReviewFixes:
         assert sum(r["covered_seconds"] for r in rows) == 0, "the failure was not bridged"
 
     def test_history_reads_run_off_the_event_loop(self):
-        seen: list[str] = []
+        loops: list[bool] = []
         history = _memory()
         api = _api(history)
         original = history.status
 
         def status() -> dict[str, Any]:
-            seen.append(threading.current_thread().name)
+            try:
+                asyncio.get_running_loop()
+                loops.append(True)
+            except RuntimeError:
+                loops.append(False)
             return original()
 
         history.status = status  # type: ignore[method-assign]
 
         assert api.get("/api/v1/history").status_code == 200
-        assert seen and seen[0] != "MainThread"
+        assert loops == [False], "the read ran on a worker thread, not inside the event loop"
