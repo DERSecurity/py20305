@@ -37,6 +37,17 @@ from py20305.client.errors import (
 )
 from py20305.config import ClientConfig, ConfigError, LoggingConfig
 
+
+@pytest.fixture(autouse=True)
+def _working_directory_in_tmp(tmp_path, monkeypatch):
+    """Run in a scratch directory.
+
+    The runner keeps its operations history in the working directory by
+    default, and the tests here drive the runner.
+    """
+    monkeypatch.chdir(tmp_path)
+
+
 _CERT = """-----BEGIN CERTIFICATE-----
 MIIBIjCBygIUJ4Wl3xL4qk8jvmH5nHwq2m8Vd6owCgYIKoZIzj0EAwIwFDESMBAG
 A1UEAwwJdGVzdC1jZXJ0MB4XDTI2MDEwMTAwMDAwMFoXDTMwMDEwMTAwMDAwMFow

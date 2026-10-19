@@ -37,6 +37,7 @@ from py20305.events.state_machine import EventRecord, EventState, EventStore
 from py20305.events.supersession import compared_mode_keys, compute_supersession
 from py20305.events.timers import EventTimerManager
 from py20305.forwarders.audit import AuditEmitter
+from py20305.history.events import EventHistory
 from py20305.json_form import (
     serialize_default_der_control,
     serialize_der_control,
@@ -112,6 +113,26 @@ def _wire_mode_names(modes: Iterable[str]) -> list[str]:
     as every other identifier in its records is."""
     names = _wire_names()
     return sorted(names.get(mode, mode) for mode in modes)
+
+
+def _record_response(
+    history: EventHistory,
+    mrid: bytes,
+    code: ResponseCode,
+    lfdi: bytes,
+    at: int,
+    error: str | None,
+) -> None:
+    """Store one response POST in the event history."""
+    history.record_response(
+        event_mrid=mrid.hex().upper(),
+        lfdi=lfdi.hex(),
+        status=int(code),
+        status_name=code.name,
+        at=float(at),
+        posted=error is None,
+        error=error,
+    )
 
 
 class EventProcessor:
@@ -1187,6 +1208,14 @@ class EventProcessor:
             # classification see it unchanged. Its trail has left that state.
             from_state = "opted_out"
         try:
+            # The control itself rides on an event's first record, for the
+            # local history only: the history has to describe a control after
+            # the server stops serving it.
+            control = (
+                self._control_summary(record)
+                if from_state is None and self._audit.keeps_history
+                else None
+            )
             self._audit.event_transition(
                 event_mrid=record.mrid,
                 program_href=record.program_href,
@@ -1197,6 +1226,7 @@ class EventProcessor:
                 primacy=record.primacy,
                 lfdis=self._affected_lfdis_for_program(record.program_href),
                 at=self._timebase.now(self._fsa_scope(record.program_href)),
+                control=control,
                 **(details() if details is not None else {}),
             )
         except Exception:
@@ -1207,6 +1237,21 @@ class EventProcessor:
                 record.mrid.hex()[:8],
                 exc_info=True,
             )
+
+    def attach_event_history(self, history: EventHistory | None) -> None:
+        """Keep each response this processor posts, or fails to post, in ``history``."""
+        self._response_tracker.observer = (
+            None if history is None else partial(_record_response, history)
+        )
+
+    def _control_summary(self, record: EventRecord) -> dict[str, Any]:
+        """The control's description, settings and timing, and its program's name."""
+        program = self._state.der_programs.get(record.program_href)
+        return {
+            **serialize_der_control(record.derc),
+            "description": record.derc.description,
+            "program_description": program.program.description if program else None,
+        }
 
     def _audit_unstored(
         self,

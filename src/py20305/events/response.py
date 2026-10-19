@@ -6,6 +6,7 @@ import asyncio
 import enum
 import logging
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from py20305.events.modes_bitmask import build_modes_responded
@@ -215,6 +216,23 @@ class ResponseTracker:
         #: resolved with whether that POST landed. Held apart from ``_sent`` so
         #: an age prune cannot evict a response still in flight.
         self._in_flight: dict[tuple[bytes, ResponseCode, bytes], asyncio.Future[bool]] = {}
+        #: Told about each response once its POST has returned or failed, as
+        #: ``(mrid, code, lfdi, at, error)``, with ``error`` None on success.
+        #: The operations history listens here; None when nothing does.
+        self.observer: (
+            Callable[[bytes, ResponseCode, bytes, int, str | None], None] | None
+        ) = None
+
+    def notify(
+        self, mrid: bytes, code: ResponseCode, lfdi: bytes, at: int, error: str | None = None
+    ) -> None:
+        """Tell the observer how one POST ended. Never raises."""
+        if self.observer is None:
+            return
+        try:
+            self.observer(mrid, code, lfdi, at, error)
+        except Exception:
+            logger.debug("Response observer failed for mrid=%s", mrid.hex()[:8], exc_info=True)
 
     def already_sent(self, mrid: bytes, code: ResponseCode, lfdi: bytes) -> bool:
         """True if this response was sent, or is being sent right now.
@@ -363,6 +381,7 @@ async def post_der_response(
         await http.post(path, response)
         tracker.mark_sent(mrid, code, lfdi, now_ts)
         sent = True
+        tracker.notify(mrid, code, lfdi, now_ts)
         logger.info(
             "Response posted: mrid=%s lfdi=%s %s -> %s",
             mrid.hex()[:8],
@@ -370,9 +389,12 @@ async def post_der_response(
             code.name,
             path,
         )
-    except Exception:
+    except Exception as exc:
         logger.warning(
             "Failed to post response mrid=%s code=%s", mrid.hex()[:8], code.name, exc_info=True
+        )
+        tracker.notify(
+            mrid, code, lfdi, int(time.time()) if now_ts is None else now_ts, error=str(exc)
         )
     finally:
         # In `finally`, not in the `except`: cancellation raises

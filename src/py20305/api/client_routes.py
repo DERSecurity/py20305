@@ -226,6 +226,106 @@ def create_client_router(
             return {"responses": {}}
         return service.get_responses()
 
+    # -----------------------------------------------------------------
+    # Operations history
+    # -----------------------------------------------------------------
+
+    @router.get("/history")
+    async def get_history_status() -> dict[str, Any]:
+        """Return which parts of the operations history are on, and their size."""
+        service = service_getter()
+        return {"enabled": False} if service is None else service.get_history_status()
+
+    @router.get("/history/events")
+    async def get_history_events(
+        since: float | None = Query(None, description="Epoch seconds; window start."),
+        until: float | None = Query(None, description="Epoch seconds; window end."),
+        program_href: str | None = Query(None, description="Only this DERProgram."),
+        limit: int = Query(500, ge=1, le=10000),
+    ) -> dict[str, Any]:
+        """Return one summary per event whose time under control overlaps the window."""
+        service = service_getter()
+        if service is None:
+            return {"enabled": False, "events": []}
+        return service.get_history_events(
+            since=since, until=until, program_href=program_href, limit=limit
+        )
+
+    @router.get("/history/events/{event_mrid}", response_model=None)
+    async def get_history_event(event_mrid: str) -> dict[str, Any] | JSONResponse:
+        """Return an event's summary, audit records, responses and device writes."""
+        service = service_getter()
+        if service is None:
+            return {"enabled": False}
+        body = service.get_history_event(event_mrid)
+        if body is None:
+            return JSONResponse(status_code=404, content={"detail": "No history for this event"})
+        return body
+
+    @router.get("/history/writes")
+    async def get_history_writes(
+        event_mrid: str | None = Query(None, description="Writes this event applied or caused."),
+        lfdi: str | None = Query(None),
+        control: str | None = Query(None, description="Connector operation, e.g. p_lim."),
+        since: float | None = Query(None),
+        until: float | None = Query(None),
+        limit: int = Query(1000, ge=1, le=100000),
+    ) -> dict[str, Any]:
+        """Return device writes, oldest first."""
+        service = service_getter()
+        if service is None:
+            return {"enabled": False, "writes": []}
+        return service.get_history_writes(
+            event_mrid=event_mrid,
+            lfdi=lfdi,
+            control=control,
+            since=since,
+            until=until,
+            limit=limit,
+        )
+
+    @router.get("/history/intervals")
+    async def get_history_intervals(
+        lfdi: str | None = Query(None),
+        since: float | None = Query(None),
+        until: float | None = Query(None),
+        limit: int = Query(10000, ge=1, le=100000),
+    ) -> dict[str, Any]:
+        """Return measured intervals, oldest first."""
+        service = service_getter()
+        if service is None:
+            return {"enabled": False, "intervals": []}
+        return service.get_history_intervals(lfdi=lfdi, since=since, until=until, limit=limit)
+
+    @router.get("/history/baseline", response_model=None)
+    async def get_history_baseline(
+        start: float = Query(..., description="Epoch seconds; start of the window."),
+        end: float = Query(..., description="Epoch seconds; end of the window."),
+        lfdi: str | None = Query(None, description="One device; omitted sums all devices."),
+        days: int = Query(10, ge=1, le=60),
+        lookback_days: int = Query(45, ge=1, le=400),
+        weekdays_only: bool = Query(True),
+        tz: str | None = Query(
+            None, description="IANA zone for local days, e.g. America/Los_Angeles."
+        ),
+    ) -> dict[str, Any] | JSONResponse:
+        """Return a comparison-day baseline for a window, with event days left out."""
+        service = service_getter()
+        if service is None:
+            return {"enabled": False}
+        try:
+            return service.get_history_baseline(
+                start,
+                end,
+                lfdi=lfdi,
+                days=days,
+                lookback_days=lookback_days,
+                weekdays_only=weekdays_only,
+                tz=tz,
+            )
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"detail": str(exc)})
+
     @router.get("/tariffs")
     async def get_tariffs() -> dict[str, Any]:
         """Return discovered Pricing tariff profiles with per-interval prices."""

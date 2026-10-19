@@ -28,6 +28,17 @@ from py20305.forwarders.config import DeviceTelemetryConfig
 from py20305.forwarders.mqtt_forwarder import PROTOCOL_MESSAGE_TOPIC_SUFFIX
 from py20305.readings import DirectConnectorSource
 
+
+@pytest.fixture(autouse=True)
+def _working_directory_in_tmp(tmp_path, monkeypatch):
+    """Run in a scratch directory.
+
+    The runner keeps its operations history in the working directory by
+    default, and the tests here drive the runner.
+    """
+    monkeypatch.chdir(tmp_path)
+
+
 LFDI_A = "a" * 40
 
 

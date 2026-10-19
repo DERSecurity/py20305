@@ -11,7 +11,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from py20305.commands import (
     AllowAllCommands,
@@ -34,6 +34,9 @@ from py20305.models.sep.sep import (
     Dercontrol1,
     Dercurve1,
 )
+
+if TYPE_CHECKING:
+    from py20305.history.writes import WriteHistory
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +146,7 @@ class ConnectorDispatcher:
         command_observer: CommandObserver | None = None,
         command_gate: CommandGate | None = None,
         telemetry: DeviceTelemetryEmitter | None = None,
+        write_history: WriteHistory | None = None,
     ) -> None:
         """
         Args:
@@ -155,6 +159,8 @@ class ConnectorDispatcher:
                 exactly as before and nothing is recorded.
             telemetry: Reports each applied control to the monitoring system.
                 Optional and disabled by default.
+            write_history: Keeps each write, with the mRIDs that caused it, in
+                the operations history. Optional; can also be attached later.
         """
         self._registry = registry
         self._lfdi_resolver = lfdi_resolver
@@ -164,6 +170,7 @@ class ConnectorDispatcher:
         self._gate = AllowAllCommands() if command_gate is None else command_gate
         self._commands = NullCommandObserver() if command_observer is None else command_observer
         self._telemetry = telemetry
+        self._write_history = write_history
         # Devices already reported as having no connector. A server can list a
         # device this process has no connector for, and every control aimed at
         # it reaches the lookup below, so without this the same warning is
@@ -179,6 +186,45 @@ class ConnectorDispatcher:
         one configuration behind them.
         """
         return self._telemetry
+
+    def attach_write_history(self, history: WriteHistory | None) -> None:
+        """Keep every write this dispatcher issues in ``history``, or stop with None."""
+        self._write_history = history
+
+    def _keep_write(
+        self,
+        label: str,
+        control: str,
+        params: dict[str, Any],
+        *,
+        outcome: str,
+        at: float,
+        lfdi: str | None,
+        origin: str,
+        applied_mrid: bytes | None,
+        cause_mrid: bytes | None,
+        error: str | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        """Store one write in the history, when one is attached. Never raises."""
+        if self._write_history is None:
+            return
+        try:
+            self._write_history.record(
+                label,
+                control,
+                params,
+                outcome=outcome,
+                at=at,
+                lfdi=lfdi,
+                origin=origin,
+                applied_mrid=applied_mrid,
+                cause_mrid=cause_mrid,
+                error=error,
+                error_type=error_type,
+            )
+        except Exception:
+            logger.debug("Write history failed for %s on %s", control, label, exc_info=True)
 
     @property
     def registry(self) -> ConnectorConfigRegistry:
@@ -379,6 +425,19 @@ class ConnectorDispatcher:
         if lfdi:
             if not self._gate.may_command(lfdi, origin):
                 self._report_not_commanding(lfdi, control, origin)
+                self._keep_write(
+                    label,
+                    control,
+                    params,
+                    outcome="refused",
+                    at=time.time(),
+                    lfdi=lfdi,
+                    origin=origin,
+                    applied_mrid=applied_mrid,
+                    cause_mrid=cause_mrid,
+                    error=f"{origin} does not hold the command role for this device",
+                    error_type="refused",
+                )
                 # Recorded as a write that did not happen: an event's activation
                 # still reports the device as started -- the refusal honors the
                 # configuration rather than failing the event -- so without this
@@ -419,6 +478,19 @@ class ConnectorDispatcher:
         try:
             await method(params)
         except Exception as exc:
+            self._keep_write(
+                label,
+                control,
+                params,
+                outcome="failed",
+                at=issued_at,
+                lfdi=lfdi,
+                origin=origin,
+                applied_mrid=applied_mrid,
+                cause_mrid=cause_mrid,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
             if lfdi:
                 self._commands.record_command(
                     lfdi, control, params, origin=origin, at=issued_at, error=str(exc)
@@ -439,6 +511,17 @@ class ConnectorDispatcher:
                     cause_mrid=cause_mrid,
                 )
             raise
+        self._keep_write(
+            label,
+            control,
+            params,
+            outcome="applied",
+            at=issued_at,
+            lfdi=lfdi,
+            origin=origin,
+            applied_mrid=applied_mrid,
+            cause_mrid=cause_mrid,
+        )
         if self._telemetry is not None:
             self._telemetry.record_write(
                 label,

@@ -9,7 +9,7 @@ import math
 import time
 from collections.abc import Awaitable, Callable
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from py20305.client.discovery import (
     _extract_href,
@@ -52,6 +52,9 @@ from py20305.subscription.notification_server import (
     STATUS_RESOURCE_MOVED,
     NotificationServer,
 )
+
+if TYPE_CHECKING:
+    from py20305.history import History
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +234,7 @@ class CsipClient:
         #: Audit trail for event lifecycle and loss-of-communications records.
         #: Disabled until the host attaches a forwarder and configures it.
         self._audit = AuditEmitter()
+        self._history: History | None = None
         #: Whether the current comms-loss episode was a simulation, so the
         #: clear record attributes it the same way the entry record did.
         self._comms_loss_simulated = False
@@ -286,6 +290,25 @@ class CsipClient:
     def audit(self) -> AuditEmitter:
         """The audit trail emitter. Attach a forwarder and configure it to enable."""
         return self._audit
+
+    @property
+    def history(self) -> History | None:
+        """The operations history attached to this client, if any."""
+        return self._history
+
+    def attach_history(self, history: History | None) -> None:
+        """Keep this client's event lifecycle and posted responses in ``history``.
+
+        Only the event part is fed from here. The dispatcher feeds the write
+        part and the telemetry manager the interval part; hand those parts to
+        them. Device writes are put on this client's server timebase.
+        """
+        self._history = history
+        events = history.events if history is not None else None
+        self._audit.attach_history(events)
+        self._event_processor.attach_event_history(events)
+        if history is not None:
+            history.use_timebase(self._timebase)
 
     @property
     def subscription_manager(self) -> SubscriptionManager | None:
