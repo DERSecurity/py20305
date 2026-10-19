@@ -256,10 +256,12 @@ class ConnectorDispatcher:
         """Apply a DERControl's settings to a device.
 
         Raises:
-            CommandNotPermittedError: a gate refused this origin authority over
-                the device, so no mode was written. The event processor reports
-                the device as rejected rather than started (IEEE 2030.5-2023
-                Table 31).
+            CommandNotPermittedError: the gate refused at least one mode, so the
+                device did not receive the control as sent. The event processor
+                reports the device as rejected rather than started (IEEE
+                2030.5-2023 Table 31). With a gate that answers the same for a
+                device and origin throughout, as :class:`CommandGate` requires,
+                no mode was written.
         """
         connector = await self._resolve_connector(device_href)
         await self._apply_control_to_connector(

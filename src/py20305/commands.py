@@ -182,6 +182,11 @@ class CommandGate(Protocol):
         looking like any other. An implementation that answers only for the
         origins it knows, and refuses the rest, is what makes that a refused
         write. One that permits by default makes it a command.
+
+        Answer the same for the same device and origin while one control is
+        being applied. The dispatcher asks once per mode, so a gate whose
+        answer changes partway through can let some modes reach the device
+        while the server is told the control was rejected.
         """
         ...
 

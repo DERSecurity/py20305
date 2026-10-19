@@ -252,6 +252,11 @@ every origin may command everything, which is right for a single-interface
 consumer. That includes an origin nothing claims, so with no gate a mistyped
 name commands like a correct one.
 
+The dispatcher asks once per mode of a control, so a gate must give the same
+answer for a device and origin while one control is applied. A gate whose answer
+changes partway through can let some modes reach the device while the server is
+told the control was rejected.
+
 A refused *server-issued* control is reported through `diagnostics`, and
 `apply_control` and `apply_control_by_lfdi` raise `CommandNotPermittedError`
 once every mode has been offered to the gate. The event processor answers the
