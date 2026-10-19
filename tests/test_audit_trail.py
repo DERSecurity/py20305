@@ -27,6 +27,7 @@ from py20305.connectors.print_demo import PrintDemoConnector
 from py20305.events import processor as processor_mod
 from py20305.events.comms_loss import CommsLossState
 from py20305.events.processor import EventProcessor
+from py20305.events.response import ResponseCode
 from py20305.events.state_machine import EventState
 from py20305.forwarders.audit import AuditEmitter, AuditSequence, mrid_hex
 from py20305.forwarders.base import EventFrame
@@ -470,8 +471,7 @@ class TestWritesNameTheirCause:
 
     @pytest.mark.asyncio
     async def test_a_gate_refusal_is_a_write_record_that_did_not_happen(self):
-        """The event still reports the device as started -- the refusal honors the
-        configuration -- so the trail needs the refusal itself."""
+        """The trail keeps the refused write beside the rejection the server is sent."""
 
         class Deny:
             def may_command(self, lfdi, origin):
@@ -488,7 +488,30 @@ class TestWritesNameTheirCause:
         assert write["applied_mrid"] == write["cause_mrid"] == HEX_1
         assert site.connectors[LFDI_1.hex()].last_control == {}, "nothing was written"
         active = site.forwarder.audit_records("der_event")[-1]
-        assert active["applied_lfdis"] == [LFDI_1.hex()], "what the server was told"
+        assert active["applied_lfdis"] == []
+        assert active["rejected_lfdis"] == [LFDI_1.hex()], "what the server was told"
+        await site.processor.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_gate_refusal_is_reported_as_not_applicable_not_active(self):
+        """IEEE 2030.5-2023 Table 31: status 2 says the event started on the device,
+        which a refused write did not do. 252 says the control does not apply to the
+        device as configured."""
+
+        class Deny:
+            def may_command(self, lfdi, origin):
+                return False
+
+        now = int(time.time())
+        site = Site(_state([_derc(0x01, start=now - 10)]), gate=Deny())
+
+        await site.processor.process_controls("/derp/1")
+
+        statuses = [call.args[1].status for call in site.http.post.call_args_list]
+        assert ResponseCode.NOT_APPLICABLE in statuses
+        assert ResponseCode.ACTIVE not in statuses
+        record = site.processor._store.get(b"\x01" * 16)
+        assert record is not None and record.rejected_devices == {"/edev/1"}
         await site.processor.shutdown()
 
     @pytest.mark.asyncio

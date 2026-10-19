@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from py20305.client.errors import Sep2ConnectionError
+from py20305.commands import CommandNotPermittedError
 from py20305.connectors.base import ConnectorValueError
 from py20305.connectors.control_errors import (
     DeviceNotConfiguredError,
@@ -386,6 +387,7 @@ class TestDispatchErrorMapping:
         ("exc", "expected"),
         [
             (DeviceNotConfiguredError("nope"), ResponseCode.NOT_APPLICABLE),
+            (CommandNotPermittedError("another interface"), ResponseCode.NOT_APPLICABLE),
             (ModeNotSupportedError("nope"), ResponseCode.NOT_SUPPORTED),
             (DeviceOfflinePermanentError("nope"), ResponseCode.NOT_SUPPORTED),
             (DeviceOfflineTransientError("nope"), ResponseCode.NOT_SUPPORTED),

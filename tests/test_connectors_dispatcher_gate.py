@@ -24,6 +24,15 @@ from py20305.commands import CommandNotPermittedError, CommandOrigin
 from py20305.connectors.base import BaseConnector
 from py20305.connectors.dispatcher import BY_DESIGN, OFFER_MISSING, ConnectorDispatcher
 from py20305.connectors.errors import ConnectorError
+from py20305.models.sep.sep import (
+    DateTimeInterval,
+    Dercontrol1,
+    DercontrolBase,
+    EventStatus,
+    MRidtype,
+    SignedPerCentControlType,
+    TimeType,
+)
 
 LFDI = "deafbeefdeafbeefdeafbeefdeafbeefdeafbeef"
 
@@ -78,6 +87,19 @@ class _InheritsEverything(BaseConnector):
 
     def __init__(self) -> None:
         pass
+
+
+def _fixed_w_control() -> Dercontrol1:
+    """A DERControl that translates to one ``update_fixed_w`` write."""
+    return Dercontrol1(
+        m_rid=MRidtype(value=b"\x01" * 16),
+        creation_time=TimeType(value=900),
+        event_status=EventStatus(
+            current_status=0, date_time=TimeType(value=1000), potentially_superseded=False
+        ),
+        interval=DateTimeInterval(duration=600, start=TimeType(value=1000)),
+        dercontrol_base=DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500)),
+    )
 
 
 def _dispatcher(connector: BaseConnector, gate=None) -> ConnectorDispatcher:
@@ -170,10 +192,22 @@ class TestCommandGate:
         assert (LFDI, REGISTER_SERVER) in gate.asked
 
     @pytest.mark.asyncio
-    async def test_a_refused_server_control_is_dropped_not_raised(self) -> None:
-        """The other half of the contract: an interface posting to a device
-        another one commands is a configuration being honored, so the event
-        engine is not handed an exception to interpret."""
+    async def test_a_refused_server_control_raises_so_the_event_is_rejected(self) -> None:
+        """The event processor answers a raised refusal with a rejection. Returning
+        quietly would have it tell the server the event started on the device."""
+        connector = _Implements()
+        gate = _Gate(CommandOrigin.IEEE2030_5)
+        dispatcher = _dispatcher(connector, gate)
+
+        with pytest.raises(CommandNotPermittedError, match="fixed_w"):
+            await dispatcher.apply_control_by_lfdi(LFDI, _fixed_w_control(), [])
+
+        assert connector.seen == []
+        assert gate.asked == [(LFDI, CommandOrigin.IEEE2030_5)]
+
+    @pytest.mark.asyncio
+    async def test_a_refused_clear_is_dropped_not_raised(self) -> None:
+        """A clear sends no response, so there is no caller to hand the refusal to."""
         connector = _Implements()
         dispatcher = _dispatcher(connector, _Gate(CommandOrigin.COMMS_LOSS))
 

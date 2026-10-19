@@ -215,8 +215,9 @@ class CommandNotPermittedError(Exception):
     distinction to answer that client honestly -- refused is not the same answer
     as failed.
 
-    Raised only by the entry points whose caller has somewhere to put it. A
-    control arriving from an event engine is reported and dropped instead, since
-    an interface posting to a device another one commands is a configuration
-    being honored rather than a fault.
+    Raised by the entry points whose caller has somewhere to put it: a named
+    control, and a DERControl applied for an event, which the event processor
+    reports to the server as a rejection (IEEE 2030.5-2023 Table 31, status 252).
+    A default control and a clear are reported and dropped instead, since they
+    send no response.
     """

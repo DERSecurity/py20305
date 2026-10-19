@@ -226,11 +226,10 @@ Deny an origin your gate does not recognize. A new write path should have to say
 who owns it, and a mistyped name then fails closed where it would otherwise
 command.
 
-Unlike a server-issued control, a refusal here raises
-`CommandNotPermittedError`. This caller named one control and has somewhere to
-put the answer -- a protocol server owes its own client the difference between a
-write that failed and one that was not permitted, and cannot report either from
-silence.
+A refusal here raises `CommandNotPermittedError`. This caller named one control
+and has somewhere to put the answer -- a protocol server owes its own client the
+difference between a write that failed and one that was not permitted, and
+cannot report either from silence.
 
 ### Who may command
 
@@ -253,11 +252,20 @@ every origin may command everything, which is right for a single-interface
 consumer. That includes an origin nothing claims, so with no gate a mistyped
 name commands like a correct one.
 
-A refused *server-issued* control is reported through `diagnostics` and dropped
-rather than raised: an interface posting to a device another one commands is a
-configuration being honored, not a fault, and raising would make every such
-control an error for the event engine to interpret. Nothing is recorded for it
-either, because a command that never left must not appear in the audit trail.
+A refused *server-issued* control is reported through `diagnostics`, and
+`apply_control` and `apply_control_by_lfdi` raise `CommandNotPermittedError`
+once every mode has been offered to the gate. The event processor answers the
+server with status 252 (Not Applicable) for that device instead of status 2
+(Active), and leaves the device out of the event's Completed response (IEEE
+2030.5-2023 Table 31). Status 2 would tell the server the event runs on a device
+that was never written. Table 31 has no code for a refusal by local
+configuration; 252 is the code for a control the device is not set up to take,
+the same code a `DeviceNotConfiguredError` gets. A server on IEEE 2030.5-2018
+receives 252 unchanged.
+
+A refused default control or clear is reported and dropped, since neither sends
+a response. In every case nothing is recorded as a command, because a command
+that never left must not appear in the audit trail.
 
 One case is deliberately ungated. Authority is held per device, so a control the
 resolver cannot name a device for has no rule to apply -- an href that resolves
