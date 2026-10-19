@@ -315,8 +315,10 @@ mRIDs are uppercase hex, the form the `mRID` element takes on the wire. A
 rejected write also carries `error_type`, the exception's class name, in its
 body beside `error`. A write the command gate refused, because another
 interface holds the command role for the device, is recorded too, with
-`error_type: refused` and `is_valid: false`; nothing reached the device, and the
-server is sent a rejection for the event (see the command gate in
+`error_type: refused` and `is_valid: false`; nothing reached the device. For a
+server-issued DERControl event, the server is also sent a rejection (status
+252) for that device. A refused default control, clear or named operation sends
+no response, so its write record is the only trace (see the command gate in
 [Connectors](connectors.md)). These
 fields sit in `protocol_data.extra` rather than in the body because the body
 travels as one string, and a search index can only query the fields of the

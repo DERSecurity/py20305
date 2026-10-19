@@ -264,8 +264,10 @@ the same code a `DeviceNotConfiguredError` gets. A server on IEEE 2030.5-2018
 receives 252 unchanged.
 
 A refused default control or clear is reported and dropped, since neither sends
-a response. In every case nothing is recorded as a command, because a command
-that never left must not appear in the audit trail.
+a response. In every case the command observer records nothing, because a
+command that never left must not appear in the device's commanded state. The
+refusal is still kept: the audit trail records it as a write with
+`error_type: refused` (see [Forwarding traffic](forwarding.md)).
 
 One case is deliberately ungated. Authority is held per device, so a control the
 resolver cannot name a device for has no rule to apply -- an href that resolves

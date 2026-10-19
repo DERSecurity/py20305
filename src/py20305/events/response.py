@@ -118,7 +118,8 @@ def response_required_allows(response_required: bytes | None, code: ResponseCode
 #: configured. It reports 252 (Not Applicable), the code for a control the device
 #: is not set up to take, as ``DeviceNotConfiguredError`` does. Table 31 has no
 #: code for a refusal by local configuration, and 251 (Not Supported) would say
-#: the device lacks the function.
+#: the device lacks the function. 4 (Opt-Out) is a user's choice about one
+#: event, not standing configuration about which interface commands the device.
 #:
 #: A rejection says the client cannot claim the event started, not that it
 #: gave up applying the control: a dispatch that merely outran the activation
