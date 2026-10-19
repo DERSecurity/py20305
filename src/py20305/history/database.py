@@ -124,9 +124,14 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
         return True
 
     def drain(self) -> None:
-        """Wait until every queued write has been run."""
-        if self._writer.is_alive():
-            self._queue.join()
+        """Wait until every queued write has been run.
+
+        Stops waiting if the writer thread is gone, so a read can never hang
+        on writes nothing will run.
+        """
+        with self._queue.all_tasks_done:
+            while self._queue.unfinished_tasks and self._writer.is_alive():
+                self._queue.all_tasks_done.wait(0.1)
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         """Run one read statement, after the writes queued before it."""
@@ -157,15 +162,26 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
         if self._closed:
             return
         self._closed = True
-        self._queue.put(None)
+        # Bounded, like the join: a writer that is gone leaves a full queue
+        # nothing drains, and shutdown must not wait on it.
+        try:
+            self._queue.put(None, timeout=CLOSE_TIMEOUT_SECONDS)
+        except queue.Full:
+            logger.warning("History writer is not draining its queue; closing without it")
         self._writer.join(timeout=CLOSE_TIMEOUT_SECONDS)
         if self._writer.is_alive():
             logger.warning("History writer did not finish within %.0f s", CLOSE_TIMEOUT_SECONDS)
+            return
         with self._lock:
             self._conn.close()
 
     def _write_queued(self) -> None:
-        """The writer thread: run each queued batch until close() queues None."""
+        """The writer thread: run each queued batch until close() queues None.
+
+        Nothing a batch raises ends the thread. A writer that died would leave
+        the queue to fill and every later write to be dropped, with nothing
+        saying why.
+        """
         while True:
             item = self._queue.get()
             try:
@@ -177,11 +193,11 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
                         self._conn.execute("BEGIN")
                         self._conn.executemany(sql, rows)
                         self._conn.execute("COMMIT")
-                    except sqlite3.Error:
+                        self._prune_if_due()
+                    # Any error, not only sqlite3.Error: see the docstring.
+                    except Exception:  # pylint: disable=broad-exception-caught
                         self._rollback()
                         self._failed(table)
-                    else:
-                        self._prune_if_due()
             finally:
                 self._queue.task_done()
 

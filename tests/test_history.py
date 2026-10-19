@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -461,6 +462,43 @@ class TestDatabaseFailures:
             database._lock.release()
 
         assert [r["event_mrid"] for r in history.events.records()] == [HEX_1]
+
+    def test_the_writer_survives_a_batch_that_raises_something_unexpected(self):
+        calls = {"n": 0}
+
+        def clock() -> float:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("clock unavailable")
+            return time.time()
+
+        database = HistoryDatabase(MEMORY, clock=clock)
+        database.register_table("t", "at", ["CREATE TABLE t (at REAL)"])
+        database.write("t", "INSERT INTO t VALUES (?)", (time.time(),))
+        database.write("t", "INSERT INTO t VALUES (?)", (time.time(),))
+        database.drain()
+
+        assert database._writer.is_alive()
+        assert database.write_failures == {"t": 1}
+        assert database.count("t") == 2, "the committed batch stays and the next one is written"
+        database.close()
+
+    def test_close_returns_when_the_writer_is_gone_and_the_queue_is_full(self, monkeypatch):
+        monkeypatch.setattr(database_module, "MAX_PENDING_WRITES", 2)
+        monkeypatch.setattr(database_module, "CLOSE_TIMEOUT_SECONDS", 0.2)
+        database = HistoryDatabase(MEMORY)
+        database.register_table("t", "at", ["CREATE TABLE t (at REAL)"])
+        database._queue.put(None)  # stop the writer, as a dead one would be
+        database._writer.join(timeout=5)
+        for _ in range(3):
+            database.write("t", "INSERT INTO t VALUES (?)", (time.time(),))
+
+        closer = threading.Thread(target=database.close, daemon=True)
+        closer.start()
+        closer.join(timeout=5)
+
+        assert not closer.is_alive(), "close() returned"
+        assert database.query("SELECT 1") == [], "a read after close does not hang"
 
     def test_writes_beyond_the_queue_are_dropped_and_counted(self, monkeypatch):
         monkeypatch.setattr(database_module, "MAX_PENDING_WRITES", 1)
@@ -1053,21 +1091,34 @@ class TestReviewFixes:
         assert sum(r["samples"] for r in rows) == 2
         assert sum(r["covered_seconds"] for r in rows) == 0, "the failure was not bridged"
 
-    def test_history_reads_run_off_the_event_loop(self):
+    @pytest.mark.parametrize(
+        ("path", "params", "part", "method"),
+        [
+            ("/api/v1/history", {}, None, "status"),
+            ("/api/v1/history/events", {}, "events", "events"),
+            (f"/api/v1/history/events/{HEX_1}", {}, "events", "event"),
+            ("/api/v1/history/writes", {}, "writes", "query"),
+            ("/api/v1/history/intervals", {}, "intervals", "query"),
+            ("/api/v1/history/baseline", {"start": T0, "end": T0 + 900}, None, "baseline"),
+        ],
+    )
+    def test_every_history_read_runs_off_the_event_loop(self, path, params, part, method):
         loops: list[bool] = []
         history = _memory()
-        api = _api(history)
-        original = history.status
+        assert history.events is not None
+        history.events.record(_transition(HEX_1, None, "active", T0, T0))
+        target = history if part is None else getattr(history, part)
+        original = getattr(target, method)
 
-        def status() -> dict[str, Any]:
+        def recording(*args: Any, **kwargs: Any) -> Any:
             try:
                 asyncio.get_running_loop()
                 loops.append(True)
             except RuntimeError:
                 loops.append(False)
-            return original()
+            return original(*args, **kwargs)
 
-        history.status = status  # type: ignore[method-assign]
+        setattr(target, method, recording)
 
-        assert api.get("/api/v1/history").status_code == 200
+        assert _api(history).get(path, params=params).status_code == 200
         assert loops == [False], "the read ran on a worker thread, not inside the event loop"
