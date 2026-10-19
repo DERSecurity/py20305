@@ -1,7 +1,7 @@
 """Event history: what this client did with each control it was sent.
 
-The audit trail already describes every lifecycle decision -- scheduled, active
-with which devices, and how it ended -- but it only publishes them, and the
+The audit trail already describes every lifecycle decision (scheduled, active
+with which devices, and how it ended), but it only publishes them, and the
 in-memory event store forgets an event a minute after it ends. This part keeps
 the same records on disk, together with every DERControlResponse this client
 posted, so "which programs ran, for how long and on which devices" can be
@@ -116,7 +116,8 @@ class EventHistory:
             return False
         return self._db.write("event_records", _INSERT_RECORD, row)
 
-    def record_response(
+    # One keyword per stored column.
+    def record_response(  # pylint: disable=too-many-arguments
         self,
         *,
         event_mrid: str,
@@ -252,7 +253,8 @@ class EventHistory:
         ]
 
 
-def summarize(
+# One local per summary field.
+def summarize(  # pylint: disable=too-many-locals
     trail: list[dict[str, Any]], responses: list[dict[str, Any]], *, now: float
 ) -> dict[str, Any]:
     """Fold one event's audit records, oldest first, into a summary."""

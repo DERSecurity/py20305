@@ -243,6 +243,20 @@ api:
 
 Needs the `api` extra. See [Management API](api.md).
 
+## The operations history
+
+On by default. The client keeps every event's lifecycle and responses, every
+device write, and each device's readings in 15-minute intervals, in
+`py20305-history.sqlite3` in the working directory. Each part can be switched
+off, or all of it:
+
+```yaml
+history:
+  enabled: false
+```
+
+See [Operations history](history.md).
+
 ## Logging
 
 Always to stderr, which is what journald and `docker logs` collect. Add a file

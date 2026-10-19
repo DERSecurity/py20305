@@ -1,8 +1,8 @@
 """Interval history: what each device measured, in fixed intervals.
 
 The telemetry cycle reads every device on a schedule and keeps only the latest
-value. The energy a control moved -- curtailed, shifted, absorbed as reactive
-power -- is an integral over time, so it cannot be worked out from the latest
+value. The energy a control moved (curtailed, shifted, absorbed as reactive
+power) is an integral over time, so it cannot be worked out from the latest
 value. This part integrates the readings as they arrive into fixed intervals
 (15 minutes by default) and stores one row per device per interval.
 
@@ -52,8 +52,8 @@ _DDL = (
     "CREATE INDEX IF NOT EXISTS device_intervals_start ON device_intervals (start)",
 )
 
-# A bucket written twice -- once before a restart and once after, or flushed
-# partial at shutdown -- is added to, not replaced. The sums are additive; the
+# A bucket written twice (once before a restart and once after, or flushed
+# partial at shutdown) is added to, not replaced. The sums are additive; the
 # extremes take the wider of the two.
 _UPSERT = """
 INSERT INTO device_intervals (lfdi, start, seconds, covered_seconds, samples, ws_positive,
@@ -93,8 +93,9 @@ _COLUMNS = (
 )
 
 
+# One running sum per stored column.
 @dataclass
-class _Bucket:
+class _Bucket:  # pylint: disable=too-many-instance-attributes
     """Running sums for one device and one interval."""
 
     covered_seconds: float = 0.0
@@ -272,7 +273,8 @@ class IntervalHistory:
 
     # -- Reading ---------------------------------------------------------------
 
-    def query(
+    # Filters, then the merge with intervals still open in memory.
+    def query(  # pylint: disable=too-many-locals
         self,
         *,
         lfdi: str | None = None,
@@ -346,7 +348,8 @@ class IntervalHistory:
             "wh_curtailed": row["curtailed_ws"] / 3600.0 if avail_seconds else None,
         }
 
-    def baseline(
+    # The options of the baseline rule.
+    def baseline(  # pylint: disable=too-many-arguments,too-many-locals
         self,
         start: float,
         end: float,
@@ -382,69 +385,31 @@ class IntervalHistory:
         s = self.interval_seconds
         first = self._floor(start)
         slots = [first + i * s for i in range(math.ceil((end - first) / s))]
-        windows = list(excluded)
 
         actual_rows = self.query(lfdi=lfdi, since=slots[0], until=slots[-1] + s)
         history = self.query(
             lfdi=lfdi, since=slots[0] - (lookback_days + 1) * 86400.0, until=slots[0]
         )
-        # The devices measured in the window. A window not yet measured -- an
-        # upcoming event, or one that just started -- takes the devices from
+        # The devices measured in the window. A window not yet measured (an
+        # upcoming event, or one that just started) takes the devices from
         # the comparison days, so its baseline can still be computed.
         devices = sorted({row["lfdi"] for row in actual_rows or history})
         if lfdi is not None:
             devices = [lfdi.lower()]
-        by_key = {(row["lfdi"], row["start"]): row for row in history + actual_rows}
-
-        def value(day_slots: list[float]) -> list[float] | None:
-            """Summed average power per slot, or None when any slot is short."""
-            out = []
-            for slot in day_slots:
-                total = 0.0
-                for device in devices:
-                    row = by_key.get((device, slot))
-                    if row is None or row["w_avg"] is None:
-                        return None
-                    if row["covered_seconds"] < min_coverage * s:
-                        return None
-                    total += row["w_avg"]
-                out.append(total)
-            return out
-
-        first_local = datetime.fromtimestamp(slots[0], tz)
-        used: list[date] = []
-        samples: list[list[float]] = []
-        for back in range(1, lookback_days + 1):
-            if len(used) >= days or not devices:
-                break
-            day = first_local.date() - timedelta(days=back)
-            if weekdays_only and day.weekday() >= 5:
-                continue
-            day_start = datetime.combine(day, datetime.min.time(), tz).timestamp()
-            day_end = day_start + 86400.0
-            if any(a < day_end and b > day_start for a, b in windows):
-                continue
-            shifted = [_same_local_time(slot, day, tz, self._floor) for slot in slots]
-            measured = value(shifted)
-            if measured is None:
-                continue
-            used.append(day)
-            samples.append(measured)
-
-        actual = value(slots) if devices else None
-        out_slots = []
-        baseline_wh = actual_wh = 0.0
-        for i, slot in enumerate(slots):
-            base = sum(day[i] for day in samples) / len(samples) if samples else None
-            act = actual[i] if actual is not None else _slot_actual(by_key, devices, slot)
-            delta = act - base if act is not None and base is not None else None
-            if delta is not None and base is not None and act is not None:
-                baseline_wh += base * s / 3600.0
-                actual_wh += act * s / 3600.0
-            out_slots.append(
-                {"start": slot, "baseline_w": base, "actual_w": act, "delta_w": delta}
-            )
-        compared = any(slot["delta_w"] is not None for slot in out_slots)
+        measured = _Measured(
+            {(row["lfdi"], row["start"]): row for row in history + actual_rows},
+            devices,
+            min_coverage * s,
+        )
+        used, samples = self._comparison_days(
+            slots,
+            measured,
+            days=days,
+            lookback_days=lookback_days,
+            weekdays_only=weekdays_only,
+            excluded=list(excluded),
+            tz=tz,
+        )
         return {
             "lfdi": lfdi.lower() if lfdi is not None else None,
             "devices": devices,
@@ -453,11 +418,98 @@ class IntervalHistory:
             "interval_seconds": s,
             "days_requested": days,
             "days_used": [d.isoformat() for d in used],
-            "slots": out_slots,
-            "baseline_wh": baseline_wh if compared else None,
-            "actual_wh": actual_wh if compared else None,
-            "delta_wh": actual_wh - baseline_wh if compared else None,
+            **_compare(slots, samples, measured, s),
         }
+
+    # The options of the baseline rule, passed through.
+    def _comparison_days(  # pylint: disable=too-many-locals,too-many-arguments
+        self,
+        slots: list[float],
+        measured: _Measured,
+        *,
+        days: int,
+        lookback_days: int,
+        weekdays_only: bool,
+        excluded: list[tuple[float, float]],
+        tz: tzinfo,
+    ) -> tuple[list[date], list[list[float]]]:
+        """The most recent qualifying days before ``slots``, and their power per slot."""
+        first_local = datetime.fromtimestamp(slots[0], tz)
+        used: list[date] = []
+        samples: list[list[float]] = []
+        for back in range(1, lookback_days + 1):
+            if len(used) >= days or not measured.devices:
+                break
+            day = first_local.date() - timedelta(days=back)
+            if weekdays_only and day.weekday() >= 5:
+                continue
+            day_start = datetime.combine(day, datetime.min.time(), tz).timestamp()
+            day_end = day_start + 86400.0
+            if any(a < day_end and b > day_start for a, b in excluded):
+                continue
+            power = measured.day([_same_local_time(slot, day, tz, self._floor) for slot in slots])
+            if power is not None:
+                used.append(day)
+                samples.append(power)
+        return used, samples
+
+
+class _Measured:
+    """Stored intervals for a set of devices, summed per slot."""
+
+    def __init__(
+        self,
+        rows: Mapping[tuple[str, float], Mapping[str, Any]],
+        devices: list[str],
+        min_seconds: float,
+    ) -> None:
+        self.rows = rows
+        self.devices = devices
+        self.min_seconds = min_seconds
+
+    def slot(self, slot: float) -> float | None:
+        """Summed average power for one slot, or None when a device has no value."""
+        total = 0.0
+        for device in self.devices:
+            row = self.rows.get((device, slot))
+            if row is None or row["w_avg"] is None:
+                return None
+            total += row["w_avg"]
+        return total
+
+    def day(self, slots: list[float]) -> list[float] | None:
+        """Summed power per slot, or None when any slot is missing or too short."""
+        for slot in slots:
+            for device in self.devices:
+                row = self.rows.get((device, slot))
+                if row is None or row["covered_seconds"] < self.min_seconds:
+                    return None
+        out = [self.slot(slot) for slot in slots]
+        return None if any(v is None for v in out) else [v for v in out if v is not None]
+
+
+def _compare(
+    slots: list[float], samples: list[list[float]], measured: _Measured, seconds: int
+) -> dict[str, Any]:
+    """Baseline, actual and difference per slot and in total."""
+    actual = measured.day(slots)
+    out_slots = []
+    baseline_wh = actual_wh = 0.0
+    for i, slot in enumerate(slots):
+        base = sum(day[i] for day in samples) / len(samples) if samples else None
+        act = actual[i] if actual is not None else measured.slot(slot)
+        delta = act - base if act is not None and base is not None else None
+        if act is not None and base is not None:
+            baseline_wh += base * seconds / 3600.0
+            actual_wh += act * seconds / 3600.0
+        out_slots.append({"start": slot, "baseline_w": base, "actual_w": act, "delta_w": delta})
+    compared = any(slot["delta_w"] is not None for slot in out_slots)
+    return {
+        "slots": out_slots,
+        "baseline_wh": baseline_wh if compared else None,
+        "actual_wh": actual_wh if compared else None,
+        "delta_wh": actual_wh - baseline_wh if compared else None,
+    }
 
 
 def _same_local_time(
@@ -466,19 +518,6 @@ def _same_local_time(
     """The interval starting at the same local wall time as ``slot``, on ``day``."""
     local = datetime.fromtimestamp(slot, tz)
     return floor(datetime.combine(day, local.time(), tz).timestamp())
-
-
-def _slot_actual(
-    by_key: Mapping[tuple[str, float], Mapping[str, Any]], devices: list[str], slot: float
-) -> float | None:
-    """Summed average power for one slot, or None when a device has no value."""
-    total = 0.0
-    for device in devices:
-        row = by_key.get((device, slot))
-        if row is None or row["w_avg"] is None:
-            return None
-        total += row["w_avg"]
-    return total
 
 
 def _add(stored: Mapping[str, Any], pending: Mapping[str, Any]) -> dict[str, Any]:

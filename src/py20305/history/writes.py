@@ -73,7 +73,8 @@ class WriteHistory:
         self.offset = offset
         database.register_table("device_writes", "at", _DDL)
 
-    def record(
+    # One keyword per stored column.
+    def record(  # pylint: disable=too-many-arguments
         self,
         device: str,
         control: str,
@@ -122,7 +123,8 @@ class WriteHistory:
             return False
         return self._db.write("device_writes", _INSERT, row)
 
-    def query(
+    # One keyword per filter.
+    def query(  # pylint: disable=too-many-arguments
         self,
         *,
         event_mrid: str | None = None,

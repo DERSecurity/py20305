@@ -67,8 +67,9 @@ class History:
         self.writes = writes
         self.intervals = intervals
 
+    # One keyword per configuration setting.
     @classmethod
-    def open(
+    def open(  # pylint: disable=too-many-arguments
         cls,
         path: str | Path,
         *,
@@ -103,7 +104,8 @@ class History:
         if self.writes is not None:
             self.writes.offset = timebase.offset
 
-    def baseline(
+    # The options of IntervalHistory.baseline, passed through.
+    def baseline(  # pylint: disable=too-many-arguments
         self,
         start: float,
         end: float,

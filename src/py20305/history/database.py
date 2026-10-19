@@ -32,7 +32,8 @@ PRUNE_INTERVAL_SECONDS = 3600.0
 MEMORY = ":memory:"
 
 
-class HistoryDatabase:
+# Connection, lock, clock, retention and failure counts: one object, one file.
+class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
     """One SQLite connection shared by the history parts.
 
     The connection is opened with ``check_same_thread=False`` and every call
