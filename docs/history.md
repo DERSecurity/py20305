@@ -71,6 +71,20 @@ Writes never wait on the disk. They are queued and written by one background
 thread; if the disk falls far behind, writes are dropped and counted in
 `GET /api/v1/history` rather than slowing the client.
 
+### Cost and size
+
+The control path only queues a write; one background thread writes it, at
+about a tenth of a millisecond per row on a desktop SSD. Reads run in the
+management API's thread pool, not on the event loop. A large read is not free:
+reading 100,000 device writes takes about half a second on the same disk, and
+holds back the history writer, not the controls, while it runs. Ask for what you
+need with `since`, `until` and `limit`.
+
+The file is bounded by age (`retention_days`), not by size. A device write
+takes about a third of a kilobyte, so a site writing one control a minute
+grows `device_writes` by roughly 70 MB a year. Intervals add one row per device
+per interval, 96 a day at the default length.
+
 ### In a container
 
 The image's working directory is the `py20305` user's home, so the default
