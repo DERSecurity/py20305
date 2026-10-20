@@ -270,5 +270,10 @@ logging:
 
 `--log-level DEBUG` overrides the configured level for one run. It does not change where the logs go.
 
+When the MQTT forwarder loses its broker connection it logs one warning with
+the reason, a reminder every five minutes while the broker stays unreachable,
+and one info line with the downtime when it reconnects. See
+[Forwarding](forwarding.md#when-the-broker-connection-drops).
+
 Only the runner configures logging. The library itself just calls `getLogger`,
 so embedding it never takes handler policy away from your application.

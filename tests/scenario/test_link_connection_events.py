@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from collections.abc import Callable
 
 import aiohttp
 import pytest
@@ -18,6 +19,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from py20305.forwarders import (
     ConnectionTelemetryConfig,
     ConnectionTelemetryEmitter,
+    EventFrame,
     ForwarderManager,
     MQTTForwarder,
     MQTTForwarderAdapter,
@@ -42,12 +44,21 @@ TOPIC_BASE = "site"
 EVENTS_TOPIC = f"{TOPIC_BASE}/out/connection-events"
 
 
-def build(port: int) -> tuple[ForwarderManager, ConnectionTelemetryEmitter]:
+def build(
+    port: int, *, require_initial_connection: bool = False
+) -> tuple[ForwarderManager, ConnectionTelemetryEmitter]:
     manager = ForwarderManager()
     manager.add_forwarder(
         MQTTForwarderAdapter(
             MQTTForwarder(
-                MQTTForwarderConfig(endpoint="127.0.0.1", port=port, topic_base=TOPIC_BASE)
+                MQTTForwarderConfig(
+                    endpoint="127.0.0.1",
+                    port=port,
+                    topic_base=TOPIC_BASE,
+                    reconnect_initial_delay_seconds=0.05,
+                    reconnect_max_delay_seconds=0.2,
+                    require_initial_connection=require_initial_connection,
+                )
             )
         )
     )
@@ -82,11 +93,21 @@ async def test_broker_connection_is_reported_with_the_telemetry_role():
     assert event["src_endpoint"]["port"] > 0
 
 
+async def wait_until(condition: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Wait until ``condition`` is true, failing the test after ``timeout`` seconds."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        if loop.time() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.02)
+
+
 async def test_a_refused_broker_connection_is_delivered_once_the_broker_accepts():
     broker = ScenarioMqttBroker(free_port())
     await broker.start()
     broker.refuse_connections(True)
-    manager, emitter = build(broker.port)
+    manager, emitter = build(broker.port, require_initial_connection=True)
     try:
         await manager.start()
         assert manager.failed_forwarders(), "the broker refused, so the forwarder must fail"
@@ -106,6 +127,55 @@ async def test_a_refused_broker_connection_is_delivered_once_the_broker_accepts(
     assert failure["status_detail"]
     assert failure["dst_endpoint"] == {"ip": "127.0.0.1", "port": broker.port, "svc_name": "mqtt"}
     assert failure["time"] <= events[1]["time"]
+
+
+async def test_a_forwarder_started_before_its_broker_connects_once_the_broker_is_up():
+    port = free_port()
+    manager, emitter = build(port)
+    broker = ScenarioMqttBroker(port)
+    try:
+        await manager.start()
+        assert not manager.failed_forwarders(), "the forwarder keeps retrying instead"
+        assert manager.can_deliver_events is False
+        assert emitter.held_events == 1
+
+        await broker.start()
+        await wait_until(lambda: manager.can_deliver_events)
+        emitter.release_held()
+        await manager.stop()
+    finally:
+        await broker.close()
+
+    events = [json.loads(m.payload) for m in broker.messages_on(EVENTS_TOPIC)]
+    assert [e["status"] for e in events] == ["Failure", "Success"]
+
+
+async def test_a_connection_the_broker_drops_is_restored_with_the_same_client_id():
+    broker = ScenarioMqttBroker(free_port())
+    await broker.start()
+    manager, emitter = build(broker.port)
+    (adapter,) = manager.forwarders
+    try:
+        await manager.start()
+        await wait_until(lambda: manager.can_deliver_events)
+
+        broker.drop_connections()
+        await wait_until(lambda: not manager.can_deliver_events)
+        manager.queue_event(EventFrame(payload={"n": 1}, topic_suffix="out/probe"))
+
+        await wait_until(lambda: len(broker.messages_on(f"{TOPIC_BASE}/out/probe")) == 1)
+        stats = adapter.get_statistics()["underlying_forwarder"]
+        emitter.release_held()
+        await manager.stop()
+    finally:
+        await broker.close()
+
+    assert len(broker.connects) == 2
+    assert broker.connects[0] == broker.connects[1]
+    assert stats["disconnects"] == 1
+    assert stats["reconnects"] == 1
+    statuses = [json.loads(m.payload)["status"] for m in broker.messages_on(EVENTS_TOPIC)]
+    assert statuses == ["Success", "Failure", "Success"]
 
 
 class Recorder:

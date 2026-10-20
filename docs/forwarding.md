@@ -100,9 +100,9 @@ The `protocol` field carries what the connector speaks, not an assumption:
 wire, such as the hardware-free demo. Recording those as Modbus would put a
 false claim on the channel and mislead a consumer filtering by protocol.
 
-If the broker is unreachable when the client starts, forwarding is retried in
-the background every `forwarders.retry_interval_seconds` (60 by default, 0 to
-disable) rather than staying off for the life of the process.
+If the broker is unreachable when the client starts, the forwarder starts
+anyway and keeps trying to connect in the background, as it does after losing
+the connection later. See [When the broker connection drops](#when-the-broker-connection-drops).
 
 A device is identified by its address where the connector exposes one:
 `host:port` for Modbus TCP, and for a serial device the line itself
@@ -257,8 +257,11 @@ application that embeds the emitter does the same on its own timer.
 
 Failures are never coalesced and are not rate-limited by the emitter. Their
 volume follows the rate of connection attempts, which the caller's own retry
-and back-off policy sets. On the transport, the forwarder's publish queue is
-bounded and drops its oldest record when full.
+and back-off policy sets. The MQTT forwarder reports its own broker link this
+way: one failure event when the connection drops, then at most one every five
+minutes while the broker stays unreachable, and one success event when it
+reconnects. On the transport, the forwarder's publish queue is bounded and
+drops its oldest record when full.
 
 Embedders not using the runner attach the same machinery through the
 client's observer seam: construct a
@@ -433,7 +436,7 @@ drops its oldest entry, and a stopped forwarder drops what it is given. Each is
 counted in the forwarder's statistics: `messages_dropped` for a full queue,
 `events_dropped_not_running` while the whole transport is stopped, and
 `events_dropped_by_forwarder`, per forwarder, for events a forwarder did not
-take because its broker was unreachable at start or queueing raised. That
+take because its start failed or queueing raised. That
 counter is keyed by the forwarder's name, with its position added when two
 share a name. A record the broker refuses at publish time is counted in the
 forwarder's `publish_errors`, not as a drop; the gap in `seq` shows it either
@@ -519,6 +522,73 @@ rather than a late one.
 
 `get_statistics()` reports both buffers: `queue_size` is everything waiting,
 with `capture_queue_size` and `telemetry_pending` beside it.
+
+## When the broker connection drops
+
+The MQTT forwarder reconnects on its own when the broker closes the connection
+or a publish fails because the connection is gone. Any MQTT client error or
+socket error from a publish counts as a lost connection, and so does the
+client's own report that its socket closed.
+
+```yaml
+forwarders:
+  mqtt:
+    endpoint: broker.example.com
+    reconnect_initial_delay_seconds: 1
+    reconnect_max_delay_seconds: 60
+    require_initial_connection: false
+```
+
+| Setting | Default | What it does |
+|---|---|---|
+| `reconnect_initial_delay_seconds` | 1 | Wait before the first reconnect attempt. |
+| `reconnect_max_delay_seconds` | 60 | Longest wait between two attempts. |
+| `require_initial_connection` | `false` | Make the forwarder's start fail when the first connection fails, instead of retrying. |
+
+After a loss the forwarder closes the old connection, waits, and connects again
+with the same TLS settings and client ID. The wait doubles after each failed
+attempt, up to the maximum, and is shortened by up to a fifth at random so
+clients that lost the same broker do not all retry at once. A successful
+connection resets it.
+
+While the connection is down:
+
+- Nothing is published. Captured messages, events and telemetry wait in the
+  buffers described in [Under a slow broker](#under-a-slow-broker), with the
+  same bounds. The message whose publish failed is sent first after
+  reconnecting. Publishing is at least once, so that message can arrive twice
+  if the broker received it just before the connection dropped.
+- A full queue drops its oldest entry as usual. The warning is logged once,
+  and further drops are counted in `messages_dropped` without a log line each.
+- The forwarder reports itself not ready, so connection events are held by the
+  emitter (see [When the broker is unreachable](#when-the-broker-is-unreachable))
+  and released after the forwarder reconnects.
+
+What an operator sees in the log:
+
+- One warning when the connection drops, with the reason.
+- A warning every five minutes while the broker stays unreachable, with the
+  number of attempts and the last error. Individual attempts log at debug.
+- One info line when the connection is back, with how long it was down and how
+  many attempts it took.
+
+The forwarder's statistics carry the link history: `connected`, `disconnects`
+(losses detected), `reconnects` (connections made by the background retry,
+after a loss or a failed first connection), `last_disconnect_reason`, and
+`reconnect_backoff_seconds` (the wait before the next attempt, 0 while
+connected).
+
+If the broker is unreachable when the forwarder starts, the failure is reported
+as an error and the forwarder retries in the background in the same way. Set
+`require_initial_connection: true` to make the start fail instead. The
+forwarder then stays stopped, and the runner starts it again every
+`forwarders.retry_interval_seconds` (60 by default, 0 to disable). An application
+that embeds the forwarder calls `ForwarderManager.retry_failed()` on its own timer. A forwarder
+that cannot be set up at all, because the MQTT library is not installed or the
+TLS files do not load, always fails its start.
+
+Stopping the client while the connection is down returns at once. Anything
+still buffered is not published, and its count is logged.
 
 ## Round-tripping
 

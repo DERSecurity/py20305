@@ -103,7 +103,7 @@ async def build_stack(
         )
     )
     await manager.start()
-    assert not manager.failed_forwarders(), "the forwarder must reach the broker"
+    assert manager.can_deliver_events, "the forwarder must reach the broker"
 
     certs = make_certs(tmp_path)
     client_lfdi = compute_lfdi(certs.client_cert.read_text())

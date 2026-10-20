@@ -190,10 +190,14 @@ class TestMQTTForwarder:
     async def test_connect_failure_emits_diagnostic(
         self, mock_config: MQTTForwarderConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """C9: a broker connect failure surfaces as a deduped UI error."""
+        """C9: a broker connect failure surfaces as a deduped UI error.
+
+        With require_initial_connection set, start() raises the failure.
+        """
         fresh = DiagnosticsStore()
         monkeypatch.setattr(diagnostics, "_store", fresh)
-        forwarder = MQTTForwarder(mock_config)
+        config = mock_config.model_copy(update={"require_initial_connection": True})
+        forwarder = MQTTForwarder(config)
 
         mock_client = MagicMock()
         mock_client.__aenter__ = AsyncMock(side_effect=ConnectionRefusedError("nope"))
@@ -371,11 +375,12 @@ class TestBufferPolicyByKind:
 
     @staticmethod
     def _armed(config: MQTTForwarderConfig, **kwargs: int) -> MQTTForwarder:
-        """A forwarder accepting frames, with a mock client and no live loop."""
+        """A connected forwarder accepting frames, with a mock client and no live loop."""
         forwarder = MQTTForwarder(config, **kwargs)
         client = MagicMock()
         client.publish = AsyncMock()
         forwarder._client = client
+        forwarder._connected = True
         forwarder._running = True
         return forwarder
 
