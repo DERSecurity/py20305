@@ -1186,6 +1186,27 @@ class TestWriteBatches:
 
         assert finished, "drain() waited for a write queued after it"
 
+    def test_drain_stops_after_its_timeout_when_the_writer_makes_no_progress(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        monkeypatch.setattr(database_module, "DRAIN_TIMEOUT_SECONDS", 0.2)
+        database = HistoryDatabase(MEMORY)
+        with database._progress:
+            database._queued += 1  # a batch counted that the writer will never run
+        drainer = threading.Thread(target=database.drain)
+
+        with caplog.at_level(logging.WARNING, logger=database_module.__name__):
+            drainer.start()
+            drainer.join(timeout=5)
+        finished = not drainer.is_alive()
+        with database._progress:
+            database._written = database._queued  # let the stuck drain() end if it did not
+        drainer.join(timeout=5)
+        database.close()
+
+        assert finished, "drain() kept waiting past its timeout"
+        assert "reading without them" in caplog.text
+
 
 class TestIntervalsAcrossThreads:
     def _query_with(self, history: History, before: Any = None, after: Any = None) -> Any:
@@ -1303,6 +1324,19 @@ class TestFileModes:
         _create_owner_only(path)
 
         assert stat.S_IMODE(path.stat().st_mode) == 0o400
+
+    def test_a_file_created_after_the_existence_check_is_tightened(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        path = tmp_path / "history.sqlite3"
+        path.touch()
+        path.chmod(0o666)
+        # The file is already there, but a check made before it appeared said it was not.
+        monkeypatch.setattr(Path, "exists", lambda self: False)
+
+        _create_owner_only(path)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
     def test_a_directory_at_the_history_path_is_left_unchanged(self, tmp_path: Path):
         path = tmp_path / "data"

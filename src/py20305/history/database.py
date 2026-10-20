@@ -45,6 +45,11 @@ MAX_PENDING_WRITES = 10000
 #: How long closing waits for queued writes to reach the disk.
 CLOSE_TIMEOUT_SECONDS = 10.0
 
+#: Longest a read waits for the writes queued before it. Past this the read
+#: returns what is on disk and logs a warning, so a writer that stops making
+#: progress cannot hang every read.
+DRAIN_TIMEOUT_SECONDS = 10.0
+
 #: The path that keeps the database in memory, for tests and for hosts that
 #: want the query API without a file.
 MEMORY = ":memory:"
@@ -55,15 +60,21 @@ def _create_owner_only(path: Path) -> None:
 
     The history holds what was commanded and measured on a site. A new file
     gets 0600, and the directory that holds it gets 0700 when it is created
-    here. SQLite gives its journal files the database file's permissions. On
-    POSIX an existing regular file loses its group and other permissions; its
-    owner's are kept, so a read-only file stays read-only. Anything else
-    already at the path, such as a directory, is left for SQLite to refuse.
+    here. Parent directories created along the way get the default mode; the
+    file's own mode keeps its contents private. SQLite gives its journal files
+    the database file's permissions. On POSIX an existing regular file loses
+    its group and other permissions; its owner's are kept, so a read-only file
+    stays read-only. Anything else already at the path, such as a directory,
+    is left for SQLite to refuse.
     """
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if not path.exists():
-        os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
+    try:
+        # O_EXCL: a file that appears after any earlier check is not opened
+        # with its own mode; it falls through to the tightening below.
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         return
+    except FileExistsError:
+        pass
     if os.name != "posix" or not path.is_file():
         return
     with contextlib.suppress(OSError):
@@ -174,12 +185,24 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
         """Wait until every write queued before this call has been run.
 
         Writes queued after it are not waited for. Stops waiting if the writer
-        thread is gone, so a read can never hang on writes nothing will run.
+        thread is gone, or after ``DRAIN_TIMEOUT_SECONDS``, so a read can never
+        hang on writes nothing will run. A read that stops on the timeout logs
+        a warning and may miss those writes.
         """
+        deadline = time.monotonic() + DRAIN_TIMEOUT_SECONDS
         with self._progress:
             target = self._queued
             while self._written < target and self._writer.is_alive():
-                self._progress.wait(0.1)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "History read waited %.0f s for %d queued write batch(es); "
+                        "reading without them",
+                        DRAIN_TIMEOUT_SECONDS,
+                        target - self._written,
+                    )
+                    return
+                self._progress.wait(min(0.1, remaining))
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         """Run one read statement, after the writes queued before it."""
