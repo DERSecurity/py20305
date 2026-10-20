@@ -59,13 +59,17 @@ class MQTTForwarderConfig(_StrictForwarderModel):
     reconnect_initial_delay_seconds: float = Field(
         default=DEFAULT_RECONNECT_INITIAL_DELAY_SECONDS,
         description=(
-            "Delay before the first attempt to reconnect after the broker connection is lost "
-            "or the first connection fails. Doubles after each failed attempt."
+            "Base delay before the first attempt to reconnect after the broker connection is "
+            "lost or the first connection fails. Doubles after each failed attempt, and returns "
+            "to this value once a new connection is stable."
         ),
     )
     reconnect_max_delay_seconds: float = Field(
         default=DEFAULT_RECONNECT_MAX_DELAY_SECONDS,
-        description="Longest delay between two reconnect attempts",
+        description=(
+            "Largest base delay between two reconnect attempts. A new connection that stays "
+            "up this long counts as stable."
+        ),
     )
     require_initial_connection: bool = Field(
         default=False,

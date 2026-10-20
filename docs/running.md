@@ -272,7 +272,9 @@ logging:
 
 When the MQTT forwarder loses its broker connection it logs one warning with
 the reason, a reminder every five minutes while the broker stays unreachable,
-and one info line with the downtime when it reconnects. See
+and one info line with the downtime when it reconnects. A broker that refuses
+the connection for bad credentials or missing authorization is logged as an
+error, and the forwarder keeps retrying. See
 [Forwarding](forwarding.md#when-the-broker-connection-drops).
 
 Only the runner configures logging. The library itself just calls `getLogger`,

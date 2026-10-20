@@ -541,15 +541,23 @@ forwarders:
 
 | Setting | Default | What it does |
 |---|---|---|
-| `reconnect_initial_delay_seconds` | 1 | Wait before the first reconnect attempt. |
-| `reconnect_max_delay_seconds` | 60 | Longest wait between two attempts. |
+| `reconnect_initial_delay_seconds` | 1 | Base delay before the first reconnect attempt. |
+| `reconnect_max_delay_seconds` | 60 | Largest base delay between two attempts. A new connection that stays up this long counts as stable. |
 | `require_initial_connection` | `false` | Make the forwarder's start fail when the first connection fails, instead of retrying. |
 
 After a loss the forwarder closes the old connection, waits, and connects again
-with the same TLS settings and client ID. The wait doubles after each failed
-attempt, up to the maximum, and is shortened by up to a fifth at random so
-clients that lost the same broker do not all retry at once. A successful
-connection resets it.
+with the same client ID. Each attempt loads the TLS certificate, key and CA
+files again, so a rotated certificate is used without a restart; a file that
+fails to load counts as a failed attempt. The base delay doubles after each
+failed attempt, up to the maximum. Each wait is the base delay shortened by up
+to a fifth at random, so clients that lost the same broker do not all retry at
+once.
+
+The base delay goes back to the initial value only once the new connection is
+stable: a publish succeeds on it, or it stays up for
+`reconnect_max_delay_seconds`. A connection that drops sooner continues the
+outage, so a broker that accepts the connection and drops it again at once is
+retried at the growing delay, not at the initial one.
 
 While the connection is down:
 
@@ -558,8 +566,15 @@ While the connection is down:
   same bounds. The message whose publish failed is sent first after
   reconnecting. Publishing is at least once, so that message can arrive twice
   if the broker received it just before the connection dropped.
-- A full queue drops its oldest entry as usual. The warning is logged once,
-  and further drops are counted in `messages_dropped` without a log line each.
+- A message whose publish loses the connection three times in a row is
+  dropped, counted in `publish_errors`, and logged as a warning naming its
+  topic. Some brokers close the connection in answer to a publish they refuse,
+  for example to a topic the client's policy does not allow, and that one
+  message must not hold back everything queued behind it. A telemetry frame
+  and a newer frame for the same device count as the same message.
+- A full queue drops its oldest entry as usual. The warning is logged once
+  until the queue drains, and further drops are counted in `messages_dropped`
+  without a log line each.
 - The forwarder reports itself not ready, so connection events are held by the
   emitter (see [When the broker is unreachable](#when-the-broker-is-unreachable))
   and released after the forwarder reconnects.
@@ -569,14 +584,20 @@ What an operator sees in the log:
 - One warning when the connection drops, with the reason.
 - A warning every five minutes while the broker stays unreachable, with the
   number of attempts and the last error. Individual attempts log at debug.
+- An error when the broker refuses the connection for bad credentials or
+  missing authorization. The first refusal in an outage is logged at once,
+  later ones at the five-minute rate. The forwarder keeps retrying.
 - One info line when the connection is back, with how long it was down and how
   many attempts it took.
+- A connection that drops again before it is stable is logged as a warning at
+  the same five-minute rate, not on every drop. Its reconnect is logged only
+  after a logged failure. Connection events follow the same rule.
 
 The forwarder's statistics carry the link history: `connected`, `disconnects`
 (losses detected), `reconnects` (connections made by the background retry,
 after a loss or a failed first connection), `last_disconnect_reason`, and
-`reconnect_backoff_seconds` (the wait before the next attempt, 0 while
-connected).
+`reconnect_backoff_seconds` (the base delay before the next attempt, before
+the random shortening, 0 while connected).
 
 If the broker is unreachable when the forwarder starts, the failure is reported
 as an error and the forwarder retries in the background in the same way. Set
@@ -587,8 +608,12 @@ that embeds the forwarder calls `ForwarderManager.retry_failed()` on its own tim
 that cannot be set up at all, because the MQTT library is not installed or the
 TLS files do not load, always fails its start.
 
-Stopping the client while the connection is down returns at once. Anything
-still buffered is not published, and its count is logged.
+Stopping the client while the connection is down does not wait for the
+reconnect delay or for a connect attempt in progress. Anything still buffered
+is not published, and its count is logged. The MQTT library connects in a
+background thread that cannot be interrupted. If that connect completes after
+the stop, the forwarder closes the connection as soon as it opens, and the
+thread can delay process exit until the connect completes or times out.
 
 ## Round-tripping
 
