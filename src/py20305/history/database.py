@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import queue
 import sqlite3
 import threading
@@ -46,6 +47,23 @@ MEMORY = ":memory:"
 
 
 # Connection, lock, clock, retention and failure counts: one object, one file.
+def _create_owner_only(path: Path) -> None:
+    """Create the file's directory and the file itself readable by their owner only.
+
+    The history holds what was commanded and measured on a site. A directory
+    created here gets 0700 and the file 0600, and an existing file is tightened
+    to 0600; SQLite gives its journal files the database file's permissions. An
+    existing directory is left as the operator set it. Where the operating
+    system has no POSIX modes (Windows), the calls succeed and change nothing
+    that matters.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not path.exists():
+        os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o600)
+
+
 class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
     """One SQLite connection shared by the history parts.
 
@@ -65,7 +83,7 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
             raise ValueError("retention_days must be positive")
         self.path = str(path)
         if self.path != MEMORY:
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            _create_owner_only(Path(self.path))
         self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         if self.path != MEMORY:
@@ -88,6 +106,12 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
         self._queue: queue.Queue[tuple[str, str, list[Sequence[Any]]] | None] = queue.Queue(
             maxsize=MAX_PENDING_WRITES
         )
+        #: Batches accepted and batches run, so a read waits only for the
+        #: writes queued before it. Waiting for an empty queue instead lets a
+        #: steady stream of writes hold a read off indefinitely.
+        self._queued = 0
+        self._written = 0
+        self._progress = threading.Condition()
         self._writer = threading.Thread(
             target=self._write_queued, name="py20305-history-writer", daemon=True
         )
@@ -114,9 +138,13 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
             return True
         if self._closed:
             return False
+        with self._progress:
+            self._queued += 1
         try:
             self._queue.put_nowait((table, sql, list(rows)))
         except queue.Full:
+            with self._progress:
+                self._queued -= 1
             self.dropped[table] = self.dropped.get(table, 0) + 1
             if self.dropped[table] == 1:
                 logger.warning("History write queue is full; dropping writes to %s", table)
@@ -124,14 +152,15 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
         return True
 
     def drain(self) -> None:
-        """Wait until every queued write has been run.
+        """Wait until every write queued before this call has been run.
 
-        Stops waiting if the writer thread is gone, so a read can never hang
-        on writes nothing will run.
+        Writes queued after it are not waited for. Stops waiting if the writer
+        thread is gone, so a read can never hang on writes nothing will run.
         """
-        with self._queue.all_tasks_done:
-            while self._queue.unfinished_tasks and self._writer.is_alive():
-                self._queue.all_tasks_done.wait(0.1)
+        with self._progress:
+            target = self._queued
+            while self._written < target and self._writer.is_alive():
+                self._progress.wait(0.1)
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         """Run one read statement, after the writes queued before it."""
@@ -200,6 +229,10 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
                         self._failed(table)
             finally:
                 self._queue.task_done()
+                if item is not None:
+                    with self._progress:
+                        self._written += 1
+                        self._progress.notify_all()
 
     def _prune_if_due(self) -> None:
         now = self._clock()

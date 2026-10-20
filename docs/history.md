@@ -56,7 +56,8 @@ read-only or the path is a directory, the client logs an error naming the path
 and runs without a history. Set `history.path` to a writable location, or switch the history off
 to silence it.
 
-The file uses SQLite's write-ahead log, so a `-wal` and a `-shm` file sit
+The file is created readable by its owner only (0600), and a directory created
+for it 0700. The file uses SQLite's write-ahead log, so a `-wal` and a `-shm` file sit
 beside it while the client runs. Copying the files while the client writes can
 produce a copy that is missing records or cannot be opened. Back it up with
 SQLite's own backup, which is safe while the client runs:

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import stat
 import threading
 import time
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -1122,3 +1124,147 @@ class TestReviewFixes:
 
         assert _api(history).get(path, params=params).status_code == 200
         assert loops == [False], "the read ran on a worker thread, not inside the event loop"
+
+
+# -- Concurrency, migration and file modes --------------------------------------------
+
+
+class TestIntervalsAcrossThreads:
+    def test_an_interval_that_ends_between_the_memory_copy_and_the_read_counts_once(self):
+        history = _memory()
+        intervals = history.intervals
+        assert intervals is not None
+        _feed(intervals, T0, T0 + 840, 1000.0)
+        real_query = history.database.query
+
+        def query_after_the_interval_ends(sql: str, params: Any = ()) -> Any:
+            # The memory copy is already taken; the interval ends and is written now.
+            intervals.observe(DEV, T0 + 900, {"W": 1000.0})
+            return real_query(sql, params)
+
+        history.database.query = query_after_the_interval_ends  # type: ignore[method-assign]
+        row = next(r for r in intervals.query(lfdi=DEV) if r["start"] == T0)
+
+        assert row["samples"] == 15, "counted once, from the written row"
+        assert row["covered_seconds"] == pytest.approx(900)
+
+    def test_an_interval_that_ends_after_the_read_is_still_counted(self):
+        history = _memory()
+        intervals = history.intervals
+        assert intervals is not None
+        _feed(intervals, T0, T0 + 840, 1000.0)
+        real_query = history.database.query
+
+        def query_then_the_interval_ends(sql: str, params: Any = ()) -> Any:
+            rows = real_query(sql, params)
+            intervals.observe(DEV, T0 + 900, {"W": 1000.0})
+            return rows
+
+        history.database.query = query_then_the_interval_ends  # type: ignore[method-assign]
+        row = next(r for r in intervals.query(lfdi=DEV) if r["start"] == T0)
+
+        assert row["samples"] == 15, "counted once, from the copy in memory"
+
+    def test_readings_and_queries_on_different_threads_do_not_fail(self):
+        history = _memory()
+        intervals = history.intervals
+        assert intervals is not None
+        errors: list[BaseException] = []
+        stop = threading.Event()
+
+        def read_devices() -> None:
+            try:
+                t = T0
+                for _ in range(300):
+                    if stop.is_set():
+                        return
+                    # New devices keep appearing while queries walk the devices.
+                    for n in range(50):
+                        intervals.observe(f"{n:040x}", t, {"W": 1.0})
+                    t += 60
+                    time.sleep(0.001)
+            except BaseException as exc:  # pragma: no cover - the failure being tested
+                errors.append(exc)
+
+        reader = threading.Thread(target=read_devices)
+        reader.start()
+        try:
+            while reader.is_alive():
+                intervals.query()
+                history.baseline(T0 + 86400, T0 + 86400 + 900)
+        finally:
+            stop.set()
+            reader.join(timeout=5)
+
+        assert errors == []
+
+
+    def test_a_device_read_waits_while_a_query_copies_the_unfinished_intervals(self):
+        history = _memory()
+        intervals = history.intervals
+        assert intervals is not None
+        intervals.observe(DEV, T0, {"W": 1.0})
+        intervals.observe("bb" * 20, T0, {"W": 1.0})
+
+        class ReadDuringWalk(dict):  # type: ignore[type-arg]
+            """Starts a read of a new device once a query has begun walking the devices."""
+
+            def items(self):  # type: ignore[no-untyped-def]
+                walk = iter(super().items())
+                yield next(walk)
+                reader = threading.Thread(
+                    target=intervals.observe, args=("cc" * 20, T0 + 60, {"W": 1.0})
+                )
+                reader.start()
+                reader.join(timeout=0.2)  # with the lock held, the read waits
+                yield from walk
+
+        intervals._devices = ReadDuringWalk(intervals._devices)
+
+        rows = intervals.query()
+
+        assert {r["lfdi"] for r in rows} >= {DEV, "bb" * 20}
+
+
+class TestUpgradeFromTheFirstRelease:
+    def test_intervals_written_by_0_14_0_are_moved_and_still_read(self, tmp_path: Path):
+        import sqlite3
+
+        path = tmp_path / "history.sqlite3"
+        old = sqlite3.connect(path)
+        old.execute(
+            """CREATE TABLE device_intervals (lfdi TEXT NOT NULL, start REAL NOT NULL,
+            seconds INTEGER NOT NULL, covered_seconds REAL NOT NULL, samples INTEGER NOT NULL,
+            ws_positive REAL NOT NULL, ws_negative REAL NOT NULL, w_min REAL, w_max REAL,
+            var_seconds REAL NOT NULL, vars_positive REAL NOT NULL, vars_negative REAL NOT NULL,
+            avail_seconds REAL NOT NULL, avail_ws REAL NOT NULL, curtail_seconds REAL NOT NULL,
+            curtailed_ws REAL NOT NULL, PRIMARY KEY (lfdi, start, seconds))"""
+        )
+        old.execute(
+            "INSERT INTO device_intervals VALUES (?, ?, 900, 900, 15, 900000, 0, 1000, 1000, "
+            "0, 0, 0, 0, 0, 0, 0)",
+            (DEV, T0),
+        )
+        old.commit()
+        old.close()
+
+        history = History.open(path)
+        row = _interval(history, T0)
+        tables = {r["name"] for r in history.database.query(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+        history.close()
+
+        assert row["wh_positive"] == pytest.approx(250.0)
+        assert "device_intervals" not in tables
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+class TestFileModes:
+    def test_the_history_is_readable_by_its_owner_only(self, tmp_path: Path):
+        path = tmp_path / "new" / "history.sqlite3"
+
+        History.open(path).close()
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
