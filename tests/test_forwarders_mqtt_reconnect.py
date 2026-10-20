@@ -1027,3 +1027,26 @@ class TestReconnectConfig:
                 reconnect_initial_delay_seconds=10.0,
                 reconnect_max_delay_seconds=5.0,
             )
+
+
+class TestUnexpectedLoopError:
+    async def test_an_unexpected_error_in_the_publish_loop_pauses_before_the_next_pass(
+        self, broker: FakeBroker, fake_time: FakeTime, store: DiagnosticsStore
+    ) -> None:
+        forwarder = make_forwarder(fake_time)
+        await forwarder.start()
+        failures = 3
+
+        def failing_check() -> None:
+            nonlocal failures
+            if failures:
+                failures -= 1
+                raise RuntimeError("unexpected")
+
+        forwarder._client_reported_loss = failing_check  # type: ignore[method-assign]
+        forwarder.queue_message(message("A"))
+        await wait_until(lambda: published_types(broker) == ["A"])
+
+        assert fake_time.sleeps.count(1.0) >= 3
+        assert forwarder.get_statistics()["publish_errors"] >= 3
+        await forwarder.stop()

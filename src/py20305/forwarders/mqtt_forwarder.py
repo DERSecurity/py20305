@@ -137,6 +137,10 @@ _DRAIN_TIMEOUT_SECONDS = 10.0
 # Longest idle wait in the publish loop before it checks its state again.
 _IDLE_WAIT_SECONDS = 1.0
 
+#: How long the publish loop pauses after an unexpected error before it tries
+#: again.
+_LOOP_ERROR_PAUSE_SECONDS = 1.0
+
 
 class MQTTForwarder(AbstractForwarder):
     """Async MQTT forwarder for publishing protocol messages.
@@ -1000,6 +1004,10 @@ class MQTTForwarder(AbstractForwarder):
                     exc_info=True,
                 )
                 self._record_error(f"Loop error: {e}")
+                # An error raised before the loop body's first await would
+                # otherwise repeat with no suspension point and block the event
+                # loop. Pause like every other failure path in this module.
+                await self._sleep(_LOOP_ERROR_PAUSE_SECONDS)
 
     async def _publish_batch(self, message_topic: str, telemetry_topic: str) -> int:
         """Publish one bounded run of buffered items and return how many were taken.
