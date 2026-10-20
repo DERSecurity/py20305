@@ -51,6 +51,7 @@ from py20305.models.sep.sep import (
     SelfDevice,
     SelfDeviceLink,
     Sfditype,
+    SubscriptionList,
     SubscriptionListLink,
     Time,
     TimeLink,
@@ -202,8 +203,11 @@ class _MockClient:
         self._raw_bodies = raw_bodies or {}
         self.timebase = ServerTimebase()
         self.server_2018_compat = server_2018_compat
+        # Every request as (method, path), path with its query string.
+        self.calls: list[tuple[str, str]] = []
 
     async def get(self, path: str, model_type: type) -> Any:
+        self.calls.append(("get", path))
         # Strip query params for lookup
         key = path.split("?")[0]
         if key not in self._responses:
@@ -219,6 +223,7 @@ class _MockClient:
         return result, raw
 
     async def get_list(self, path: str, model_type: type) -> list[Any]:
+        self.calls.append(("get_list", path))
         result = await self.get(path, model_type)
         if isinstance(result, list):
             return result
@@ -2246,3 +2251,134 @@ async def test_repeated_refreshes_do_not_grow_the_mapping():
 
     assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1"]
     assert state.device_mapping.device_to_programs["/edev/1"] == ["/derp/1"]
+
+
+@pytest.mark.asyncio
+async def test_der_lists_are_read_page_by_page():
+    """Both DER lists are read with get_list, which sends s and l and follows every page.
+
+    A list GET without "l" returns one entry (IEEE 2030.5 GEN.019), so a plain
+    GET would see only the first DER of a list with more than one.
+    """
+    edev = _make_edev("/edev/1")
+    edev.derlist_link = DerlistLink(href="/edev/1/der")
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(sdev_href="/sdev"),
+            "/tm": _make_time(),
+            "/sdev": _make_self_device(),
+            "/sdev/der": [
+                _make_der_list(_make_der("/sdev/der/1")),
+                _make_der_list(_make_der("/sdev/der/2")),
+            ],
+            "/edev": _make_edev_list(edev),
+            "/edev/1/der": [
+                _make_der_list(_make_der("/edev/1/der/1")),
+                _make_der_list(_make_der("/edev/1/der/2")),
+            ],
+        }
+    )
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert ("get_list", "/sdev/der") in client.calls
+    assert ("get_list", "/edev/1/der") in client.calls
+    assert state.self_device is not None
+    assert [d.href for d in state.self_device.ders] == ["/sdev/der/1", "/sdev/der/2"]
+    assert [d.href for d in state.end_devices["/edev/1"].ders] == ["/edev/1/der/1", "/edev/1/der/2"]
+
+
+@pytest.mark.asyncio
+async def test_absent_der_lists_are_logged_and_skipped(caplog: pytest.LogCaptureFixture):
+    """A DER list that is absent (get_list returns no pages) leaves no DERs and logs a warning."""
+    edev = _make_edev("/edev/1")
+    edev.derlist_link = DerlistLink(href="/edev/1/der")
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(sdev_href="/sdev"),
+            "/tm": _make_time(),
+            "/sdev": _make_self_device(),
+            "/sdev/der": [],
+            "/edev": _make_edev_list(edev),
+            "/edev/1/der": [],
+        }
+    )
+    state = DiscoveredState()
+    with caplog.at_level(logging.WARNING, logger="py20305.client.discovery"):
+        await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.self_device is not None and state.self_device.ders == []
+    assert state.end_devices["/edev/1"].ders == []
+    absent = [r.getMessage() for r in caplog.records if "is absent" in r.getMessage()]
+    assert len(absent) == 2
+
+
+@pytest.mark.asyncio
+async def test_subscription_list_poll_rate_read_asks_for_one_entry():
+    """The SubscriptionList read for its pollRate sends s=0 and l=1."""
+    edev = _make_edev("/edev/1")
+    edev.subscription_list_link = SubscriptionListLink(href="/edev/1/sub")
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev),
+            "/edev/1/sub": SubscriptionList(**{"all": 0, "results": 0, "pollRate": 60}),
+        }
+    )
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert ("get", "/edev/1/sub?s=0&l=1") in client.calls
+    assert "sub" in state.poll_rates
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 204])
+async def test_der_list_fault_between_pages_is_an_error(
+    status: int, caplog: pytest.LogCaptureFixture
+):
+    """A 404 or 204 that get_list raises came after a page, so it is logged as an error."""
+    edev = _make_edev("/edev/1")
+    edev.derlist_link = DerlistLink(href="/edev/1/der")
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev),
+            "/edev/1/der": Sep2ProtocolError("stopped mid-pagination", status),
+        }
+    )
+    state = DiscoveredState()
+    with caplog.at_level(logging.WARNING, logger="py20305.client.discovery"):
+        await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.end_devices["/edev/1"].ders == []
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("DER list at /edev/1/der failed to read" in r.getMessage() for r in errors)
+    assert not [r for r in caplog.records if "absent" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 204])
+async def test_fsa_list_fault_between_pages_is_an_error(
+    status: int, caplog: pytest.LogCaptureFixture
+):
+    """A 404 or 204 between FSA list pages is reported as a fault and the list is skipped."""
+    edev = _make_edev("/edev/1")
+    edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev),
+            "/edev/1/fsa": Sep2ProtocolError("stopped mid-pagination", status),
+        }
+    )
+    state = DiscoveredState()
+    with caplog.at_level(logging.WARNING, logger="py20305.client.discovery"):
+        await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.end_devices["/edev/1"].fsa_list == []
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any(f"stopped answering between pages ({status})" in m for m in errors)
