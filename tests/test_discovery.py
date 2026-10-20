@@ -2332,3 +2332,53 @@ async def test_subscription_list_poll_rate_read_asks_for_one_entry():
     assert ("get", "/edev/1/sub?s=0&l=1") in client.calls
     assert "sub" in state.poll_rates
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 204])
+async def test_der_list_fault_between_pages_is_an_error(
+    status: int, caplog: pytest.LogCaptureFixture
+):
+    """A 404 or 204 that get_list raises came after a page, so it is logged as an error."""
+    edev = _make_edev("/edev/1")
+    edev.derlist_link = DerlistLink(href="/edev/1/der")
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev),
+            "/edev/1/der": Sep2ProtocolError("stopped mid-pagination", status),
+        }
+    )
+    state = DiscoveredState()
+    with caplog.at_level(logging.WARNING, logger="py20305.client.discovery"):
+        await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.end_devices["/edev/1"].ders == []
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("DER list at /edev/1/der failed to read" in r.getMessage() for r in errors)
+    assert not [r for r in caplog.records if "absent" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 204])
+async def test_fsa_list_fault_between_pages_is_an_error(
+    status: int, caplog: pytest.LogCaptureFixture
+):
+    """A 404 or 204 between FSA list pages is reported as a fault and the list is skipped."""
+    edev = _make_edev("/edev/1")
+    edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev),
+            "/edev/1/fsa": Sep2ProtocolError("stopped mid-pagination", status),
+        }
+    )
+    state = DiscoveredState()
+    with caplog.at_level(logging.WARNING, logger="py20305.client.discovery"):
+        await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.end_devices["/edev/1"].fsa_list == []
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any(f"stopped answering between pages ({status})" in m for m in errors)

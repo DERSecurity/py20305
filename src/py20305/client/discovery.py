@@ -42,6 +42,16 @@ from py20305.models.sep.sep import (
 logger = logging.getLogger(__name__)
 
 
+def _paging_fault(exc: Sep2ProtocolError) -> bool:
+    """Return True when get_list raised a 404 or 204 after reading a page.
+
+    get_list returns no pages for a 404 or 204 on the first page, so a 404 or
+    204 it raises came between pages: the server stopped serving a list it had
+    begun to serve. That is a fault to report, not an absent list.
+    """
+    return exc.status_code in (404, 204)
+
+
 def _absent_reason(status_code: int) -> str:
     """Log phrase for a benign no-representation status on an optional GET:
     404 (resource absent) vs 204 (present but No Content)."""
@@ -358,8 +368,12 @@ async def _discover_tariffs_for_fsa(client: Sep2Client, fsa: Any, state: Discove
     try:
         tp_pages = await client.get_list(tp_list_href, TariffProfileList)
     except Sep2ProtocolError as exc:
-        if exc.status_code == 404:
-            logger.warning("TariffProfileList at %s not found, skipping", tp_list_href)
+        if _paging_fault(exc):
+            logger.error(
+                "TariffProfileList at %s stopped answering between pages (%s), skipping",
+                tp_list_href,
+                exc.status_code,
+            )
             return
         raise
     except Sep2PayloadError as exc:
@@ -547,9 +561,7 @@ async def discover(
                     # Every page: a list GET without "l" returns one entry.
                     der_pages = await client.get_list(der_href, Derlist)
                     if not der_pages:
-                        logger.warning(
-                            "DER list at %s is absent (404 or 204), skipping", der_href
-                        )
+                        logger.warning("DER list at %s is absent (404 or 204), no DERs", der_href)
                     edev_state.ders = [der for page in der_pages for der in page.der]
                     hrefs = _der_child_hrefs(
                         edev_state.ders, der_href, legacy_multi_der=client.server_2018_compat
@@ -560,17 +572,11 @@ async def discover(
                     edev_state.der_availability_href = hrefs.availability
                     edev_state.current_der_controls_href = hrefs.current_controls
                 except Sep2ProtocolError as exc:
-                    if exc.status_code in (404, 204):
-                        logger.warning(
-                            "DER list at %s %s, skipping", der_href, _absent_reason(exc.status_code)
-                        )
-                    else:
-                        logger.error(
-                            "DER list at %s failed to read, no DER resource PUTs for this "
-                            "device: %s",
-                            der_href,
-                            exc,
-                        )
+                    logger.error(
+                        "DER list at %s failed to read, no DER resource PUTs for this device: %s",
+                        der_href,
+                        exc,
+                    )
                 except Sep2PayloadError as exc:
                     logger.error(
                         "DER list at %s did not parse, no DER resource PUTs for this device: %s",
@@ -584,8 +590,12 @@ async def discover(
                 try:
                     fsa_pages = await client.get_list(fsa_href, FunctionSetAssignmentsList)
                 except Sep2ProtocolError as exc:
-                    if exc.status_code == 404:
-                        logger.warning("FSA list at %s not found, skipping", fsa_href)
+                    if _paging_fault(exc):
+                        logger.error(
+                            "FSA list at %s stopped answering between pages (%s), skipping",
+                            fsa_href,
+                            exc.status_code,
+                        )
                         fsa_pages = []
                     else:
                         raise
@@ -616,9 +626,12 @@ async def discover(
                         try:
                             derp_pages = await client.get_list(derp_list_href, DerprogramList)
                         except Sep2ProtocolError as exc:
-                            if exc.status_code == 404:
-                                logger.warning(
-                                    "DERP list at %s not found, skipping", derp_list_href
+                            if _paging_fault(exc):
+                                logger.error(
+                                    "DERP list at %s stopped answering between pages (%s), "
+                                    "skipping",
+                                    derp_list_href,
+                                    exc.status_code,
                                 )
                                 continue
                             raise
@@ -672,8 +685,12 @@ async def discover(
                             client, state, device_mapping, dcap_derp_pages, edev_href, None
                         )
                     except Sep2ProtocolError as exc:
-                        if exc.status_code == 404:
-                            logger.debug("dcap DERProgramList at %s not found", dcap_derp_href)
+                        if _paging_fault(exc):
+                            logger.error(
+                                "dcap DERProgramList at %s stopped answering between pages (%s)",
+                                dcap_derp_href,
+                                exc.status_code,
+                            )
                         else:
                             raise
 
@@ -736,9 +753,13 @@ async def _refresh_curves_for_program(client: Sep2Client, derp_state: DerProgram
     try:
         curve_pages = await client.get_list(curve_list_href, DercurveList)
     except Sep2ProtocolError as exc:
-        if exc.status_code == 404:
-            logger.debug("DERCurve list at %s not found during refresh", curve_list_href)
-            derp_state.der_curves.clear()
+        if _paging_fault(exc):
+            # The curves read before the fault are incomplete; keep the ones held.
+            logger.error(
+                "DERCurve list at %s stopped answering between pages (%s) during refresh",
+                curve_list_href,
+                exc.status_code,
+            )
             return
         raise
     except Sep2PayloadError as exc:
@@ -807,8 +828,12 @@ async def refresh_der_controls(client: Sep2Client, state: DiscoveredState) -> No
         try:
             derc_pages = await client.get_list(derc_list_href, DercontrolList)
         except Sep2ProtocolError as exc:
-            if exc.status_code == 404:
-                logger.warning("DERC list at %s not found during refresh", derc_list_href)
+            if _paging_fault(exc):
+                logger.error(
+                    "DERC list at %s stopped answering between pages (%s) during refresh",
+                    derc_list_href,
+                    exc.status_code,
+                )
                 continue
             raise
         except Sep2PayloadError as exc:
@@ -881,8 +906,12 @@ async def refresh_der_controls_for_program(
         try:
             derc_pages = await client.get_list(derc_list_href, DercontrolList)
         except Sep2ProtocolError as exc:
-            if exc.status_code == 404:
-                logger.warning("DERC list at %s not found during targeted refresh", derc_list_href)
+            if _paging_fault(exc):
+                logger.error(
+                    "DERC list at %s stopped answering between pages (%s) during targeted refresh",
+                    derc_list_href,
+                    exc.status_code,
+                )
                 return True
             raise
         except Sep2PayloadError as exc:
@@ -973,8 +1002,12 @@ async def refresh_function_set_assignments(
         try:
             fsa_pages = await client.get_list(fsa_href, FunctionSetAssignmentsList)
         except Sep2ProtocolError as exc:
-            if exc.status_code == 404:
-                logger.warning("FSA list at %s not found during refresh", fsa_href)
+            if _paging_fault(exc):
+                logger.error(
+                    "FSA list at %s stopped answering between pages (%s) during refresh",
+                    fsa_href,
+                    exc.status_code,
+                )
                 continue
             raise
 
@@ -1057,8 +1090,12 @@ async def refresh_der_programs(client: Sep2Client, state: DiscoveredState) -> li
             try:
                 derp_pages = await client.get_list(derp_list_href, DerprogramList)
             except Sep2ProtocolError as exc:
-                if exc.status_code == 404:
-                    logger.warning("DERP list at %s not found during refresh", derp_list_href)
+                if _paging_fault(exc):
+                    logger.error(
+                        "DERP list at %s stopped answering between pages (%s) during refresh",
+                        derp_list_href,
+                        exc.status_code,
+                    )
                     unreachable_fsas.add(fsa.href)
                     continue
                 raise
