@@ -9,6 +9,33 @@ below says so explicitly.
 
 Nothing yet.
 
+## [0.14.0] - 2026-10-20
+
+### Added
+
+- **The client keeps an operations history on disk: event lifecycles and responses, device writes, and measured intervals (#68).**
+  One SQLite file (`history.path`, default `py20305-history.sqlite3` in the
+  working directory) with three parts, each on by default and each switched off
+  on its own under `history.events`, `history.writes` and `history.intervals`;
+  `history.enabled: false` keeps no history and writes no file. Events keep every
+  audit-trail lifecycle record whether or not the trail is published, the
+  control's description and settings, and every DERControlResponse posted or
+  failed. Writes keep each device write, including failed and gate-refused ones,
+  with the mRID of the control and of the event that caused it. Intervals
+  integrate telemetry readings into 15-minute intervals with energy by sign,
+  coverage, and curtailed energy where the device reports available power, and
+  compute comparison-day baselines that leave out event days. Rows are kept for
+  `history.retention_days` (400). New read endpoints under `/api/v1/history`.
+  **Upgrading:** the history is on by default, so an upgraded client starts
+  writing the file in its working directory. In a container, mount the
+  `py20305` home on a volume to keep it, or set `history.enabled: false`. A file
+  that cannot be opened is logged and the client runs without a history.
+  Published audit records are unchanged.
+
+### Fixed
+
+- **A server-issued control that the command gate refuses is answered with status 252 (Not Applicable), not status 2 (Active) (#69).** When a `CommandGate` refused the IEEE 2030.5 origin for a device, the dispatcher recorded the refusal and returned, and the event processor then told the server the event had started on a device that was never written. `ConnectorDispatcher.apply_control` and `apply_control_by_lfdi` now raise `CommandNotPermittedError` after offering every mode to the gate, so each refused write is still recorded. The event processor reports the device as rejected and leaves it out of the event's Completed response (IEEE 2030.5-2023 Table 31). Table 31 has no code for a refusal by local configuration; 252 is the code for a control the device is not set up to take, as for `DeviceNotConfiguredError`. This is a breaking change for a caller of `apply_control` or `apply_control_by_lfdi` outside the event processor, which now has to handle the exception. A refused default control or clear is still reported and dropped, since neither sends a response.
+
 ## [0.13.0] - 2026-10-16
 
 ### Added
