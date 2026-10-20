@@ -36,7 +36,7 @@ from py20305.connectors.dispatcher import ConnectorDispatcher
 from py20305.history import MEMORY, History, HistoryConfig, build_history
 from py20305.history import database as database_module
 from py20305.history import intervals as intervals_module
-from py20305.history.database import HistoryDatabase
+from py20305.history.database import HistoryDatabase, _create_owner_only
 from py20305.history.events import EventHistory
 from py20305.history.intervals import IntervalHistory
 from py20305.history.writes import WriteHistory
@@ -1126,78 +1126,121 @@ class TestReviewFixes:
         assert loops == [False], "the read ran on a worker thread, not inside the event loop"
 
 
-# -- Concurrency, migration and file modes --------------------------------------------
+# -- Concurrency and file modes -----------------------------------------------------
+
+
+def _blocking_table(database: HistoryDatabase) -> dict[str, threading.Event]:
+    """Register a table whose inserts wait on a named event, to hold the writer.
+
+    Rows carry a far-future time so the retention prune never removes them.
+    """
+    gates: dict[str, threading.Event] = {"a": threading.Event(), "b": threading.Event()}
+    database.register_table("gated", "at", ["CREATE TABLE gated (at REAL, name TEXT)"])
+    database._conn.create_function(
+        "wait_for", 1, lambda name: gates[name].wait(5)
+    )
+    return gates
+
+
+class TestWriteBatches:
+    def test_batches_are_numbered_in_queue_order_and_a_dropped_batch_takes_no_number(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(database_module, "MAX_PENDING_WRITES", 1)
+        database = HistoryDatabase(MEMORY)
+        gates = _blocking_table(database)
+        insert = "INSERT INTO gated VALUES (4e9, ?)"
+        held = "INSERT INTO gated SELECT 4e9, ? WHERE wait_for('a')"
+
+        first = database.queue_batch("gated", held, [("first",)])
+        deadline = time.monotonic() + 5
+        while database._queue.qsize() and time.monotonic() < deadline:
+            time.sleep(0.01)  # until the writer has taken the first batch and is held in it
+        second = database.queue_batch("gated", insert, [("second",)])  # fills the queue
+        dropped = database.queue_batch("gated", insert, [("dropped",)])
+        gates["a"].set()
+        rows, through = database.query_through("SELECT name FROM gated ORDER BY rowid")
+        database.close()
+
+        assert (first, second, dropped) == (1, 2, None)
+        assert through == 2
+        assert [r["name"] for r in rows] == ["first", "second"]
+
+    def test_drain_does_not_wait_for_writes_queued_after_it(self):
+        database = HistoryDatabase(MEMORY)
+        gates = _blocking_table(database)
+        held = "INSERT INTO gated SELECT 4e9, ? WHERE wait_for(?)"
+        database.write("gated", held, ("first", "a"))
+        drainer = threading.Thread(target=database.drain)
+        drainer.start()
+        deadline = time.monotonic() + 5
+        while not database._progress._waiters and time.monotonic() < deadline:  # type: ignore[attr-defined]
+            time.sleep(0.01)  # until drain() has taken its target and is waiting
+        database.write("gated", held, ("second", "b"))
+
+        gates["a"].set()
+        drainer.join(timeout=5)
+        finished = not drainer.is_alive()
+        gates["b"].set()
+        database.close()
+
+        assert finished, "drain() waited for a write queued after it"
 
 
 class TestIntervalsAcrossThreads:
+    def _query_with(self, history: History, before: Any = None, after: Any = None) -> Any:
+        """Run ``before`` and ``after`` around the database read of an interval query."""
+        real = history.database.query_through
+
+        def query_through(sql: str, params: Any = ()) -> Any:
+            if before:
+                before()
+            result = real(sql, params)
+            if after:
+                after()
+            return result
+
+        history.database.query_through = query_through  # type: ignore[method-assign]
+        return _interval(history, T0)
+
     def test_an_interval_that_ends_between_the_memory_copy_and_the_read_counts_once(self):
         history = _memory()
         intervals = history.intervals
         assert intervals is not None
         _feed(intervals, T0, T0 + 840, 1000.0)
-        real_query = history.database.query
 
-        def query_after_the_interval_ends(sql: str, params: Any = ()) -> Any:
-            # The memory copy is already taken; the interval ends and is written now.
-            intervals.observe(DEV, T0 + 900, {"W": 1000.0})
-            return real_query(sql, params)
-
-        history.database.query = query_after_the_interval_ends  # type: ignore[method-assign]
-        row = next(r for r in intervals.query(lfdi=DEV) if r["start"] == T0)
+        row = self._query_with(
+            history, before=lambda: intervals.observe(DEV, T0 + 900, {"W": 1000.0})
+        )
 
         assert row["samples"] == 15, "counted once, from the written row"
         assert row["covered_seconds"] == pytest.approx(900)
 
-    def test_an_interval_that_ends_after_the_read_is_still_counted(self):
+    def test_an_interval_that_ends_after_the_read_is_counted_from_memory(self):
         history = _memory()
         intervals = history.intervals
         assert intervals is not None
         _feed(intervals, T0, T0 + 840, 1000.0)
-        real_query = history.database.query
 
-        def query_then_the_interval_ends(sql: str, params: Any = ()) -> Any:
-            rows = real_query(sql, params)
-            intervals.observe(DEV, T0 + 900, {"W": 1000.0})
-            return rows
-
-        history.database.query = query_then_the_interval_ends  # type: ignore[method-assign]
-        row = next(r for r in intervals.query(lfdi=DEV) if r["start"] == T0)
+        row = self._query_with(
+            history, after=lambda: intervals.observe(DEV, T0 + 900, {"W": 1000.0})
+        )
 
         assert row["samples"] == 15, "counted once, from the copy in memory"
 
-    def test_readings_and_queries_on_different_threads_do_not_fail(self):
+    def test_readings_after_a_flush_in_the_same_interval_are_added_to_the_written_row(self):
         history = _memory()
         intervals = history.intervals
         assert intervals is not None
-        errors: list[BaseException] = []
-        stop = threading.Event()
+        _feed(intervals, T0, T0 + 240, 1000.0)
+        intervals.flush()
+        _feed(intervals, T0 + 300, T0 + 540, 1000.0)
 
-        def read_devices() -> None:
-            try:
-                t = T0
-                for _ in range(300):
-                    if stop.is_set():
-                        return
-                    # New devices keep appearing while queries walk the devices.
-                    for n in range(50):
-                        intervals.observe(f"{n:040x}", t, {"W": 1.0})
-                    t += 60
-                    time.sleep(0.001)
-            except BaseException as exc:  # pragma: no cover - the failure being tested
-                errors.append(exc)
+        row = _interval(history, T0)
 
-        reader = threading.Thread(target=read_devices)
-        reader.start()
-        try:
-            while reader.is_alive():
-                intervals.query()
-                history.baseline(T0 + 86400, T0 + 86400 + 900)
-        finally:
-            stop.set()
-            reader.join(timeout=5)
-
-        assert errors == []
-
+        assert row["samples"] == 10
+        # 240 s before the flush, 60 s bridged across it, 240 s after.
+        assert row["covered_seconds"] == pytest.approx(540)
 
     def test_a_device_read_waits_while_a_query_copies_the_unfinished_intervals(self):
         history = _memory()
@@ -1205,9 +1248,11 @@ class TestIntervalsAcrossThreads:
         assert intervals is not None
         intervals.observe(DEV, T0, {"W": 1.0})
         intervals.observe("bb" * 20, T0, {"W": 1.0})
+        waited: list[bool] = []
+        readers: list[threading.Thread] = []
 
         class ReadDuringWalk(dict):  # type: ignore[type-arg]
-            """Starts a read of a new device once a query has begun walking the devices."""
+            """Start a read of a new device once a query has begun walking the devices."""
 
             def items(self):  # type: ignore[no-untyped-def]
                 walk = iter(super().items())
@@ -1215,56 +1260,55 @@ class TestIntervalsAcrossThreads:
                 reader = threading.Thread(
                     target=intervals.observe, args=("cc" * 20, T0 + 60, {"W": 1.0})
                 )
+                readers.append(reader)
                 reader.start()
-                reader.join(timeout=0.2)  # with the lock held, the read waits
+                reader.join(timeout=0.2)
+                waited.append(reader.is_alive())
                 yield from walk
 
         intervals._devices = ReadDuringWalk(intervals._devices)
 
         rows = intervals.query()
+        readers[0].join(timeout=5)
 
-        assert {r["lfdi"] for r in rows} >= {DEV, "bb" * 20}
-
-
-class TestUpgradeFromTheFirstRelease:
-    def test_intervals_written_by_0_14_0_are_moved_and_still_read(self, tmp_path: Path):
-        import sqlite3
-
-        path = tmp_path / "history.sqlite3"
-        old = sqlite3.connect(path)
-        old.execute(
-            """CREATE TABLE device_intervals (lfdi TEXT NOT NULL, start REAL NOT NULL,
-            seconds INTEGER NOT NULL, covered_seconds REAL NOT NULL, samples INTEGER NOT NULL,
-            ws_positive REAL NOT NULL, ws_negative REAL NOT NULL, w_min REAL, w_max REAL,
-            var_seconds REAL NOT NULL, vars_positive REAL NOT NULL, vars_negative REAL NOT NULL,
-            avail_seconds REAL NOT NULL, avail_ws REAL NOT NULL, curtail_seconds REAL NOT NULL,
-            curtailed_ws REAL NOT NULL, PRIMARY KEY (lfdi, start, seconds))"""
-        )
-        old.execute(
-            "INSERT INTO device_intervals VALUES (?, ?, 900, 900, 15, 900000, 0, 1000, 1000, "
-            "0, 0, 0, 0, 0, 0, 0)",
-            (DEV, T0),
-        )
-        old.commit()
-        old.close()
-
-        history = History.open(path)
-        row = _interval(history, T0)
-        tables = {r["name"] for r in history.database.query(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        )}
-        history.close()
-
-        assert row["wh_positive"] == pytest.approx(250.0)
-        assert "device_intervals" not in tables
+        assert waited == [True], "the read went ahead while the query held the lock"
+        assert {r["lfdi"] for r in rows} == {DEV, "bb" * 20}
+        assert not readers[0].is_alive()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 class TestFileModes:
-    def test_the_history_is_readable_by_its_owner_only(self, tmp_path: Path):
+    def test_a_new_history_is_readable_by_its_owner_only(self, tmp_path: Path):
         path = tmp_path / "new" / "history.sqlite3"
 
         History.open(path).close()
 
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+    def test_an_existing_history_loses_group_and_other_permissions(self, tmp_path: Path):
+        path = tmp_path / "history.sqlite3"
+        History.open(path).close()
+        path.chmod(0o644)
+
+        History.open(path).close()
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_a_read_only_history_stays_read_only(self, tmp_path: Path):
+        path = tmp_path / "history.sqlite3"
+        History.open(path).close()
+        path.chmod(0o444)
+
+        _create_owner_only(path)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o400
+
+    def test_a_directory_at_the_history_path_is_left_unchanged(self, tmp_path: Path):
+        path = tmp_path / "data"
+        path.mkdir(mode=0o755)
+        path.chmod(0o755)
+
+        _create_owner_only(path)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o755

@@ -166,7 +166,7 @@ class History:
                     ("event_records", self.events is not None),
                     ("event_responses", self.events is not None),
                     ("device_writes", self.writes is not None),
-                    ("interval_rows", self.intervals is not None),
+                    ("device_intervals", self.intervals is not None),
                 )
                 if on
             },
