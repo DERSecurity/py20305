@@ -18,6 +18,10 @@ record and a new ``boot_id`` marks a restart.
 
 Nothing here may raise into event processing. A trail that can stop a control
 from being applied is worse than no trail.
+
+The same records can also be kept locally, in the operations history. That is
+independent of publishing: a client with no forwarder can keep a history, and
+a client that publishes need not keep one.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ import itertools
 import logging
 import re
 import uuid
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from py20305.forwarders.base import EventFrame
@@ -33,6 +38,7 @@ from py20305.forwarders.base import EventFrame
 if TYPE_CHECKING:
     from py20305.forwarders.config import AuditConfig
     from py20305.forwarders.manager import ForwarderManager
+    from py20305.history.events import EventHistory
 
 logger = logging.getLogger(__name__)
 
@@ -106,14 +112,29 @@ class AuditEmitter:
         self._config = config if config is not None else AuditConfig()
         self._client_id = client_id or ""
         self._sequence = sequence if sequence is not None else AuditSequence()
+        self._history: EventHistory | None = None
         #: Records that failed to build or queue, by kind. A trail that
         #: stopped working must not look like a client with nothing to report.
         self.emit_failures: dict[str, int] = {}
 
     @property
     def enabled(self) -> bool:
+        """Whether records go anywhere: published, kept in the history, or both."""
+        return self.publishing or self._history is not None
+
+    @property
+    def publishing(self) -> bool:
         """Whether records will actually be published."""
         return self._config.enabled and self._forwarder is not None
+
+    @property
+    def keeps_history(self) -> bool:
+        """Whether records are kept in the local operations history."""
+        return self._history is not None
+
+    def attach_history(self, history: EventHistory | None) -> None:
+        """Keep every record in ``history`` as well, whether or not it is published."""
+        self._history = history
 
     @property
     def sequence(self) -> AuditSequence:
@@ -148,6 +169,7 @@ class AuditEmitter:
         superseded_by: bytes | None = None,
         superseded_lfdis: list[str] | None = None,
         superseded_modes: dict[str, list[str]] | None = None,
+        control: Mapping[str, Any] | None = None,
     ) -> None:
         """Record one event moving from one state to another.
 
@@ -171,6 +193,8 @@ class AuditEmitter:
             superseded_by: On ``superseded``, the superseding event.
             superseded_lfdis: On a partial supersession, the devices it covers.
             superseded_modes: On a partial supersession, the modes per device.
+            control: The control's description and settings, kept in the local
+                history only. Published records keep their existing shape.
         """
         if not self.enabled:
             return
@@ -199,7 +223,7 @@ class AuditEmitter:
                 record["superseded_modes"] = {
                     _lfdi(dev): sorted(modes) for dev, modes in superseded_modes.items()
                 }
-            self._publish(record)
+            self._publish(record, control=control)
         except Exception:
             self._failed("der_event")
 
@@ -294,14 +318,17 @@ class AuditEmitter:
         except Exception:
             self._failed("late_dispatch")
 
-    def _publish(self, record: dict[str, Any]) -> None:
-        assert self._forwarder is not None  # guarded by `enabled`
+    def _publish(self, record: dict[str, Any], *, control: Mapping[str, Any] | None = None) -> None:
         record["schema"] = AUDIT_SCHEMA_VERSION
         record["client_id"] = self._client_id
         record.update(self._sequence.stamp())
-        self._forwarder.queue_event(
-            EventFrame(payload=record, topic_suffix=self._config.topic_suffix, kind="audit")
-        )
+        if self._history is not None and not self._history.record(record, control=control):
+            self._failed(f"{record['kind']} history")
+        if self.publishing:
+            assert self._forwarder is not None  # guarded by `publishing`
+            self._forwarder.queue_event(
+                EventFrame(payload=record, topic_suffix=self._config.topic_suffix, kind="audit")
+            )
 
     def _failed(self, kind: str) -> None:
         count = self.emit_failures.get(kind, 0) + 1

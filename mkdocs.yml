@@ -68,6 +68,7 @@ nav:
       - Connecting devices: connectors.md
       - Management API: api.md
       - Forwarding traffic: forwarding.md
+      - Operations history: history.md
       - Running in a container: docker.md
       - Testing: testing.md
   - Conformance: conformance/index.md

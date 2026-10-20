@@ -286,6 +286,10 @@ forwarders:
 Off by default. Like the other telemetry streams it rides the forwarder's
 transport, so the `mqtt` block is required.
 
+The same lifecycle records, and every device write, are also kept on disk by the
+[operations history](history.md), which needs no forwarder. Publishing and
+keeping are independent: each can be on without the other.
+
 One switch publishes two things:
 
 | `audit` | `device_telemetry` | Reads | Writes | Lifecycle records |

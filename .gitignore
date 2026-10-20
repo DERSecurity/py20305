@@ -225,3 +225,6 @@ junit.xml
 .venv311/
 .e2e/
 *.bak
+
+# Operations history written by the command-line runner
+py20305-history.sqlite3*

@@ -418,6 +418,36 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
     return client, own_lfdi
 
 
+def _attach_history(client: CsipClient, config: ClientConfig) -> None:
+    """Open the operations history the configuration asks for and feed it.
+
+    A history that cannot be opened is reported and left out rather than
+    stopping the client. The history is on by default, so an existing
+    deployment whose working directory is read-only must keep running after
+    an upgrade; it says what to change instead.
+    """
+    import sqlite3
+
+    from py20305.history import build_history
+
+    try:
+        history = build_history(config.history)
+    except (OSError, sqlite3.Error) as exc:
+        logger.error(
+            "operations history is off: cannot open %s (%s). Set history.path to a "
+            "writable file, or history.enabled: false to silence this.",
+            config.history.path,
+            exc,
+        )
+        return
+    if history is None:
+        return
+    client.attach_history(history)
+    if isinstance(client.dispatcher, ConnectorDispatcher):
+        client.dispatcher.attach_write_history(history.writes)
+    logger.info("operations history: %s", history.database.path)
+
+
 def build_advertiser(config: ClientConfig) -> MulticastAdvertiser | None:
     """Build the local-network advertiser, or None when nothing is announced.
 
@@ -793,6 +823,7 @@ async def _run_client(
         )
 
     client, own_lfdi = build_client(config)
+    _attach_history(client, config)
     logger.info("client LFDI: %s", own_lfdi)
     logger.info("server: %s", config.server.url)
     logger.info("devices: %d configured", len(config.devices))
@@ -942,6 +973,9 @@ async def _run_client(
         # the transport drains rather than after it has stopped accepting.
         if forwarder is not None:
             await forwarder.stop()
+        # Last, so intervals still open when telemetry stopped are written.
+        if client.history is not None:
+            client.history.close()
         logger.info("stopped")
 
 
@@ -1024,6 +1058,7 @@ def _start_telemetry(
         der_settings_poll_rate_seconds=config.telemetry.der_settings_poll_rate_seconds,
         device_telemetry=dispatcher.telemetry,
         reading_profile=ReadingProfile(config.telemetry.reading_profile),
+        interval_history=client.history.intervals if client.history is not None else None,
     )
     coordinator.setup()
     coordinator.start_device_telemetry()

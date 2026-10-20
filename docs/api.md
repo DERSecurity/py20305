@@ -62,6 +62,13 @@ class MyService(ClientAPIService):
 
 Build your own router for the additions and include both.
 
+## Reading the operations history
+
+The `/api/v1/history` endpoints read the [operations history](history.md):
+event summaries, device writes, measured intervals and comparison-day
+baselines. Each answers `{"enabled": false}` when its part of the history is
+switched off.
+
 ## Reading the head-end's clock
 
 `GET /api/v1/time` returns the current time as the head-end reports it, already

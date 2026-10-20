@@ -30,6 +30,7 @@ from pydantic import (
 from py20305.client.dnssd.wire import DEFAULT_SERVICE, validate_service, validate_subtype
 from py20305.connectors.config import DeviceConfig
 from py20305.forwarders.config import ForwarderConfig
+from py20305.history.config import HistoryConfig
 
 #: Suffixes understood by :func:`load_config`.
 _YAML_SUFFIXES = {".yaml", ".yml"}
@@ -455,6 +456,15 @@ class ClientConfig(_Strict):
         description=(
             "Publish captured traffic to a monitoring system. Omitted, the client "
             "forwards nothing and never loads the transport."
+        ),
+    )
+
+    history: HistoryConfig = Field(
+        default_factory=HistoryConfig,
+        description=(
+            "Keep an operations history on disk: event lifecycles and responses, "
+            "device writes, and measured intervals. On by default; each part can be "
+            "switched off, or all of it with `enabled: false`."
         ),
     )
 

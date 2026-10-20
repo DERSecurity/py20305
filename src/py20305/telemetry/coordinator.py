@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from py20305.commands import CommandObserver
     from py20305.connectors.base import BaseConnector
     from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
+    from py20305.history.intervals import IntervalHistory
     from py20305.readings import MeasurementSource
     from py20305.telemetry.der_resource_manager import DerResourceManager
     from py20305.telemetry.manager import TelemetryManager
@@ -83,8 +84,10 @@ class TelemetryCoordinator:
         is_provisioned: Callable[[str], bool] | None = None,
         command_observer: CommandObserver | None = None,
         reading_profile: ReadingProfile = ReadingProfile.DEFAULT,
+        interval_history: IntervalHistory | None = None,
     ) -> None:
         self._client = client
+        self._interval_history = interval_history
         self._reading_profile = reading_profile
         self._resolve_connector = connector_resolver
         self._post_rate = post_rate_seconds
@@ -160,6 +163,7 @@ class TelemetryCoordinator:
             source=self._source,
             device_telemetry=self._device_telemetry,
             reading_profile=self._reading_profile,
+            interval_history=self._interval_history,
         )
 
     def _setup_der_resources(self) -> None:

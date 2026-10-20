@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from py20305.client.http import Sep2Client
     from py20305.connectors.base import BaseConnector, ReadingOverride
     from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
+    from py20305.history.intervals import IntervalHistory
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,7 @@ class TelemetryManager:
         source: MeasurementSource | None = None,
         device_telemetry: DeviceTelemetryEmitter | None = None,
         reading_profile: ReadingProfile = ReadingProfile.DEFAULT,
+        interval_history: IntervalHistory | None = None,
     ) -> None:
         """Initialize the TelemetryManager.
 
@@ -212,6 +214,8 @@ class TelemetryManager:
             reading_profile: How MirrorMeterReadings are encoded, for every
                 device. Fixed for the manager's lifetime: a change of profile
                 changes units and sign on existing mRIDs, so it is a restart.
+            interval_history: Integrates each reading, and each available-power
+                reading, into the operations history. Optional.
         """
         self._client = client
         self._reading_profile = reading_profile
@@ -239,6 +243,7 @@ class TelemetryManager:
         )
         self._devices: dict[str, DeviceTelemetryState] = {}
         self._scheduler = PollScheduler()
+        self._intervals = interval_history
 
     def start_metering(
         self,
@@ -427,6 +432,9 @@ class TelemetryManager:
         # than read from it. A second now() call would reintroduce post time.
         acquired_at = int(snapshot.last_success + self._timebase.offset())
         stale = snapshot.quality is not Quality.GOOD
+        self._keep_interval(
+            lfdi, snapshot.last_success + self._timebase.offset(), monitoring, stale
+        )
         monitoring = self._with_registered_ac_type(state, monitoring)
 
         # Stage 1: MUP creation or meter readings
@@ -459,6 +467,25 @@ class TelemetryManager:
         # Stage 3: DERAvailability PUT
         await self._put_der_availability(state, connector)
 
+    def _keep_interval(
+        self, lfdi: str, at: float, monitoring: dict[str, Any], stale: bool
+    ) -> None:
+        """Integrate one reading into the interval history. Never raises.
+
+        A stale reading is not integrated: it repeats an old value, and holding
+        it would count energy nobody measured. It ends the hold on the last
+        good reading instead.
+        """
+        if self._intervals is None:
+            return
+        try:
+            if stale:
+                self._intervals.interrupt(lfdi)
+            else:
+                self._intervals.observe(lfdi, at, monitoring)
+        except Exception:
+            logger.debug("Interval history failed for %s", lfdi[:8], exc_info=True)
+
     def _report_acquisition_failure(
         self, lfdi: str, connector_name: str, error: Exception | None
     ) -> None:
@@ -469,6 +496,13 @@ class TelemetryManager:
         cares about it -- the management API describes the same failure
         differently.
         """
+        # The device could not be read, so its last reading stops counting:
+        # holding it across the failure would report energy nobody measured.
+        if self._intervals is not None:
+            try:
+                self._intervals.interrupt(lfdi)
+            except Exception:
+                logger.debug("Interval history failed for %s", lfdi[:8], exc_info=True)
         if error is None:
             return
 
@@ -1064,6 +1098,10 @@ class TelemetryManager:
 
         try:
             data = await self._read(connector, "fetch_availability", state.lfdi)
+            if self._intervals is not None:
+                self._intervals.observe_availability(
+                    state.lfdi, self._timebase.now(), data.get("statWAvail")
+                )
             model = build_der_availability(data, default_time=int(self._timebase.now()))
             await self._client.put_bytes(
                 state.der_availability_href,

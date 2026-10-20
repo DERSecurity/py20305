@@ -17,6 +17,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Coroutine
+from datetime import UTC, tzinfo
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from py20305.api.serializers import (
@@ -34,12 +35,29 @@ from py20305.json_form import (
 
 if TYPE_CHECKING:
     from py20305.client.csip_client import CsipClient
+    from py20305.history import History
     from py20305.telemetry.der_resource_manager import DerResourceManager
     from py20305.telemetry.manager import TelemetryManager
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+def _zone(name: str | None) -> tzinfo:
+    """A time zone by IANA name, or UTC when none is given.
+
+    Raises ValueError for an unknown name. On Windows the zone database comes
+    from the ``tzdata`` package, which is not installed by default.
+    """
+    if not name or name.upper() == "UTC":
+        return UTC
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"unknown time zone {name!r}") from exc
 
 
 def _as_int(value: Any) -> int | None:
@@ -458,6 +476,133 @@ class ClientAPIService:
                 )
 
         return {"responses": responses}
+
+    # -- Operations history ---------------------------------------------------
+
+    def _history(self) -> History | None:
+        from py20305.history import History
+
+        # A client without the attribute, or a stand-in that answers every
+        # attribute, has no history.
+        history = getattr(self._client, "history", None)
+        return history if isinstance(history, History) else None
+
+    def get_history_status(self) -> dict[str, Any]:
+        """Which parts of the history are on, where it is kept, and its size."""
+        history = self._history()
+        return {"enabled": False} if history is None else history.status()
+
+    def get_history_events(
+        self,
+        *,
+        since: float | None = None,
+        until: float | None = None,
+        program_href: str | None = None,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        """One summary per event whose time under control overlaps the range."""
+        history = self._history()
+        if history is None or history.events is None:
+            return {"enabled": False, "events": []}
+        return {
+            "enabled": True,
+            "events": history.events.events(
+                since=since, until=until, program_href=program_href, limit=limit
+            ),
+        }
+
+    def get_history_event(self, event_mrid: str) -> dict[str, Any] | None:
+        """Everything kept about one event, or None when nothing is."""
+        history = self._history()
+        if history is None or history.events is None:
+            return {"enabled": False}
+        summary = history.events.event(event_mrid)
+        if summary is None:
+            return None
+        return {
+            "enabled": True,
+            "event": summary,
+            "records": history.events.records(event_mrid=event_mrid),
+            "responses": history.events.responses(event_mrid=event_mrid),
+            "writes": (
+                history.writes.query(event_mrid=event_mrid) if history.writes is not None else None
+            ),
+        }
+
+    def get_history_writes(
+        self,
+        *,
+        event_mrid: str | None = None,
+        lfdi: str | None = None,
+        control: str | None = None,
+        since: float | None = None,
+        until: float | None = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        """Device writes, oldest first."""
+        history = self._history()
+        if history is None or history.writes is None:
+            return {"enabled": False, "writes": []}
+        return {
+            "enabled": True,
+            "writes": history.writes.query(
+                event_mrid=event_mrid,
+                lfdi=lfdi,
+                control=control,
+                since=since,
+                until=until,
+                limit=limit,
+            ),
+        }
+
+    def get_history_intervals(
+        self,
+        *,
+        lfdi: str | None = None,
+        since: float | None = None,
+        until: float | None = None,
+        limit: int = 10000,
+    ) -> dict[str, Any]:
+        """Measured intervals, oldest first."""
+        history = self._history()
+        if history is None or history.intervals is None:
+            return {"enabled": False, "intervals": []}
+        return {
+            "enabled": True,
+            "interval_seconds": history.intervals.interval_seconds,
+            "intervals": history.intervals.query(
+                lfdi=lfdi, since=since, until=until, limit=limit
+            ),
+        }
+
+    def get_history_baseline(
+        self,
+        start: float,
+        end: float,
+        *,
+        lfdi: str | None = None,
+        days: int = 10,
+        lookback_days: int = 45,
+        weekdays_only: bool = True,
+        tz: str | None = None,
+    ) -> dict[str, Any]:
+        """A comparison-day baseline for a window. Raises ValueError on bad input."""
+        history = self._history()
+        if history is None or history.intervals is None:
+            return {"enabled": False}
+        zone = _zone(tz)
+        return {
+            "enabled": True,
+            **history.baseline(
+                start,
+                end,
+                lfdi=lfdi,
+                days=days,
+                lookback_days=lookback_days,
+                weekdays_only=weekdays_only,
+                tz=zone,
+            ),
+        }
 
     # -- Log Events -----------------------------------------------------------
 

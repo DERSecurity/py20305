@@ -95,6 +95,19 @@ docker run -d -p 127.0.0.1:8080:8080   -v "$PWD/config:/etc/py20305:ro" py20305
 The publication is the access boundary, not the in-container bind. The image
 also has to be built with the `api` extra, which the default build omits.
 
+## Keeping the operations history
+
+The client keeps its [operations history](history.md) in its working
+directory, the `py20305` user's home, which is lost with the container. Put
+the home on a named volume to keep it:
+
+```bash
+docker run -d \n  -v "$PWD/config:/etc/py20305:ro" \n  -v py20305-home:/home/py20305 \n  py20305
+```
+
+A new named volume takes its ownership from the image, so the client can write
+to it. A deployment that keeps no history sets `history.enabled: false`.
+
 ## Serial devices
 
 A device on an RS-485 line needs the line passed into the container:
