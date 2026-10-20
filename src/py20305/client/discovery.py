@@ -153,23 +153,21 @@ async def _discover_self_device(
         logger.info("Discovered SelfDevice at %s (no DERListLink)", sdev_href)
         return sdev_state
 
+    # Read every page: a list GET without "l" returns one entry (IEEE 2030.5
+    # GEN.019), and a 2018 server can list more than one DER.
     try:
-        der_list = await client.get(der_href, Derlist)
+        der_pages = await client.get_list(der_href, Derlist)
     except Sep2ProtocolError as exc:
-        if exc.status_code in (404, 204):
-            logger.warning(
-                "SelfDevice DER list at %s %s, skipping",
-                der_href,
-                _absent_reason(exc.status_code),
-            )
-        else:
-            logger.error("SelfDevice DER list at %s failed to read, skipping: %s", der_href, exc)
+        logger.error("SelfDevice DER list at %s failed to read, skipping: %s", der_href, exc)
         return sdev_state
     except Sep2PayloadError as exc:
         logger.error("SelfDevice DER list at %s did not parse, skipping: %s", der_href, exc)
         return sdev_state
+    if not der_pages:
+        logger.warning("SelfDevice DER list at %s is absent (404 or 204), skipping", der_href)
+        return sdev_state
 
-    sdev_state.ders = list(der_list.der)
+    sdev_state.ders = [der for page in der_pages for der in page.der]
     if sdev_state.ders:
         sdev_state.der_subscribable = bool(sdev_state.ders[0].subscribable)
     hrefs = _der_child_hrefs(sdev_state.ders, der_href, legacy_multi_der=client.server_2018_compat)
@@ -513,7 +511,11 @@ async def discover(
                 # falls back to the IEEE 900s default when the server omits it.
                 if "sub" not in state.poll_rates:
                     try:
-                        sub_list = await client.get(sub_list_href, SubscriptionList)
+                        # Only pollRate is read, so one entry is enough.
+                        sep = "&" if "?" in sub_list_href else "?"
+                        sub_list = await client.get(
+                            f"{sub_list_href}{sep}s=0&l=1", SubscriptionList
+                        )
                         state.poll_rates["sub"] = normalize_poll_rate(
                             sub_list.poll_rate, resource_key="sub"
                         )
@@ -542,8 +544,13 @@ async def discover(
             der_href = _extract_href(edev.derlist_link)
             if der_href:
                 try:
-                    der_list = await client.get(der_href, Derlist)
-                    edev_state.ders = list(der_list.der)
+                    # Every page: a list GET without "l" returns one entry.
+                    der_pages = await client.get_list(der_href, Derlist)
+                    if not der_pages:
+                        logger.warning(
+                            "DER list at %s is absent (404 or 204), skipping", der_href
+                        )
+                    edev_state.ders = [der for page in der_pages for der in page.der]
                     hrefs = _der_child_hrefs(
                         edev_state.ders, der_href, legacy_multi_der=client.server_2018_compat
                     )
