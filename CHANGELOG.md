@@ -9,6 +9,71 @@ below says so explicitly.
 
 Nothing yet.
 
+## [0.15.0] - 2026-10-20
+
+### Fixed
+
+- **The MQTT forwarder reconnects after the broker closes the connection, instead of failing every later publish until the process restarts (#71).**
+  The forwarder opened one broker connection at start and never reconnected. When
+  the broker dropped it, every publish failed, first with "The client is not
+  currently connected." and then with "Message queue full.", and the forwarder
+  kept reporting itself connected, because it marked the link down only when an
+  error message contained the word "connection". Connection events released into
+  that dead client were lost. Now any MQTT client error or socket error from a
+  publish, or the client's own report that its socket closed, marks the link
+  down. The forwarder stops publishing, keeps buffered items in its existing
+  bounded queues, and reconnects with exponential backoff and jitter
+  (`reconnect_initial_delay_seconds`, default 1, doubling up to
+  `reconnect_max_delay_seconds`, default 60), reusing its client ID and loading
+  its TLS files again on each attempt. The backoff resets only once a new
+  connection is stable, meaning a publish succeeded on it or it stayed up for
+  `reconnect_max_delay_seconds`, so a broker that accepts the connection and
+  drops it at once is retried at the growing delay. The message whose publish
+  failed is sent first after reconnecting. A message whose publish loses the
+  connection three times in a row is dropped, counted as a publish error and
+  logged with its topic, so a message the broker answers by closing the
+  connection cannot hold back the queue.
+  `connected`, `can_deliver` and `can_deliver_events` stay false while the link
+  is down, so held connection events wait and go out after the reconnect. A loss
+  logs one warning, an outage logs a reminder and sends a connection failure
+  event at most every five minutes, and a reconnect logs one info line with the
+  downtime and attempt count. A connection that keeps dropping right after it is
+  made is reported at the same five-minute rate. A broker that refuses the
+  connection for bad credentials or missing authorization is logged as an error.
+  Stopping the forwarder during a connect attempt closes a connection that
+  completes afterwards. The forwarder's statistics add `disconnects`,
+  `reconnects`, `last_disconnect_reason` and `reconnect_backoff_seconds`. A full
+  queue now logs its warning once until the queue drains, rather than once per
+  dropped item. **Behavior change:** when the first broker connection fails,
+  `MQTTForwarder.start()` now reports the failure and returns with the forwarder
+  running and retrying in the background, so `ForwarderManager` no longer lists
+  it in `failed_forwarders()` and items queued during the outage are kept rather
+  than dropped. Set `require_initial_connection: true` to keep the old behavior,
+  in which `start()` raises and `forwarders.retry_interval_seconds` governs the
+  retry. A missing aiomqtt or TLS files that do not load still make `start()`
+  raise.
+
+- **The operations history is safe to read while readings arrive, and its file is readable by its owner only (#72).**
+  The interval part kept its unfinished intervals in memory with no lock, so a
+  query on a management API thread could fail with "dictionary changed size during
+  iteration" while the event loop recorded a reading, and an interval that ended
+  between a query's database read and its look at memory could be missed. The
+  running sums are now guarded by a lock held only for in-memory work. Each write
+  batch is numbered, each unfinished interval records the batch that stored it,
+  and a query adds the copy from memory only when its database read does not
+  include that batch, so an interval ending during a query is counted exactly
+  once. The file format is unchanged. A read now waits only for the writes queued
+  before it, so a steady stream of writes cannot hold a read off, and for at
+  most 10 s: past that it reads without them and logs a warning, so a writer that
+  stops making progress cannot hang every read. A new history
+  file is created 0600, exclusively, so a file that appears at the path first is
+  tightened rather than opened with its own mode, and its directory 0700 when the history creates it. On
+  POSIX an existing file loses its group and other permissions and keeps its
+  owner's, so a read-only file stays read-only. SQLite gives its journal files the
+  database file's mode.
+
+- **Discovery reads every page of the DER lists, and reports a list that fails between pages as an error (#73).** A list GET without `l` returns one entry (IEEE 2030.5 GEN.019), and discovery read the DERList with a plain GET, so a server that lists more than one DER, as a 2018 server may, had its later DERs missed. Discovery now pages the DERList with `s` and `l`, and the SubscriptionList read for its `pollRate` asks for one entry explicitly. A 404 or 204 that arrives after a list's first page means the server stopped serving a list it had begun; discovery and refresh logged it as a missing list, and now log it as an error.
+
 ## [0.14.0] - 2026-10-20
 
 ### Added
