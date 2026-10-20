@@ -11,16 +11,21 @@ runs every statement. The queue is bounded: when the disk cannot keep up, rows
 are dropped and counted rather than held in memory without limit. A database
 error is counted and logged once, in the writer, and never reaches the caller.
 
-Reads see every write queued before them: a read waits for the queue to drain.
-Reads are for the management API and reports, which run off the event loop.
+Reads see every write queued before them: a read waits until those writes have
+run, but not for writes queued after it. Each queued batch gets a number, so a
+caller that keeps the same data in memory can tell whether a read includes its
+write. Reads are for the management API and reports, which run off the event
+loop.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import queue
 import sqlite3
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -40,9 +45,42 @@ MAX_PENDING_WRITES = 10000
 #: How long closing waits for queued writes to reach the disk.
 CLOSE_TIMEOUT_SECONDS = 10.0
 
+#: Longest a read waits for the writes queued before it. Past this the read
+#: returns what is on disk and logs a warning, so a writer that stops making
+#: progress cannot hang every read.
+DRAIN_TIMEOUT_SECONDS = 10.0
+
 #: The path that keeps the database in memory, for tests and for hosts that
 #: want the query API without a file.
 MEMORY = ":memory:"
+
+
+def _create_owner_only(path: Path) -> None:
+    """Create the history file, and its directory, readable by their owner only.
+
+    The history holds what was commanded and measured on a site. A new file
+    gets 0600, and the directory that holds it gets 0700 when it is created
+    here. Parent directories created along the way get the default mode; the
+    file's own mode keeps its contents private. SQLite gives its journal files
+    the database file's permissions. On POSIX an existing regular file loses
+    its group and other permissions; its owner's are kept, so a read-only file
+    stays read-only. Anything else already at the path, such as a directory,
+    is left for SQLite to refuse.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        # O_EXCL: a file that appears after any earlier check is not opened
+        # with its own mode; it falls through to the tightening below.
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        return
+    except FileExistsError:
+        pass
+    if os.name != "posix" or not path.is_file():
+        return
+    with contextlib.suppress(OSError):
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o077:
+            os.chmod(path, mode & ~0o077)
 
 
 # Connection, lock, clock, retention and failure counts: one object, one file.
@@ -65,7 +103,7 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
             raise ValueError("retention_days must be positive")
         self.path = str(path)
         if self.path != MEMORY:
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            _create_owner_only(Path(self.path))
         self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         if self.path != MEMORY:
@@ -88,6 +126,14 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
         self._queue: queue.Queue[tuple[str, str, list[Sequence[Any]]] | None] = queue.Queue(
             maxsize=MAX_PENDING_WRITES
         )
+        #: Batches accepted and batches run. A batch's number is the value of
+        #: ``_queued`` once it is accepted, and the writer runs batches in that
+        #: order, so batch ``n`` has run once ``_written >= n``. A read waits
+        #: only for the batches queued before it: waiting for an empty queue
+        #: instead lets a steady stream of writes hold a read off indefinitely.
+        self._queued = 0
+        self._written = 0
+        self._progress = threading.Condition()
         self._writer = threading.Thread(
             target=self._write_queued, name="py20305-history-writer", daemon=True
         )
@@ -110,36 +156,70 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
         Returns at once. False means the rows were not queued: the history is
         closed, or the queue is full and the rows were dropped and counted.
         """
-        if not rows:
-            return True
+        return not rows or self.queue_batch(table, sql, rows) is not None
+
+    def queue_batch(self, table: str, sql: str, rows: Sequence[Sequence[Any]]) -> int | None:
+        """Queue one write statement per row, like :meth:`write_many`.
+
+        Return the batch's number, to compare with the number
+        :meth:`query_through` returns, or None when the rows were not queued.
+        """
         if self._closed:
-            return False
-        try:
-            self._queue.put_nowait((table, sql, list(rows)))
-        except queue.Full:
-            self.dropped[table] = self.dropped.get(table, 0) + 1
-            if self.dropped[table] == 1:
-                logger.warning("History write queue is full; dropping writes to %s", table)
-            return False
-        return True
+            return None
+        with self._progress:
+            # The number and the queue position are taken together, so batch
+            # numbers follow the order the writer runs them in.
+            try:
+                self._queue.put_nowait((table, sql, list(rows)))
+            except queue.Full:
+                pass
+            else:
+                self._queued += 1
+                return self._queued
+        self.dropped[table] = self.dropped.get(table, 0) + 1
+        if self.dropped[table] == 1:
+            logger.warning("History write queue is full; dropping writes to %s", table)
+        return None
 
     def drain(self) -> None:
-        """Wait until every queued write has been run.
+        """Wait until every write queued before this call has been run.
 
-        Stops waiting if the writer thread is gone, so a read can never hang
-        on writes nothing will run.
+        Writes queued after it are not waited for. Stops waiting if the writer
+        thread is gone, or after ``DRAIN_TIMEOUT_SECONDS``, so a read can never
+        hang on writes nothing will run. A read that stops on the timeout logs
+        a warning and may miss those writes.
         """
-        with self._queue.all_tasks_done:
-            while self._queue.unfinished_tasks and self._writer.is_alive():
-                self._queue.all_tasks_done.wait(0.1)
+        deadline = time.monotonic() + DRAIN_TIMEOUT_SECONDS
+        with self._progress:
+            target = self._queued
+            while self._written < target and self._writer.is_alive():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "History read waited %.0f s for %d queued write batch(es); "
+                        "reading without them",
+                        DRAIN_TIMEOUT_SECONDS,
+                        target - self._written,
+                    )
+                    return
+                self._progress.wait(min(0.1, remaining))
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         """Run one read statement, after the writes queued before it."""
+        return self.query_through(sql, params)[0]
+
+    def query_through(self, sql: str, params: Sequence[Any] = ()) -> tuple[list[sqlite3.Row], int]:
+        """Run one read statement, after the writes queued before it.
+
+        Return the rows and the number of the last batch that had run when the
+        statement read the database. The rows include every batch up to that
+        number and none after it.
+        """
         self.drain()
         with self._lock:
             if self._closed:
-                return []
-            return list(self._conn.execute(sql, params))
+                return [], self._written
+            return list(self._conn.execute(sql, params)), self._written
 
     def count(self, table: str) -> int:
         """Number of rows in ``table``."""
@@ -198,6 +278,12 @@ class HistoryDatabase:  # pylint: disable=too-many-instance-attributes
                     except Exception:  # pylint: disable=broad-exception-caught
                         self._rollback()
                         self._failed(table)
+                    finally:
+                        # Counted while the database lock is held, so a read
+                        # under that lock knows which batches it includes.
+                        with self._progress:
+                            self._written += 1
+                            self._progress.notify_all()
             finally:
                 self._queue.task_done()
 

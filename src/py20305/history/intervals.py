@@ -12,6 +12,15 @@ that went quiet contributes nothing for the gap, and the row's
 ``covered_seconds`` says how much of the interval was measured, so a reader can
 tell a quiet device from a missing one.
 
+Readings arrive on whatever thread reads the device, and queries come from
+the management API's threads, so the running sums are guarded by one lock that
+is held only for in-memory work, never for the database. A query copies the
+unfinished intervals from memory, then reads the database. Each interval
+records the number of the write batch that stored it, and the read reports the
+last batch it includes, so the query adds a copy only when the read does not
+already include it. An interval that ends while a query runs is counted
+exactly once.
+
 Signs are the connector's own. Positive and negative real and reactive energy
 are kept apart, so a reader applies whichever convention the device uses
 without the two cancelling inside one interval. Curtailed energy assumes the
@@ -23,12 +32,15 @@ minus actual output, never below zero.
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import Any
 
 from py20305.history.database import HistoryDatabase
+
+_TABLE = "device_intervals"
 
 _DDL = (
     """CREATE TABLE IF NOT EXISTS device_intervals (
@@ -124,6 +136,8 @@ class _Bucket:  # pylint: disable=too-many-instance-attributes
     avail_ws: float = 0.0
     curtail_seconds: float = 0.0
     curtailed_ws: float = 0.0
+    #: The write batch that stored this bucket, once it is queued.
+    batch: int | None = None
 
 
 @dataclass
@@ -175,7 +189,8 @@ class IntervalHistory:
         self.interval_seconds = interval_seconds
         self.max_gap_seconds = max_gap_seconds
         self._devices: dict[str, _Device] = {}
-        database.register_table("device_intervals", "start", _DDL)
+        self._lock = threading.Lock()
+        database.register_table(_TABLE, "start", _DDL)
 
     # -- Recording -------------------------------------------------------------
 
@@ -185,42 +200,50 @@ class IntervalHistory:
         ``at`` is when the device was read. A reading no newer than the last
         one is ignored, so a cached acquisition offered twice counts once.
         """
-        device = self._devices.setdefault(lfdi.lower(), _Device())
-        if device.at is not None and at <= device.at:
-            return
-        if device.at is not None and at - device.at <= self.max_gap_seconds:
-            self._integrate(device, device.at, at)
-        device.at = at
-        device.w = _number(values.get("W"))
-        device.var = _number(values.get("Var"))
-        bucket = self._bucket(device, at)
-        bucket.samples += 1
-        if device.w is not None:
-            bucket.w_min = device.w if bucket.w_min is None else min(bucket.w_min, device.w)
-            bucket.w_max = device.w if bucket.w_max is None else max(bucket.w_max, device.w)
-        self._flush_before(lfdi.lower(), device, self._floor(at))
+        with self._lock:
+            device = self._devices.setdefault(lfdi.lower(), _Device())
+            if device.at is not None and at <= device.at:
+                return
+            if device.at is not None and at - device.at <= self.max_gap_seconds:
+                self._integrate(device, device.at, at)
+            device.at = at
+            device.w = _number(values.get("W"))
+            device.var = _number(values.get("Var"))
+            bucket = self._bucket(device, at)
+            bucket.samples += 1
+            if device.w is not None:
+                bucket.w_min = device.w if bucket.w_min is None else min(bucket.w_min, device.w)
+                bucket.w_max = device.w if bucket.w_max is None else max(bucket.w_max, device.w)
+            self._flush_before(lfdi.lower(), device, self._floor(at))
 
     def observe_availability(self, lfdi: str, at: float, w_avail: Any) -> None:
         """Take one reading of a device's available real power, ``statWAvail``."""
-        device = self._devices.setdefault(lfdi.lower(), _Device())
-        device.avail = active_power(w_avail)
-        device.avail_at = at if device.avail is not None else None
+        with self._lock:
+            device = self._devices.setdefault(lfdi.lower(), _Device())
+            device.avail = active_power(w_avail)
+            device.avail_at = at if device.avail is not None else None
 
     def interrupt(self, lfdi: str) -> None:
         """Stop holding a device's last reading: the device could not be read."""
-        device = self._devices.get(lfdi.lower())
-        if device is not None:
-            device.at = None
+        with self._lock:
+            device = self._devices.get(lfdi.lower())
+            if device is not None:
+                device.at = None
 
     def flush(self) -> None:
         """Write every unfinished interval, e.g. before the process stops.
 
         The next reading of the same interval is added to the stored row.
         """
-        for lfdi, device in self._devices.items():
-            rows = [self._row(lfdi, start, bucket) for start, bucket in device.buckets.items()]
-            device.buckets.clear()
-            self._db.write_many("device_intervals", _UPSERT, rows)
+        with self._lock:
+            done = [
+                (lfdi, start, bucket)
+                for lfdi, device in self._devices.items()
+                for start, bucket in device.buckets.items()
+            ]
+            for device in self._devices.values():
+                device.buckets.clear()
+            self._write(done)
 
     def _integrate(self, device: _Device, t0: float, t1: float) -> None:
         """Hold the device's last reading from ``t0`` to ``t1``, split at interval ends."""
@@ -263,11 +286,17 @@ class IntervalHistory:
         return math.floor(at / self.interval_seconds) * float(self.interval_seconds)
 
     def _flush_before(self, lfdi: str, device: _Device, start: float) -> None:
-        done = [s for s in device.buckets if s < start]
+        done = sorted(s for s in device.buckets if s < start)
+        self._write([(lfdi, s, device.buckets.pop(s)) for s in done])
+
+    def _write(self, done: list[tuple[str, float, _Bucket]]) -> None:
+        """Queue finished buckets and record their batch. Call with the lock held."""
         if not done:
             return
-        rows = [self._row(lfdi, s, device.buckets.pop(s)) for s in sorted(done)]
-        self._db.write_many("device_intervals", _UPSERT, rows)
+        rows = [self._row(lfdi, start, bucket) for lfdi, start, bucket in done]
+        batch = self._db.queue_batch(_TABLE, _UPSERT, rows)
+        for _, _, bucket in done:
+            bucket.batch = batch
 
     def _row(self, lfdi: str, start: float, b: _Bucket) -> tuple[Any, ...]:
         return (
@@ -315,39 +344,61 @@ class IntervalHistory:
         if until is not None:
             clauses.append("start < ?")
             params.append(until)
-        rows = self._db.query(
-            f"SELECT {_SELECT} FROM device_intervals "
+        low = self._floor(since) if since is not None else None
+        # Memory first, then the database: see the module docstring.
+        pending = self._pending(
+            lambda name, start: (
+                (lfdi is None or name == lfdi.lower())
+                and (low is None or start >= low)
+                and (until is None or start < until)
+            ),
+        )
+        rows, through = self._db.query_through(
+            f"SELECT {_SELECT} FROM {_TABLE} "
             f"WHERE {' AND '.join(clauses)} ORDER BY start, lfdi LIMIT ?",
             [*params, max(1, limit)],
         )
-        low = self._floor(since) if since is not None else None
-        merged = self._with_unfinished(
-            rows,
-            lambda name, start: (lfdi is None or name == lfdi.lower())
-            and (low is None or start >= low)
-            and (until is None or start < until),
-        )
+        merged = self._merge(rows, pending, through)
         ordered = sorted(merged.values(), key=lambda r: (r["start"], r["lfdi"]))
         return [self._present(row) for row in ordered[: max(1, limit)]]
 
-    def _with_unfinished(
-        self, rows: Iterable[Any], keep: Callable[[str, float], bool]
+    def _pending(self, keep: Callable[[str, float], bool]) -> list[tuple[dict[str, Any], _Bucket]]:
+        """Copy the unfinished intervals ``keep`` picks, each with its bucket."""
+        out: list[tuple[dict[str, Any], _Bucket]] = []
+        with self._lock:
+            for name, device in self._devices.items():
+                for start, bucket in device.buckets.items():
+                    if keep(name, start):
+                        row = {"lfdi": name, "start": start, "w_min": bucket.w_min}
+                        row["w_max"] = bucket.w_max
+                        row.update({col: getattr(bucket, col) for col in _COLUMNS})
+                        out.append((row, bucket))
+        return out
+
+    def _merge(
+        self,
+        rows: Iterable[Any],
+        pending: list[tuple[dict[str, Any], _Bucket]],
+        through: int,
     ) -> dict[tuple[str, float], dict[str, Any]]:
-        """Stored rows (``sqlite3.Row`` or mappings), keyed by device and start,
-        plus the unfinished intervals ``keep`` picks.
+        """Key stored rows by device and start, and add the copies the rows lack.
+
+        A copy is skipped when its bucket was written in a batch the read
+        includes (numbered ``through`` or lower). The batch is read under the
+        lock, which is held from when a bucket is queued until its batch is
+        recorded.
         """
+        with self._lock:
+            unwritten = [
+                row for row, bucket in pending if bucket.batch is None or bucket.batch > through
+            ]
         merged: dict[tuple[str, float], dict[str, Any]] = {
             (row["lfdi"], row["start"]): dict(row) for row in rows
         }
-        for name, device in self._devices.items():
-            for start, bucket in device.buckets.items():
-                if not keep(name, start):
-                    continue
-                pending = {"lfdi": name, "start": start, "w_min": bucket.w_min}
-                pending["w_max"] = bucket.w_max
-                pending.update({col: getattr(bucket, col) for col in _COLUMNS})
-                stored = merged.get((name, start))
-                merged[(name, start)] = pending if stored is None else _add(stored, pending)
+        for item in unwritten:
+            key = (item["lfdi"], item["start"])
+            stored = merged.get(key)
+            merged[key] = item if stored is None else _add(stored, item)
         return merged
 
     def _at(self, starts: list[float], lfdi: str | None) -> list[dict[str, Any]]:
@@ -357,7 +408,10 @@ class IntervalHistory:
         cannot crowd the recent days out of a row limit.
         """
         wanted = set(starts)
-        rows: list[Any] = []
+        pending = self._pending(
+            lambda name, start: (lfdi is None or name == lfdi.lower()) and start in wanted
+        )
+        out: list[dict[str, Any]] = []
         ordered = sorted(wanted)
         for i in range(0, len(ordered), _BATCH):
             batch = ordered[i : i + _BATCH]
@@ -366,16 +420,17 @@ class IntervalHistory:
             if lfdi is not None:
                 device_clause = " AND lfdi = ?"
                 params.append(lfdi.lower())
-            rows += self._db.query(
-                f"SELECT {_SELECT} FROM device_intervals WHERE seconds = ? "
+            rows, through = self._db.query_through(
+                f"SELECT {_SELECT} FROM {_TABLE} WHERE seconds = ? "
                 f"AND start IN ({', '.join('?' * len(batch))}){device_clause}",
                 params,
             )
-        merged = self._with_unfinished(
-            rows,
-            lambda name, start: (lfdi is None or name == lfdi.lower()) and start in wanted,
-        )
-        return [self._present(row) for row in merged.values()]
+            # Each read is merged with the copies of its own starts, against
+            # the batches that read includes.
+            in_batch = set(batch)
+            copies = [item for item in pending if item[0]["start"] in in_batch]
+            out += [self._present(row) for row in self._merge(rows, copies, through).values()]
+        return out
 
     def _present(self, row: Mapping[str, Any]) -> dict[str, Any]:
         covered = row["covered_seconds"]
