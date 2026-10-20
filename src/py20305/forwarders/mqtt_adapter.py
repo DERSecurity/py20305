@@ -166,8 +166,8 @@ class MQTTForwarderAdapter(AbstractForwarder):
         """Return whether an event queued now would be published.
 
         False while the adapter is stopped or the broker connection is down,
-        including after a publish error that indicates a lost connection.
-        True again once a later publish succeeds.
+        from the moment the forwarder detects a lost connection or a failed
+        first connect. True again once the forwarder reconnects.
         """
         return self._running and self._forwarder.connected
 

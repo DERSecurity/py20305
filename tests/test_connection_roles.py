@@ -468,7 +468,12 @@ class TestForwarderManagerSupport:
         forwarder._connected = False
         assert adapter.can_deliver is False
 
-    async def test_a_real_mqtt_adapter_is_ready_again_after_a_publish_succeeds(self):
+    async def test_a_real_mqtt_adapter_is_not_ready_after_a_publish_loses_the_connection(self):
+        """A lost connection stays lost until the forwarder reconnects.
+
+        A later publish on the old client does not count as a reconnect. The
+        reconnect itself is covered in test_forwarders_mqtt_reconnect.py.
+        """
         from py20305.forwarders import MQTTForwarder, MQTTForwarderAdapter, MQTTForwarderConfig
 
         class FlakyClient:
@@ -498,8 +503,8 @@ class TestForwarderManagerSupport:
         assert manager.can_deliver_events is False
 
         await forwarder._publish_item(frame, "out/messages", "out/telemetry")
-        assert adapter.can_deliver is True
-        assert manager.can_deliver_events is True
+        assert adapter.can_deliver is False
+        assert manager.can_deliver_events is False
 
     def test_the_observer_reaches_forwarders_added_before_and_after(self):
         manager = ForwarderManager()

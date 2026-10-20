@@ -20,6 +20,12 @@ PROTOCOL_MESSAGE_TOPIC_SUFFIX = "out/2030-5-raw"
 #: Topic measured device state is published on, relative to the topic base.
 TELEMETRY_TOPIC_SUFFIX = "out/telemetry"
 
+#: Default delay before the first MQTT reconnect attempt, in seconds.
+DEFAULT_RECONNECT_INITIAL_DELAY_SECONDS = 1.0
+
+#: Default cap on the delay between MQTT reconnect attempts, in seconds.
+DEFAULT_RECONNECT_MAX_DELAY_SECONDS = 60.0
+
 
 class _StrictForwarderModel(BaseModel):
     """Base for the forwarder models: an unknown key is an error.
@@ -50,6 +56,30 @@ class MQTTForwarderConfig(_StrictForwarderModel):
     topic_base: str = Field(default="csip_client", description="Base topic for publishing")
     client_id_prefix: str = Field(default="csip_client", description="Prefix for MQTT client ID")
     enabled: bool = Field(default=True, description="Whether forwarding is enabled")
+    reconnect_initial_delay_seconds: float = Field(
+        default=DEFAULT_RECONNECT_INITIAL_DELAY_SECONDS,
+        description=(
+            "Base delay before the first attempt to reconnect after the broker connection is "
+            "lost or the first connection fails. Doubles after each failed attempt, and returns "
+            "to this value once a new connection is stable."
+        ),
+    )
+    reconnect_max_delay_seconds: float = Field(
+        default=DEFAULT_RECONNECT_MAX_DELAY_SECONDS,
+        description=(
+            "Largest base delay between two reconnect attempts. A new connection that stays "
+            "up this long counts as stable."
+        ),
+    )
+    require_initial_connection: bool = Field(
+        default=False,
+        description=(
+            "Whether start() raises when the first broker connection fails. When false, the "
+            "forwarder starts anyway and keeps trying to connect in the background. When true, "
+            "the forwarder stays stopped and forwarders.retry_interval_seconds sets how often "
+            "the runner starts it again."
+        ),
+    )
 
     @property
     def tls_enabled(self) -> bool:
@@ -62,6 +92,23 @@ class MQTTForwarderConfig(_StrictForwarderModel):
         if not 1 <= v <= 65535:
             raise ValueError("Port must be between 1 and 65535")
         return v
+
+    @field_validator("reconnect_initial_delay_seconds", "reconnect_max_delay_seconds")
+    @classmethod
+    def validate_reconnect_delay(cls, v: float) -> float:
+        """Reject a delay that is not a finite, positive number of seconds."""
+        if not math.isfinite(v) or v <= 0:
+            raise ValueError("reconnect delays must be finite and greater than zero")
+        return v
+
+    @model_validator(mode="after")
+    def validate_reconnect_delay_order(self) -> MQTTForwarderConfig:
+        """Reject a maximum reconnect delay shorter than the initial delay."""
+        if self.reconnect_max_delay_seconds < self.reconnect_initial_delay_seconds:
+            raise ValueError(
+                "reconnect_max_delay_seconds must be at least reconnect_initial_delay_seconds"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_cert_paths(self) -> MQTTForwarderConfig:
@@ -272,9 +319,10 @@ class ForwarderConfig(_StrictForwarderModel):
         default=60,
         ge=0,
         description=(
-            "How often to retry a forwarder whose broker was unreachable. "
-            "Zero disables retrying, leaving a failed forwarder stopped for "
-            "the lifetime of the process."
+            "How often to retry a forwarder whose start failed. The MQTT forwarder "
+            "reconnects on its own and fails its start only when it cannot be set up or "
+            "when mqtt.require_initial_connection is true. Zero disables retrying, leaving "
+            "a failed forwarder stopped for the lifetime of the process."
         ),
     )
     connection_telemetry: ConnectionTelemetryConfig = Field(

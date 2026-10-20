@@ -86,6 +86,11 @@ class ScenarioMqttBroker:
         """Make the broker close each new connection before CONNACK."""
         self._refuse = refuse
 
+    def drop_connections(self) -> None:
+        """Close every live client connection from the broker side, without a DISCONNECT."""
+        for writer in list(self._writers):
+            writer.close()
+
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._session, "127.0.0.1", self.port)
 

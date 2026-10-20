@@ -3,6 +3,61 @@
 This module provides the MQTTForwarder class that publishes IEEE 2030.5
 protocol messages to an MQTT broker. Supports both mTLS connections
 (e.g., AWS IoT Core) and plain MQTT brokers (e.g., RabbitMQ).
+
+Reconnecting
+------------
+
+The publish loop owns the broker connection. It is the only code that
+connects after start, so one reconnect runs at a time.
+
+- **Loss.** Any ``aiomqtt.MqttError`` or ``OSError`` from a publish marks the
+  link down, and so does the client's own disconnect signal while the loop is
+  idle. The exception type decides, not its message text: the message for a
+  closed connection is "The client is not currently connected.", which a test
+  for the word "connection" misses.
+- **Backoff.** The loop closes the old client, waits, and builds a new one with
+  the same client ID. Each attempt loads the TLS files again, so a rotated
+  certificate is used without a restart. The wait starts at
+  ``reconnect_initial_delay_seconds``, doubles after each failed attempt up to
+  ``reconnect_max_delay_seconds``, and is shortened by up to 20% at random so
+  clients that lost one broker together do not retry in step. The backoff
+  resets only once the new connection is stable: a publish succeeds on it, or
+  it stays up for ``reconnect_max_delay_seconds``. A connection that drops
+  sooner continues the outage, so a broker that accepts and then drops at once
+  is retried at the growing delay, not every initial delay.
+- **Buffering.** Nothing is published while the link is down. Items wait in
+  the existing bounded buffers, and the item whose publish failed is published
+  first after reconnecting. QoS 1 makes delivery at least once, so that item
+  can arrive twice if the broker received it before the connection dropped.
+  An item whose publish loses the connection ``_MAX_PUBLISH_ATTEMPTS`` times
+  in a row is dropped and counted as a publish error. A broker can close the
+  connection in answer to one specific publish, for example to a topic its
+  policy denies, and that item must not block everything behind it.
+- **Startup.** When the first connect fails, ``start()`` reports the failure
+  and returns with the forwarder running and the link down, and the loop keeps
+  retrying. ``ForwarderManager`` treats a forwarder whose ``start()`` raised as
+  failed and drops what it routes to it until a caller retries it, so raising
+  would lose everything queued during a broker outage at boot.
+  ``require_initial_connection: true`` restores the raising behavior for a
+  caller that wants it. A forwarder that cannot be set up at all, because
+  aiomqtt is missing or the TLS files cannot be loaded, always raises.
+- **Reporting.** A loss logs one warning with its reason and sends one
+  connection failure event. While the broker stays unreachable, a further
+  warning and failure event go out at most every five minutes. The connection
+  event emitter never coalesces failures, so one event per attempt would add
+  hundreds of records to an outage of a few hours. Reconnecting logs one info
+  line with the downtime and the number of attempts, and sends one success
+  event. A connection that drops again before it is stable is reported at the
+  same five-minute rate, and the reconnect after it is reported only when a
+  failure was reported. A broker that refuses the connection for bad
+  credentials or missing authorization is reported at error level on the
+  first refusal of an outage, and retried like any other failure.
+- **Stop during a connect.** aiomqtt runs paho's blocking connect in an
+  executor thread, and canceling the await does not stop that thread. When
+  stop cancels a connect attempt, the forwarder closes that client once its
+  thread returns, so a connect that completes late does not leave a session
+  open. The thread itself runs until paho's connect returns or times out,
+  which can delay interpreter exit by up to that long.
 """
 
 from __future__ import annotations
@@ -11,8 +66,12 @@ import asyncio
 import contextlib
 import json
 import logging
+import random
 import ssl
+import threading
+import time
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -51,6 +110,37 @@ _TELEMETRY_SLICE = 8
 # sustained protocol traffic delays measurements rather than starving them.
 _CAPTURE_RUN = 64
 
+# Each reconnect delay is shortened by a random amount up to this fraction of
+# itself, so the delay never exceeds the configured maximum.
+_RECONNECT_JITTER = 0.2
+
+# While the broker stays unreachable, repeat the warning and the connection
+# failure event at most this often.
+_FAILURE_REPORT_INTERVAL_SECONDS = 300.0
+
+# Publish attempts an item gets when each one loses the broker connection. The
+# item is then dropped, so it cannot block the items behind it.
+_MAX_PUBLISH_ATTEMPTS = 3
+
+# CONNACK reason codes that refuse a connection for its credentials or its
+# authorization: bad user name or password, not authorized, banned, and bad
+# authentication method. paho reports the MQTT 3.1.1 return codes 4 and 5 as
+# 134 and 135.
+_AUTH_REFUSAL_REASON_CODES = frozenset({134, 135, 138, 140})
+
+# Longest wait for an old client to close before it is dropped.
+_CLOSE_TIMEOUT_SECONDS = 5.0
+
+# Longest wait for the publish loop to drain the buffers on stop.
+_DRAIN_TIMEOUT_SECONDS = 10.0
+
+# Longest idle wait in the publish loop before it checks its state again.
+_IDLE_WAIT_SECONDS = 1.0
+
+#: How long the publish loop pauses after an unexpected error before it tries
+#: again.
+_LOOP_ERROR_PAUSE_SECONDS = 1.0
+
 
 class MQTTForwarder(AbstractForwarder):
     """Async MQTT forwarder for publishing protocol messages.
@@ -70,6 +160,10 @@ class MQTTForwarder(AbstractForwarder):
         queue_size: int = _DEFAULT_QUEUE_SIZE,
         message_converter: Any | None = None,
         telemetry_device_limit: int = _DEFAULT_TELEMETRY_DEVICES,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        jitter: Callable[[], float] = random.random,
     ) -> None:
         """Initialize the MQTT forwarder.
 
@@ -79,6 +173,10 @@ class MQTTForwarder(AbstractForwarder):
             message_converter: Optional callable to convert MessageFrame to dict
                              (defaults to using frame content directly)
             telemetry_device_limit: Max devices holding a pending telemetry frame
+            sleep: Waits out a reconnect delay. Stop interrupts the wait.
+            clock: Monotonic time in seconds, for downtime and report throttling.
+            jitter: Returns a number in [0, 1) that sets how much a reconnect
+                delay is shortened.
         """
         super().__init__(name="mqtt")
         self._config = config
@@ -100,15 +198,55 @@ class MQTTForwarder(AbstractForwarder):
         self._stats["messages_dropped"] = 0
         self._stats["telemetry_superseded"] = 0
         self._stats["telemetry_dropped"] = 0
+        # Broker link history: losses detected, connections restored by the
+        # background retry, and why the link last dropped.
+        self._stats["disconnects"] = 0
+        self._stats["reconnects"] = 0
+        self._stats["last_disconnect_reason"] = None
         self._message_converter = message_converter
         self._telemetry_converter: Any | None = None
         self._client: Any = None  # aiomqtt.Client
+        self._ssl_context: ssl.SSLContext | None = None
+        # Exceptions that mean the broker connection is gone. Set from aiomqtt
+        # in start(), so this module imports without the mqtt extra.
+        self._link_errors: tuple[type[BaseException], ...] = (OSError,)
         self._publish_task: asyncio.Task[None] | None = None
         self._shutdown_event = asyncio.Event()
         # Signals the publish loop that a buffer went from empty to occupied,
         # so an arrival publishes immediately rather than on the next poll.
         self._wakeup = asyncio.Event()
         self._connected = False
+        # A captured item whose publish failed because the link dropped. It is
+        # published first after reconnecting, ahead of the queue.
+        self._retry_item: MessageFrame | EventFrame | None = None
+        # The last item whose publish lost the link, and how many publishes of
+        # it in a row did. A telemetry frame counts as the same item as a newer
+        # frame for its device.
+        self._failing_item: MessageFrame | TelemetryFrame | EventFrame | None = None
+        self._failing_attempts = 0
+        self._sleep = sleep
+        self._clock = clock
+        self._jitter = jitter
+        # Outage state. The backoff is the base delay before the next
+        # reconnect attempt, and zero while connected.
+        self._down_since: float | None = None
+        self._attempts = 0
+        self._backoff = 0.0
+        self._last_failure_report: float | None = None
+        # Whether the current connection is stable: a publish succeeded on it,
+        # or start() made it. A connection that stayed up for
+        # reconnect_max_delay_seconds also counts, checked when it drops.
+        self._link_stable = False
+        self._connected_at = 0.0
+        # Whether a failure was reported since the last reported reconnect, so
+        # the next reconnect is reported too.
+        self._restore_unreported = False
+        # Whether a refusal for credentials or authorization was reported in
+        # the current outage.
+        self._refusal_reported = False
+        # Whether the queue-full warning was logged since the queue last
+        # drained. Later drops are counted without logging each one.
+        self._queue_full_reported = False
         #: Receives this forwarder's broker connection outcomes, with the
         #: ``telemetry`` role. ``None`` reports nothing.
         self.connection_observer: LinkObserver | None = None
@@ -141,7 +279,11 @@ class MQTTForwarder(AbstractForwarder):
 
     @property
     def connected(self) -> bool:
-        """Return connection status."""
+        """Return whether the broker connection is up.
+
+        False from a detected loss, or a failed first connect, until the
+        forwarder connects again.
+        """
         return self._connected
 
     def _create_ssl_context(self) -> ssl.SSLContext | None:
@@ -170,9 +312,12 @@ class MQTTForwarder(AbstractForwarder):
         return ctx
 
     async def start(self) -> None:
-        """Start the forwarder and connect to MQTT broker.
+        """Start the forwarder, connect to the MQTT broker and start the publish task.
 
-        Establishes connection and starts the background publish task.
+        A failed first connect is reported and then retried in the background,
+        unless ``require_initial_connection`` is set, in which case it raises.
+        A forwarder that cannot be set up (aiomqtt missing, TLS files that do
+        not load) always raises.
         """
         if self._running:
             logger.warning("MQTTForwarder already running")
@@ -190,31 +335,8 @@ class MQTTForwarder(AbstractForwarder):
         self._shutdown_event.clear()
 
         try:
-            # Import aiomqtt here to make it optional
+            # Imported here so the mqtt extra stays optional.
             import aiomqtt
-
-            ssl_context = self._create_ssl_context()
-
-            self._client = aiomqtt.Client(
-                hostname=self._config.endpoint,
-                port=self._config.port,
-                tls_context=ssl_context,
-                identifier=self._client_id,
-            )
-
-            await self._client.__aenter__()
-            self._connected = True
-            self._running = True
-            self._report_broker_connected()
-
-            # Start publish loop
-            self._publish_task = asyncio.create_task(
-                self._publish_loop(),
-                name="mqtt-publish-loop",
-            )
-
-            logger.info("MQTT forwarder connected successfully")
-
         except ImportError:
             from py20305.diagnostics import report
 
@@ -224,21 +346,365 @@ class MQTTForwarder(AbstractForwarder):
                 source="mqtt",
             )
             raise
-        except Exception as e:
-            from py20305.diagnostics import report
+        self._link_errors = (aiomqtt.MqttError, OSError)
 
-            endpoint = self._config.endpoint
-            port = self._config.port
-            report(
-                "errors",
-                f"Failed to connect MQTT forwarder to {endpoint}:{port}: {e}",
-                source="mqtt",
-                dedup_key=f"mqtt_connect:{endpoint}:{port}",
-                details={"endpoint": endpoint, "port": port, "error": str(e)},
-            )
-            self._connected = False
-            self._report_broker_failure(e)
+        try:
+            self._ssl_context = self._create_ssl_context()
+        except Exception as e:
+            # The TLS files did not load. Retrying the connection cannot fix that.
+            self._report_connect_failure(e)
             raise
+
+        try:
+            await self._connect()
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # Any failure to connect is retried, whatever aiomqtt raised.
+            self._report_connect_failure(e)
+            if self._config.require_initial_connection:
+                raise
+            self._begin_outage()
+            # The refusal was just reported as an error, so do not repeat it.
+            self._refusal_reported = self._is_auth_refusal(e)
+            logger.info(
+                "MQTT forwarder will keep trying to connect to %s:%d in the background",
+                self._config.endpoint,
+                self._config.port,
+            )
+        else:
+            self._link_stable = True
+            self._report_broker_connected()
+            logger.info("MQTT forwarder connected successfully")
+
+        self._running = True
+        self._publish_task = asyncio.create_task(
+            self._publish_loop(),
+            name="mqtt-publish-loop",
+        )
+
+    async def _connect(self) -> None:
+        """Open a new broker connection with the forwarder's TLS context and client ID."""
+        import aiomqtt
+
+        client = aiomqtt.Client(
+            hostname=self._config.endpoint,
+            port=self._config.port,
+            tls_context=self._ssl_context,
+            identifier=self._client_id,
+        )
+        abandoned = threading.Event()
+        self._close_if_abandoned(client, abandoned)
+        try:
+            await client.__aenter__()
+        except BaseException:
+            # Set before the disconnect below, so a connect thread that
+            # returns after this point sees it and closes the client again.
+            abandoned.set()
+            self._abandon_client(client)
+            raise
+        self._client = client
+        self._connected = True
+        self._connected_at = self._clock()
+
+    def _close_if_abandoned(self, client: Any, abandoned: threading.Event) -> None:
+        """Close ``client`` when its connect thread returns after the connect was abandoned.
+
+        aiomqtt runs paho's blocking connect in an executor thread, and
+        canceling the await does not stop the thread. A disconnect sent while
+        the thread runs has no effect, because paho's connect resets the
+        client's state. So the thread checks ``abandoned`` once the connect
+        returns.
+        """
+        connect = getattr(client, "_client_connect", None)
+        if not callable(connect):
+            return
+        loop = asyncio.get_running_loop()
+
+        def connect_then_check() -> None:
+            connect()
+            if not abandoned.is_set():
+                return
+            try:
+                loop.call_soon_threadsafe(self._abandon_client, client)
+            except RuntimeError:
+                # The event loop is closed. Close the socket from this thread.
+                with contextlib.suppress(Exception):
+                    client._client.socket().close()  # pylint: disable=protected-access
+
+        client._client_connect = connect_then_check  # pylint: disable=protected-access
+
+    @staticmethod
+    def _abandon_client(client: Any) -> None:
+        """Close the socket of a client whose connect did not complete. Errors are ignored.
+
+        aiomqtt must not be exited after a failed enter, but a connect that
+        timed out waiting for the broker's answer can leave its socket open.
+        """
+        with contextlib.suppress(Exception):
+            client._client.disconnect()  # pylint: disable=protected-access
+
+    async def _discard_client(self) -> None:
+        """Close the current client and drop it. Errors and slow closes are ignored."""
+        client, self._client = self._client, None
+        if client is None:
+            return
+        lost = getattr(client, "_disconnected", None)
+        if isinstance(lost, asyncio.Future) and lost.done() and not lost.cancelled():
+            # Retrieve the error so asyncio does not log it as never retrieved.
+            lost.exception()
+        try:
+            await asyncio.wait_for(
+                client.__aexit__(None, None, None), timeout=_CLOSE_TIMEOUT_SECONDS
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.debug("Error closing MQTT client: %s", e)
+
+    def _report_connect_failure(self, exc: BaseException) -> None:
+        """Report a failed connect at start as a diagnostics error and a failure event."""
+        from py20305.diagnostics import report
+
+        endpoint = self._config.endpoint
+        port = self._config.port
+        report(
+            "errors",
+            f"Failed to connect MQTT forwarder to {endpoint}:{port}: {exc}",
+            source="mqtt",
+            dedup_key=self._connect_key,
+            details={"endpoint": endpoint, "port": port, "error": str(exc)},
+        )
+        self._connected = False
+        self._report_broker_failure(exc)
+
+    @property
+    def _connect_key(self) -> str:
+        """Return the diagnostics dedup key for a failed connect at start."""
+        return f"mqtt_connect:{self._config.endpoint}:{self._config.port}"
+
+    @property
+    def _link_key(self) -> str:
+        """Return the diagnostics dedup key for a lost or unreachable broker."""
+        return f"mqtt_link:{self._config.endpoint}:{self._config.port}"
+
+    @property
+    def _refused_key(self) -> str:
+        """Return the diagnostics dedup key for a broker refusing the credentials."""
+        return f"mqtt_refused:{self._config.endpoint}:{self._config.port}"
+
+    @property
+    def _broker(self) -> str:
+        """Return the broker as ``host:port`` for log messages."""
+        return f"{self._config.endpoint}:{self._config.port}"
+
+    @staticmethod
+    def _describe(reason: BaseException | str) -> str:
+        """Return a one-line reason for a log message or a statistic."""
+        if isinstance(reason, str):
+            return reason
+        return str(reason) or type(reason).__name__
+
+    def _begin_outage(self) -> None:
+        """Record that the first connect failed, so the publish loop starts retrying."""
+        now = self._clock()
+        self._down_since = now
+        self._attempts = 1
+        self._backoff = self._config.reconnect_initial_delay_seconds
+        self._last_failure_report = now
+        self._restore_unreported = True
+        self._refusal_reported = False
+
+    def _link_down(self, reason: BaseException | str) -> None:
+        """Mark the broker connection lost and report the loss.
+
+        Does nothing when the link is already down, so a loss seen both by a
+        publish and by the client counts and reports once. The loss of a
+        stable connection starts a new outage. The loss of a connection that
+        was not yet stable continues the last outage: the backoff keeps
+        growing and the loss is reported only at the reminder rate.
+        """
+        if not self._connected:
+            return
+        from py20305.diagnostics import report
+
+        self._connected = False
+        text = self._describe(reason)
+        now = self._clock()
+        stable = (
+            self._link_stable
+            or now - self._connected_at >= self._config.reconnect_max_delay_seconds
+        )
+        self._down_since = now
+        self._attempts = 0
+        self._stats["disconnects"] += 1
+        self._stats["last_disconnect_reason"] = text
+        if stable:
+            self._backoff = self._config.reconnect_initial_delay_seconds
+            self._refusal_reported = False
+        else:
+            self._backoff = min(
+                self._config.reconnect_max_delay_seconds,
+                max(self._config.reconnect_initial_delay_seconds, self._backoff * 2),
+            )
+            if self._report_throttled(now):
+                logger.debug(
+                    "MQTT broker connection to %s dropped again before it was stable: %s",
+                    self._broker,
+                    text,
+                )
+                return
+        self._last_failure_report = now
+        self._restore_unreported = True
+        report(
+            "warnings",
+            f"MQTT broker connection to {self._broker} lost: {text}. Reconnecting.",
+            source="mqtt",
+            dedup_key=self._link_key,
+            details={
+                "endpoint": self._config.endpoint,
+                "port": self._config.port,
+                "error": text,
+            },
+        )
+        self._report_broker_failure(reason)
+
+    def _client_reported_loss(self) -> BaseException | str | None:
+        """Return why the client says its connection closed, or None while it is open.
+
+        aiomqtt resolves the client's ``_disconnected`` future when the socket
+        closes, with the error as its exception. A client without one is
+        checked through publish errors only.
+        """
+        lost = getattr(self._client, "_disconnected", None)
+        if not isinstance(lost, asyncio.Future) or not lost.done():
+            return None
+        if lost.cancelled():
+            return "the connection closed"
+        return lost.exception() or "the connection closed"
+
+    async def _reconnect(self) -> None:
+        """Connect again, waiting with exponential backoff between attempts.
+
+        Returns once connected, or when shutdown starts.
+        """
+        await self._discard_client()
+        while not self._shutdown_event.is_set():
+            delay = self._backoff * (1.0 - _RECONNECT_JITTER * self._jitter())
+            # stop() cancels this task while the link is down, which ends the wait.
+            await self._sleep(delay)
+            if self._shutdown_event.is_set():
+                return
+            try:
+                # Load the TLS files again, so a rotated certificate is used.
+                self._ssl_context = self._create_ssl_context()
+                await self._connect()
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                # The loop must keep retrying, whatever an attempt raised.
+                self._attempt_failed(e)
+                continue
+            self._link_restored()
+            return
+
+    def _report_throttled(self, now: float) -> bool:
+        """Return whether a failure was reported less than the reminder interval ago."""
+        return (
+            self._last_failure_report is not None
+            and now - self._last_failure_report < _FAILURE_REPORT_INTERVAL_SECONDS
+        )
+
+    @staticmethod
+    def _is_auth_refusal(exc: BaseException) -> bool:
+        """Return whether ``exc`` is a CONNACK that refused the credentials or authorization.
+
+        aiomqtt raises a refused CONNACK with paho's ``ReasonCode`` as ``rc``.
+        Other connect errors carry no reason code.
+        """
+        rc = getattr(exc, "rc", None)
+        return getattr(rc, "value", None) in _AUTH_REFUSAL_REASON_CODES
+
+    def _attempt_failed(self, exc: BaseException) -> None:
+        """Count one failed reconnect attempt, grow the backoff, and report at a throttled rate.
+
+        The first refusal for credentials or authorization in an outage is
+        reported at error level at once, because retrying does not fix it
+        until the credentials or the broker's policy change.
+        """
+        self._attempts += 1
+        self._backoff = min(self._config.reconnect_max_delay_seconds, self._backoff * 2)
+        text = self._describe(exc)
+        logger.debug(
+            "MQTT reconnect attempt %d to %s failed: %s", self._attempts, self._broker, text
+        )
+        now = self._clock()
+        refused = self._is_auth_refusal(exc)
+        first_refusal = refused and not self._refusal_reported
+        if self._report_throttled(now) and not first_refusal:
+            return
+        from py20305.diagnostics import report
+
+        if refused:
+            self._refusal_reported = True
+        self._last_failure_report = now
+        self._restore_unreported = True
+        down_for = now - (self._down_since if self._down_since is not None else now)
+        if refused:
+            summary = f"MQTT broker {self._broker} refused the connection"
+        else:
+            summary = f"MQTT broker {self._broker} still unreachable"
+        report(
+            "errors" if refused else "warnings",
+            f"{summary} after {self._attempts} attempts over {down_for:.0f} s: {text}",
+            source="mqtt",
+            dedup_key=self._refused_key if refused else self._link_key,
+            details={
+                "endpoint": self._config.endpoint,
+                "port": self._config.port,
+                "attempts": self._attempts,
+                "error": text,
+            },
+        )
+        self._report_broker_failure(exc)
+
+    def _link_restored(self) -> None:
+        """Record a connection made by the background retry, and report it.
+
+        The backoff and the report throttle are kept until the connection is
+        stable, so a broker that drops the connection right after accepting
+        it does not reset them. The reconnect is reported only when a failure
+        was reported since the last reported reconnect.
+        """
+        from py20305.diagnostics import report, resolve
+
+        now = self._clock()
+        down_for = now - (self._down_since if self._down_since is not None else now)
+        attempts = self._attempts + 1
+        self._stats["reconnects"] += 1
+        self._down_since = None
+        self._attempts = 0
+        self._link_stable = False
+        if not self._restore_unreported:
+            logger.debug(
+                "MQTT broker connection to %s restored after %.1f s and %d connection attempts",
+                self._broker,
+                down_for,
+                attempts,
+            )
+            return
+        self._restore_unreported = False
+        resolve(self._link_key)
+        resolve(self._connect_key)
+        resolve(self._refused_key)
+        report(
+            "info",
+            f"MQTT broker connection to {self._broker} restored after {down_for:.1f} s "
+            f"and {attempts} connection attempts",
+            source="mqtt",
+            dedup_key=f"mqtt_link_restored:{self._config.endpoint}:{self._config.port}",
+            details={
+                "endpoint": self._config.endpoint,
+                "port": self._config.port,
+                "downtime_seconds": round(down_for, 1),
+                "attempts": attempts,
+            },
+        )
+        self._report_broker_connected()
 
     def _broker_endpoints(self) -> tuple[Endpoint | None, Endpoint | None]:
         """Return the broker connection's local and remote endpoints.
@@ -274,7 +740,7 @@ class MQTTForwarder(AbstractForwarder):
         except Exception:
             logger.debug("Could not report the broker connection", exc_info=True)
 
-    def _report_broker_failure(self, exc: BaseException) -> None:
+    def _report_broker_failure(self, exc: BaseException | str) -> None:
         """Report a failed broker connection, with its reason, to the connection observer."""
         observer = self.connection_observer
         if observer is None:
@@ -292,7 +758,11 @@ class MQTTForwarder(AbstractForwarder):
     async def stop(self) -> None:
         """Stop the forwarder gracefully.
 
-        Signals shutdown, drains the queue, then disconnects.
+        Signals shutdown, drains the buffers while the broker connection is
+        up, then disconnects. While the link is down there is nothing to
+        drain into, so a backoff wait or a reconnect attempt in progress is
+        canceled and stop returns without waiting for it. A connect that
+        completes after that is closed as soon as its thread returns.
         """
         if not self._running:
             return
@@ -303,10 +773,12 @@ class MQTTForwarder(AbstractForwarder):
         self._shutdown_event.set()
         self._wakeup.set()
 
-        # Wait for publish task to drain queue
-        if self._publish_task:
+        task, self._publish_task = self._publish_task, None
+        if task is not None:
+            if not self._connected:
+                task.cancel()
             try:
-                await asyncio.wait_for(self._publish_task, timeout=10.0)
+                await asyncio.wait_for(task, timeout=_DRAIN_TIMEOUT_SECONDS)
             except TimeoutError:
                 from py20305.diagnostics import report
 
@@ -315,20 +787,24 @@ class MQTTForwarder(AbstractForwarder):
                     "MQTT publish task did not drain within timeout on shutdown",
                     source="mqtt",
                 )
-                self._publish_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._publish_task
-            self._publish_task = None
+            except asyncio.CancelledError:
+                # The task was canceled above. Re-raise only when stop()
+                # itself is being canceled.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
 
-        # Disconnect client
-        if self._client:
-            try:
-                await self._client.__aexit__(None, None, None)
-            except Exception as e:
-                logger.warning("Error disconnecting MQTT client: %s", e)
-            self._client = None
+        unpublished = self._buffered()
+        if unpublished:
+            logger.warning(
+                "MQTT forwarder stopped with %d items not published to %s",
+                unpublished,
+                self._broker,
+            )
 
+        await self._discard_client()
         self._connected = False
+        self._backoff = 0.0
         logger.info("MQTT forwarder stopped")
 
     def queue_message(self, frame: MessageFrame) -> None:
@@ -425,18 +901,32 @@ class MQTTForwarder(AbstractForwarder):
             self._stats[counter] = self._stats.get(counter, 0) + 1
             self._wakeup.set()
         except asyncio.QueueFull:
-            from py20305.diagnostics import report
+            from py20305.diagnostics import get_store, report
 
             # Single shared dedup key: backpressure is one ongoing condition;
             # the entry's count tells the operator how often the broker is
             # too slow rather than producing one entry per dropped message.
-            report(
-                "warnings",
-                "MQTT queue full, dropping oldest message",
-                source="mqtt",
-                dedup_key="mqtt_queue_full",
-                details={"endpoint": self._config.endpoint},
-            )
+            # The warning is logged once until the queue drains again: during
+            # a broker outage every new item is a drop, and logging each one
+            # would flood the log.
+            message = "MQTT queue full, dropping oldest message"
+            details = {"endpoint": self._config.endpoint}
+            if not self._queue_full_reported:
+                self._queue_full_reported = True
+                report(
+                    "warnings", message, source="mqtt", dedup_key="mqtt_queue_full", details=details
+                )
+            else:
+                logger.debug(message)
+                store = get_store()
+                if store is not None:
+                    store.add(
+                        "warnings",
+                        message,
+                        source="mqtt",
+                        dedup_key="mqtt_queue_full",
+                        details=details,
+                    )
             try:
                 self._capture_queue.get_nowait()  # Drop oldest
                 self._stats["messages_dropped"] = self._stats.get("messages_dropped", 0) + 1
@@ -446,8 +936,9 @@ class MQTTForwarder(AbstractForwarder):
                 pass
 
     def _buffered(self) -> int:
-        """How many items are waiting across both buffers."""
-        return self._capture_queue.qsize() + len(self._telemetry_pending)
+        """Return how many items are waiting across both buffers and the retry slot."""
+        retry = 1 if self._retry_item is not None else 0
+        return self._capture_queue.qsize() + len(self._telemetry_pending) + retry
 
     async def _publish_loop(self) -> None:
         """Background task that publishes buffered items, capture first.
@@ -458,6 +949,10 @@ class MQTTForwarder(AbstractForwarder):
         means a client under sustained protocol load still reports measurements
         -- and since telemetry coalesces, starving it would leave the upstream
         with no reading at all for that period rather than a delayed one.
+
+        The loop also owns the broker connection: while the link is down it
+        reconnects instead of publishing, and on stop it drains only while
+        the link is up.
         """
         message_topic = f"{self._config.topic_base}/{PROTOCOL_MESSAGE_TOPIC_SUFFIX}"
         # Its own topic rather than a shared one with a type marker inside: a
@@ -465,42 +960,34 @@ class MQTTForwarder(AbstractForwarder):
         # to say so at the broker instead of filtering every message on arrival.
         telemetry_topic = f"{self._config.topic_base}/{TELEMETRY_TOPIC_SUFFIX}"
 
-        while self._running or self._buffered():
+        while True:
             try:
-                published = 0
+                if not self._running and (not self._connected or not self._buffered()):
+                    break
 
-                while published < _CAPTURE_RUN:
-                    try:
-                        item = self._capture_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                    await self._publish_item(item, message_topic, telemetry_topic)
-                    published += 1
-
-                for _ in range(_TELEMETRY_SLICE):
-                    if not self._telemetry_pending:
-                        break
-                    # Oldest pending device first; a superseding frame kept its
-                    # device's place, so no device can overtake another.
-                    device = next(iter(self._telemetry_pending))
-                    await self._publish_item(
-                        self._telemetry_pending.pop(device), message_topic, telemetry_topic
-                    )
-                    published += 1
-
-                if published:
+                if not self._connected:
+                    await self._reconnect()
                     continue
 
-                # Nothing buffered. Wait to be woken by an arrival rather than
-                # polling, but wake anyway so shutdown is observed even if the
-                # event is missed.
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._wakeup.wait(), timeout=1.0)
-                self._wakeup.clear()
+                lost = self._client_reported_loss()
+                if lost is not None:
+                    self._link_down(lost)
+                    continue
+
+                if await self._publish_batch(message_topic, telemetry_topic):
+                    continue
+                if not self._connected:
+                    continue
+
+                # Nothing buffered. Wait for an arrival, shutdown, or a lost
+                # connection, and check again after a second in case a wakeup
+                # was missed.
+                await self._wait_for_work()
 
             except asyncio.CancelledError:
-                logger.debug("Publish loop cancelled")
-                break
+                # Re-raised so a caller awaiting this task sees the cancellation.
+                logger.debug("Publish loop canceled")
+                raise
             except Exception as e:
                 from py20305.diagnostics import report
 
@@ -517,14 +1004,146 @@ class MQTTForwarder(AbstractForwarder):
                     exc_info=True,
                 )
                 self._record_error(f"Loop error: {e}")
+                # An error raised before the loop body's first await would
+                # otherwise repeat with no suspension point and block the event
+                # loop. Pause like every other failure path in this module.
+                await self._sleep(_LOOP_ERROR_PAUSE_SECONDS)
+
+    async def _publish_batch(self, message_topic: str, telemetry_topic: str) -> int:
+        """Publish one bounded run of buffered items and return how many were taken.
+
+        Stops early when the broker connection is lost. The failed item is
+        kept for the next run.
+        """
+        published = 0
+
+        if self._retry_item is not None:
+            item, self._retry_item = self._retry_item, None
+            if not await self._publish_item(item, message_topic, telemetry_topic):
+                return published
+            published += 1
+
+        while published < _CAPTURE_RUN:
+            try:
+                item = self._capture_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                # The queue drained, so the next drop logs its warning again.
+                self._queue_full_reported = False
+                break
+            if not await self._publish_item(item, message_topic, telemetry_topic):
+                return published
+            published += 1
+
+        for _ in range(_TELEMETRY_SLICE):
+            if not self._telemetry_pending:
+                break
+            # Oldest pending device first; a superseding frame kept its
+            # device's place, so no device can overtake another.
+            device = next(iter(self._telemetry_pending))
+            frame = self._telemetry_pending.pop(device)
+            if not await self._publish_item(frame, message_topic, telemetry_topic):
+                return published
+            published += 1
+
+        return published
+
+    async def _wait_for_work(self) -> None:
+        """Wait until an item arrives, shutdown starts, or the client reports a lost connection.
+
+        Returns after ``_IDLE_WAIT_SECONDS`` at most.
+        """
+        arrival = asyncio.ensure_future(self._wakeup.wait())
+        waiters: set[asyncio.Future[Any]] = {arrival}
+        lost = getattr(self._client, "_disconnected", None)
+        if isinstance(lost, asyncio.Future):
+            # Waited on, never canceled: the future belongs to the client.
+            waiters.add(lost)
+        try:
+            await asyncio.wait(
+                waiters, timeout=_IDLE_WAIT_SECONDS, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            arrival.cancel()
+            await asyncio.gather(arrival, return_exceptions=True)
+        self._wakeup.clear()
+
+    def _keep_for_retry(self, item: MessageFrame | TelemetryFrame | EventFrame) -> None:
+        """Keep an item whose publish failed on a lost connection, to publish after reconnect.
+
+        A telemetry frame goes back to the front of the pending map, where it
+        was taken from, unless a newer frame for its device arrived in the
+        meantime, which supersedes it. It is dropped when frames for other
+        devices filled the map to its device limit in the meantime.
+        """
+        if isinstance(item, TelemetryFrame):
+            if item.device in self._telemetry_pending:
+                self._stats["telemetry_superseded"] += 1
+            elif len(self._telemetry_pending) >= self._telemetry_device_limit:
+                self._stats["telemetry_dropped"] += 1
+            else:
+                self._telemetry_pending = {item.device: item, **self._telemetry_pending}
+            return
+        self._retry_item = item
+
+    def _is_failing_item(self, item: MessageFrame | TelemetryFrame | EventFrame) -> bool:
+        """Return whether ``item`` is the item whose last publish lost the link.
+
+        A telemetry frame matches any frame for the same device, since a newer
+        frame takes the older one's place.
+        """
+        last = self._failing_item
+        if last is item:
+            return True
+        return (
+            isinstance(item, TelemetryFrame)
+            and isinstance(last, TelemetryFrame)
+            and last.device == item.device
+        )
+
+    def _count_link_failure(self, item: MessageFrame | TelemetryFrame | EventFrame) -> int:
+        """Count a publish of ``item`` that lost the link, and return the count in a row."""
+        same = self._is_failing_item(item)
+        self._failing_item = item
+        self._failing_attempts = self._failing_attempts + 1 if same else 1
+        return self._failing_attempts
+
+    def _drop_failing_item(self, topic: str, error: BaseException) -> None:
+        """Drop the item whose last publish attempts all lost the link, and report it."""
+        from py20305.diagnostics import report
+
+        attempts = self._failing_attempts
+        text = self._describe(error)
+        self._failing_item = None
+        self._failing_attempts = 0
+        report(
+            "warnings",
+            f"Dropped an MQTT message for topic {topic} after {attempts} publish attempts "
+            f"that each lost the connection to {self._broker}: {text}",
+            source="mqtt",
+            dedup_key=f"mqtt_publish:{self._config.endpoint}:dropped",
+            details={
+                "endpoint": self._config.endpoint,
+                "kind": "dropped",
+                "topic": topic,
+                "attempts": attempts,
+                "error": text,
+            },
+        )
 
     async def _publish_item(
         self,
         item: MessageFrame | TelemetryFrame | EventFrame,
         message_topic: str,
         telemetry_topic: str,
-    ) -> None:
-        """Convert one buffered item and publish it on the topic for its kind."""
+    ) -> bool:
+        """Convert one buffered item and publish it on the topic for its kind.
+
+        Returns False when the broker connection is lost. The link is then
+        marked down and the item is kept for the next attempt, unless the
+        last ``_MAX_PUBLISH_ATTEMPTS`` attempts to publish it all lost the
+        link. The item is then dropped. Any other failure drops the item,
+        records the error, and returns True.
+        """
         # An event is already in its wire form and carries its own topic; a
         # message frame is converted and goes on the protocol-message topic.
         try:
@@ -560,25 +1179,31 @@ class MQTTForwarder(AbstractForwarder):
                 },
             )
             self._record_error(f"Serialization error: {e}")
-            return
+            return True
+
+        if self._client is None:
+            self._keep_for_retry(item)
+            self._link_down("no client")
+            return False
 
         try:
-            if self._client:
-                await self._client.publish(
-                    topic,
-                    payload_json.encode("utf-8"),
-                    qos=1,
-                )
-                self._record_success()
-                # A publish error that looked like a lost connection cleared
-                # this flag; a publish that succeeds shows the connection works
-                # again. Readiness for connection events depends on it.
-                self._connected = True
-                logger.debug("Published message to %s", topic)
-            else:
-                logger.warning("MQTT client not connected")
-                self._record_error("Client not connected")
+            await self._client.publish(
+                topic,
+                payload_json.encode("utf-8"),
+                qos=1,
+            )
         except Exception as e:
+            if isinstance(e, self._link_errors):
+                # The type decides, not the message text. aiomqtt reports a
+                # closed connection as "The client is not currently connected."
+                self._record_error(f"Publish error: {e}")
+                if self._count_link_failure(item) >= _MAX_PUBLISH_ATTEMPTS:
+                    self._drop_failing_item(topic, e)
+                else:
+                    self._keep_for_retry(item)
+                self._link_down(e)
+                return False
+
             from py20305.diagnostics import report
 
             report(
@@ -593,9 +1218,15 @@ class MQTTForwarder(AbstractForwarder):
                 },
             )
             self._record_error(f"Publish error: {e}")
-            # On connection error, attempt reconnect
-            if "connection" in str(e).lower():
-                self._connected = False
+            return True
+
+        self._record_success()
+        self._link_stable = True
+        if self._is_failing_item(item):
+            self._failing_item = None
+            self._failing_attempts = 0
+        logger.debug("Published message to %s", topic)
+        return True
 
     def _frame_to_dict(self, frame: MessageFrame) -> dict[str, Any]:
         """Convert MessageFrame to dict for publishing.
@@ -675,6 +1306,8 @@ class MQTTForwarder(AbstractForwarder):
                 "capture_queue_size": self._capture_queue.qsize(),
                 "telemetry_pending": len(self._telemetry_pending),
                 "topic": f"{self._config.topic_base}/{PROTOCOL_MESSAGE_TOPIC_SUFFIX}",
+                # Base delay before the next reconnect attempt; 0 while connected.
+                "reconnect_backoff_seconds": self._backoff if not self._connected else 0.0,
             }
         )
         return stats

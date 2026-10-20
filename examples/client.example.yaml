@@ -178,6 +178,15 @@ connection:
 #     ca_path: broker-ca.pem
 #     cert_path: broker.pem
 #     key_path: broker.key
+#     # A lost broker connection is retried in the background. The base delay
+#     # starts here and doubles after each failed attempt, up to the maximum.
+#     # It starts here again once a new connection publishes or stays up for
+#     # the maximum delay.
+#     reconnect_initial_delay_seconds: 1
+#     reconnect_max_delay_seconds: 60
+#     # True makes startup fail when the first connection fails, instead of
+#     # retrying in the background.
+#     require_initial_connection: false
 #   # The Modbus reads and writes between this client and its device, reported
 #   # in the same envelope as the 2030.5 traffic. Off unless asked for.
 #   device_telemetry:
