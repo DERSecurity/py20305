@@ -407,6 +407,23 @@ class TestRediscoveryIsWhatRefreshesState:
             await coordinator.shutdown()
 
     @pytest.mark.asyncio
+    async def test_the_configured_power_direction_reaches_the_manager(self, tmp_path):
+        from py20305.cli import _start_telemetry
+        from py20305.telemetry import PowerDirection
+
+        client, config = _client(tmp_path)
+        telemetry = config.telemetry.model_copy(update={"power_direction": "split"})
+        config = config.model_copy(update={"telemetry": telemetry})
+
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None
+        try:
+            assert coordinator.telemetry is not None
+            assert coordinator.telemetry._power_direction is PowerDirection.SPLIT
+        finally:
+            await coordinator.shutdown()
+
+    @pytest.mark.asyncio
     async def test_the_api_sees_a_metering_manager_created_later(self, tmp_path):
         """It was handed None at startup and would hold it for the process."""
         from py20305.api import ClientAPIService

@@ -1047,7 +1047,7 @@ def _start_telemetry(
         logger.warning("telemetry is enabled but this client has no connector registry")
         return None
 
-    from py20305.telemetry import ReadingProfile, TelemetryCoordinator
+    from py20305.telemetry import PowerDirection, ReadingProfile, TelemetryCoordinator
 
     coordinator = TelemetryCoordinator(
         client,
@@ -1059,6 +1059,7 @@ def _start_telemetry(
         device_telemetry=dispatcher.telemetry,
         reading_profile=ReadingProfile(config.telemetry.reading_profile),
         interval_history=client.history.intervals if client.history is not None else None,
+        power_direction=PowerDirection(config.telemetry.power_direction),
     )
     coordinator.setup()
     coordinator.start_device_telemetry()

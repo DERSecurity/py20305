@@ -171,6 +171,7 @@ class DiscoveryConfig(_Strict):
             "utility uplink and a device LAN may not be the intended one."
         ),
     )
+
     @field_validator("subtype")
     @classmethod
     def _subtype_is_one_label(cls, v: str | None) -> str | None:
@@ -389,6 +390,26 @@ class TelemetryConfig(_Strict):
             "readings when the device supplies them. Applied at startup."
         ),
     )
+    power_direction: Literal["default", "net", "split"] = Field(
+        default="default",
+        description=(
+            "How real and reactive power carry their direction under the default "
+            "reading profile. 'default' sets flowDirection once, from the sign when the "
+            "MirrorUsagePoint is created, and posts magnitudes, so a battery that later "
+            "changes direction keeps the first one. 'net' posts flowDirection 4 with the "
+            "sign on the value. 'split' posts a Forward (1) and a Reverse (19) reading for "
+            "each quantity. Applied at startup."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _direction_needs_the_default_profile(self) -> TelemetryConfig:
+        if self.power_direction != "default" and self.reading_profile != "default":
+            raise ValueError(
+                "telemetry.power_direction applies to the default reading profile only; "
+                "signed_load_convention already signs every value"
+            )
+        return self
 
 
 class LoggingConfig(_Strict):
