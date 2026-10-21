@@ -25,6 +25,11 @@ from py20305.connectors.errors import (
     ConnectorValueError,
     ConnectorWriteError,
 )
+from py20305.connectors.sunspec_core._meter import (
+    METER_MODEL_IDS,
+    PowerSignCalibrator,
+    read_meter,
+)
 
 #: Method-return alias matching the connector contract (an optional dict).
 ConnectorPayload = dict[str, Any] | None
@@ -35,6 +40,15 @@ ConnectorPayload = dict[str, Any] | None
 ReportCallback = Callable[..., None]
 
 logger = logging.getLogger(__name__)
+
+#: Device roles this connector reads. ``der`` reads the 7xx DER models; the
+#: meter roles read a SunSpec meter model.
+_ROLES: tuple[str, ...] = ("der", "site_meter", "der_meter")
+
+#: Endpoints already told that a device configured as a DER looks like a meter.
+#: Module-level because a failed scan discards the connector, and the next
+#: construction attempt must not repeat the warning.
+_ROLE_HINTS_GIVEN: set[str] = set()
 
 # Readback delay when enable verification fails on first attempt (seconds)
 _MB_READBACK_DELAY = 0.5
@@ -394,12 +408,21 @@ class SunSpecModbusConnector:
         scan_retries: int = 3,
         scan_retry_delay: float = 2.0,
         der_type: int = 83,
+        role: str = "der",
+        power_sign: str = "auto",
         report: ReportCallback | None = None,
     ) -> None:
         import sunspec2.modbus.client as ss_client  # type: ignore[import-untyped]
 
+        if role not in _ROLES:
+            raise ValueError(f"Unknown role {role!r}; expected one of {', '.join(_ROLES)}")
         self._report = report
         self.der_type = der_type
+        #: ``der`` reads the 7xx DER models; a meter role reads a meter model
+        #: (see ``_meter``).
+        self._role = role
+        #: The meter model monitoring reads, chosen at scan. None for a DER.
+        self._meter_model_id: int | None = None
         # Lazily allocate the lock against the loop that's actually running
         # when fetch_*/update_* is first awaited, and rebind if the running
         # loop changes. asyncio.Lock instances bind to whichever loop first
@@ -489,6 +512,7 @@ class SunSpecModbusConnector:
             msg = f"Unknown transport {transport!r}; expected 'tcp', 'rtu', or 'tcp+tls'"
             raise ValueError(msg)
 
+        self._calibrator = PowerSignCalibrator(power_sign, label=self._endpoint_id)
         self._scan_with_readiness_check(scan_retries, scan_retry_delay)
 
     def _scan_with_readiness_check(self, retries: int, retry_delay: float) -> None:
@@ -511,7 +535,10 @@ class SunSpecModbusConnector:
             attempts_made = attempt
             try:
                 self._target.scan()
-                self._verify_nameplate_readable()
+                if self._role == "der":
+                    self._verify_nameplate_readable()
+                else:
+                    self._verify_meter_readable()
                 return
             except Exception as exc:
                 last_err = exc
@@ -573,6 +600,7 @@ class SunSpecModbusConnector:
         """
         model_instances = self._target.models.get(702)
         if not model_instances:
+            self._suggest_meter_role()
             raise ConnectorConnectionError("Model 702 not found after scan")
         model = model_instances[0]
         model.read()
@@ -580,6 +608,57 @@ class SunSpecModbusConnector:
             raise ConnectorConnectionError("Model 702 scanned but WMaxRtg is not yet populated")
         if model.W_SF.value is None:
             raise ConnectorConnectionError("Model 702 scanned but W_SF is not yet populated")
+
+    def _model_ids(self) -> list[int]:
+        """Return the SunSpec model IDs the scan found, in ascending order.
+
+        pysunspec2 keys its model table by group name as well as by ID, so the
+        names are left out.
+        """
+        return sorted(mid for mid in self._target.models if isinstance(mid, int))
+
+    def _suggest_meter_role(self) -> None:
+        """Warn once per endpoint when a device configured as a DER is a meter.
+
+        The role is never changed automatically: which role a meter has (the
+        site's or one DER's) is not something the device can say.
+        """
+        found = self._model_ids()
+        meters = [mid for mid in found if mid in METER_MODEL_IDS]
+        if not meters or any(700 <= mid < 800 for mid in found):
+            return
+        if self._endpoint_id in _ROLE_HINTS_GIVEN:
+            return
+        _ROLE_HINTS_GIVEN.add(self._endpoint_id)
+        logger.warning(
+            "SunSpec device at %s is configured as a DER but exposes meter model(s) %s "
+            "and no DER model; if it is a meter, set its role to site_meter or der_meter",
+            self._endpoint_id,
+            ", ".join(map(str, meters)),
+        )
+
+    def _verify_meter_readable(self) -> None:
+        """Choose the meter model to read and check that it reads.
+
+        Raises ConnectorConnectionError naming the models found when the device
+        exposes no meter model, or when the chosen model's real power is not
+        populated yet.
+        """
+        found = self._model_ids()
+        model_id = next((mid for mid in METER_MODEL_IDS if mid in found), None)
+        if model_id is None:
+            raise ConnectorConnectionError(
+                f"Device configured as {self._role} exposes no SunSpec meter model "
+                f"({', '.join(map(str, METER_MODEL_IDS))}); models found: "
+                f"{', '.join(map(str, found)) or 'none'}"
+            )
+        model = self._target.models[model_id][0]
+        model.read()
+        if model.W.value is None:
+            raise ConnectorConnectionError(
+                f"Meter model {model_id} scanned but W is not yet populated"
+            )
+        self._meter_model_id = model_id
 
     # ------------------------------------------------------------------
     # Internal helpers (all synchronous, called via to_thread)
@@ -728,6 +807,12 @@ class SunSpecModbusConnector:
 
     def _fetch_monitoring_sync(self) -> dict[str, Any]:
         default = {"W": None, "Var": None, "Hz": None, "V": None, "PF": None, "VA": None, "A": None}
+        if self._meter_model_id is not None:
+            try:
+                meter = self._get_model(self._meter_model_id)
+            except ConnectorConnectionError:
+                return default
+            return read_meter(meter, self._meter_model_id, self._role, self._calibrator)
         try:
             model = self._get_model(701)
         except ConnectorConnectionError:

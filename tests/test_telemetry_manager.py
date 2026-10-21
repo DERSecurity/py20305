@@ -18,6 +18,7 @@ from py20305.connectors.base import (
 from py20305.models.sep import MirrorUsagePointList
 from py20305.readings import DirectConnectorSource, Quality
 from py20305.telemetry.manager import DeviceTelemetryState, TelemetryManager
+from py20305.telemetry.mup import mup_mrid
 
 SAMPLE_LFDI = "1234567890abcdef1234567890abcdef12345678"
 MUP_LIST_HREF = "/mup"
@@ -414,6 +415,7 @@ class TestMupDiscovery:
         # Setup discovery response
         mup = MagicMock()
         mup.device_lfdi = bytes.fromhex(SAMPLE_LFDI)
+        mup.m_rid.value = mup_mrid(SAMPLE_LFDI)
         mup.href = "/mup/discovered-123"
         mup_list = MagicMock(spec=MirrorUsagePointList)
         mup_list.mirror_usage_point = [mup]
@@ -2197,3 +2199,154 @@ class TestSignedLoadRejectedRepost:
         assert [c.args[0] for c in mock_client.post_bytes.call_args_list][0] == MUP_LIST_HREF
 
         await signed_manager.shutdown()
+
+
+SITE_LFDI = "5e" * 20
+
+
+class TestMeterDevices:
+    """A meter's MUP carries its role, is posted where configured, and sends no DER resources."""
+
+    @pytest.mark.asyncio
+    async def test_the_provisioning_gate_checks_the_lfdi_the_mup_is_posted_under(
+        self, mock_client, connector_resolver, mock_connector
+    ):
+        from py20305.telemetry.mup import DeviceRole
+
+        asked: list[str] = []
+
+        def provisioned(lfdi: str) -> bool:
+            asked.append(lfdi)
+            return lfdi == SITE_LFDI
+
+        manager = TelemetryManager(
+            mock_client, MUP_LIST_HREF, connector_resolver, is_provisioned=provisioned
+        )
+        manager.start_metering(
+            SAMPLE_LFDI, post_rate=300, role=DeviceRole.SITE_METER, mirror_lfdi=SITE_LFDI
+        )
+
+        await manager._metering_cycle(SAMPLE_LFDI)
+
+        assert asked == [SITE_LFDI]
+        mock_connector.fetch_monitoring.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_site_meter_mup_is_posted_under_the_site_with_site_role_flags(
+        self, mock_client, connector_resolver
+    ):
+        from py20305.models.sep import MirrorUsagePoint
+        from py20305.telemetry.mup import DeviceRole
+        from py20305.xml.serialization import from_xml
+
+        manager = TelemetryManager(mock_client, MUP_LIST_HREF, connector_resolver)
+        manager.start_metering(
+            SAMPLE_LFDI, post_rate=300, role=DeviceRole.SITE_METER, mirror_lfdi=SITE_LFDI
+        )
+
+        await manager._metering_cycle(SAMPLE_LFDI)
+
+        body = mock_client.post_bytes.await_args.args[1]
+        mup = from_xml(body, MirrorUsagePoint)
+        assert mup.device_lfdi == bytes.fromhex(SITE_LFDI)
+        assert mup.role_flags.value == b"\x00\x03"
+
+    @pytest.mark.asyncio
+    async def test_a_meter_posts_no_log_event_and_no_availability(
+        self, mock_client, connector_resolver, mock_connector
+    ):
+        from py20305.telemetry.mup import DeviceRole
+
+        mock_connector.fetch_status.return_value = {"alarmStatus": 1}
+        manager = TelemetryManager(mock_client, MUP_LIST_HREF, connector_resolver)
+        manager.start_metering(
+            SAMPLE_LFDI,
+            post_rate=300,
+            log_event_list_href="/lel",
+            der_availability_href="/dera",
+            role=DeviceRole.DER_METER,
+        )
+
+        await manager._metering_cycle(SAMPLE_LFDI)
+
+        mock_connector.fetch_status.assert_not_awaited()
+        mock_connector.fetch_availability.assert_not_awaited()
+        mock_client.put_bytes.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_site_meters_readings_go_to_the_site_series_only(
+        self, mock_client, connector_resolver
+    ):
+        from py20305.telemetry.mup import DeviceRole
+
+        devices = MagicMock()
+        site = MagicMock()
+        manager = TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            interval_history=devices,
+            site_interval_history=site,
+        )
+        manager.start_metering(SAMPLE_LFDI, post_rate=300, role=DeviceRole.SITE_METER)
+
+        await manager._metering_cycle(SAMPLE_LFDI)
+
+        site.observe.assert_called_once()
+        assert site.observe.call_args.args[0] == SAMPLE_LFDI
+        devices.observe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_der_meters_readings_go_to_the_device_series(
+        self, mock_client, connector_resolver
+    ):
+        from py20305.telemetry.mup import DeviceRole
+
+        devices = MagicMock()
+        site = MagicMock()
+        manager = TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            interval_history=devices,
+            site_interval_history=site,
+        )
+        manager.start_metering(SAMPLE_LFDI, post_rate=300, role=DeviceRole.DER_METER)
+
+        await manager._metering_cycle(SAMPLE_LFDI)
+
+        devices.observe.assert_called_once()
+        site.observe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mup_discovery_picks_the_meters_mup_when_two_share_a_device_lfdi(
+        self, mock_client, connector_resolver
+    ):
+        """A site meter under the site's EndDevice shares deviceLFDI with the site's DER."""
+        from py20305.models.sep import MirrorUsagePoint, MRidtype, RoleFlagsType, ServiceKind
+        from py20305.telemetry.mup import DeviceRole, mup_mrid
+
+        def listed(href: str, lfdi: str) -> MirrorUsagePoint:
+            return MirrorUsagePoint(
+                href=href,
+                m_rid=MRidtype(value=mup_mrid(lfdi)),
+                device_lfdi=bytes.fromhex(SITE_LFDI),
+                role_flags=RoleFlagsType(value=b"\x00\x49"),
+                service_category_kind=ServiceKind(value=0),
+                status=1,
+            )
+
+        page = MirrorUsagePointList(
+            mirror_usage_point=[listed("/mup/1", SITE_LFDI), listed("/mup/2", SAMPLE_LFDI)],
+            all=2,
+            results=2,
+        )
+        mock_client.get_list = AsyncMock(return_value=[page])
+        manager = TelemetryManager(mock_client, MUP_LIST_HREF, connector_resolver)
+        manager.start_metering(
+            SAMPLE_LFDI, post_rate=300, role=DeviceRole.SITE_METER, mirror_lfdi=SITE_LFDI
+        )
+
+        href = await manager._discover_mup_href(manager._devices[SAMPLE_LFDI])
+
+        assert href == "/mup/2"

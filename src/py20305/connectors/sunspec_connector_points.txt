@@ -153,6 +153,25 @@ Read/Write points:
     AdptCrvRslt     Adopt curve result (R)
 
 
+MODELS 201-204, 211-214, 220: meters (role site_meter or der_meter)
+-------------------------------------------------------------------
+Read points (fetch_monitoring), from the first meter model the device exposes:
+    W               Real power (Watts); sign learned from the energy totals
+    VAR             Reactive power (Var); same orientation as W
+    Hz              Frequency (Hz)
+    PhV             Average line-to-neutral voltage (V); PPV when absent
+    PPV             Average line-to-line voltage (V)
+    PF              Power factor (magnitude)
+    VA              Apparent power (VA)
+    A               Current (A)
+    TotWhImp        Total real energy imported (Wh)
+    TotWhExp        Total real energy exported (Wh)
+    WphA..C, VARphA..C, PhVphA..C, PFphA..C, VAphA..C, AphA..C
+                    Per-phase values, where the model has them
+    PPVphAB, PPVphBC, PPVphCA
+                    Line-to-line voltages, where the model has them
+
+
 SUMMARY BY MODEL
 =================
   Model 701:  11 read points (monitoring + status)
@@ -163,4 +182,5 @@ SUMMARY BY MODEL
   Model 711:   8 read/write points (frequency droop)
   Model 712:   8 read/write points (watt-var curves)
   -------
-  Total:      89 unique SunSpec points across 7 models
+  Total:      89 unique SunSpec points across the 7 DER models
+  Meter models: the read points listed above, for a device configured as a meter

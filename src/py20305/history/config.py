@@ -85,6 +85,14 @@ class HistoryConfig(_Strict):
         default_factory=IntervalHistoryConfig,
         description="Device readings integrated into fixed intervals. Needs telemetry on.",
     )
+    site_intervals: HistoryPartConfig = Field(
+        default_factory=HistoryPartConfig,
+        description=(
+            "Site meter readings integrated into fixed intervals, kept apart from the "
+            "devices, import positive. Kept only while `intervals` is on, with its "
+            "interval length and gap. Needs a device with role site_meter."
+        ),
+    )
 
     @property
     def any_part_enabled(self) -> bool:

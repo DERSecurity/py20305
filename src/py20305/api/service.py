@@ -562,17 +562,18 @@ class ClientAPIService:
         since: float | None = None,
         until: float | None = None,
         limit: int = 10000,
+        series: str = "device",
     ) -> dict[str, Any]:
-        """Measured intervals, oldest first."""
+        """Measured intervals of the ``device`` or ``site`` series, oldest first."""
         history = self._history()
-        if history is None or history.intervals is None:
-            return {"enabled": False, "intervals": []}
+        intervals = history.series(series) if history is not None else None
+        if intervals is None:
+            return {"enabled": False, "series": series, "intervals": []}
         return {
             "enabled": True,
-            "interval_seconds": history.intervals.interval_seconds,
-            "intervals": history.intervals.query(
-                lfdi=lfdi, since=since, until=until, limit=limit
-            ),
+            "series": series,
+            "interval_seconds": intervals.interval_seconds,
+            "intervals": intervals.query(lfdi=lfdi, since=since, until=until, limit=limit),
         }
 
     def get_history_baseline(
@@ -585,14 +586,16 @@ class ClientAPIService:
         lookback_days: int = 45,
         weekdays_only: bool = True,
         tz: str | None = None,
+        series: str = "device",
     ) -> dict[str, Any]:
         """A comparison-day baseline for a window. Raises ValueError on bad input."""
         history = self._history()
-        if history is None or history.intervals is None:
-            return {"enabled": False}
+        if history is None or history.series(series) is None:
+            return {"enabled": False, "series": series}
         zone = _zone(tz)
         return {
             "enabled": True,
+            "series": series,
             **history.baseline(
                 start,
                 end,
@@ -601,6 +604,7 @@ class ClientAPIService:
                 lookback_days=lookback_days,
                 weekdays_only=weekdays_only,
                 tz=zone,
+                series=series,
             ),
         }
 

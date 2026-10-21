@@ -4,6 +4,21 @@ Creates MUP resources with system-wide MirrorMeterReadings (7 specs:
 W/Var/Hz/V/PF/VA/A) and, on multi-phase devices, an additional set of
 per-line readings for each phase advertised by the inverter (W/Var/V/PF/
 VA/A per line; Hz is grid-wide and stays system-only).
+
+mRID slot map (the index passed to ``_create_mrid``). A slot is never reused
+for a different ReadingType, because IEEE 2030.5 forbids changing a
+MeterReading's ReadingType once it is created:
+
+- 0: the MirrorUsagePoint itself.
+- 1-7: system W, Var, Hz, V, PF, VA, A.
+- 8: State of Energy (SIGNED_LOAD_CONVENTION only).
+- 10-27: per-line W, Var, V, PF, VA, A, six slots per line.
+- 28-30: line-to-line voltage (SIGNED_LOAD_CONVENTION only).
+- 31-38: W and var with flowDirection 4 (``PowerDirection.NET``).
+- 41-48 and 51-58: W and var with flowDirection 1 and 19
+  (``PowerDirection.SPLIT``).
+- 61 and 62: energy delivered in the forward and the reverse direction
+  (``WhFwd``, ``WhRev``), DEFAULT profile only.
 """
 
 from __future__ import annotations
@@ -51,6 +66,7 @@ from py20305.telemetry.scaling import (
     scale_va,
     scale_var,
     scale_w,
+    scale_wh,
 )
 
 if TYPE_CHECKING:
@@ -70,6 +86,47 @@ SERVICE_CATEGORY_ELECTRICITY = 0
 # BASE.052). isDER alone (0x08) leaves a conformance tool unable to classify the
 # metering location ("Site type is unknown").
 ROLE_FLAGS_DER = 0x49  # isMirror | isDER | isSubmeter
+
+# RoleFlagsType for the meter at the premises point of delivery: isMirror (bit 0)
+# and isPremisesAggregationPoint (bit 1). isSubmeter (bit 6) stays clear, since
+# IEEE 2030.5 sets it only on a usage point that is not a premises aggregation
+# point. CSIP-AUS v1.1a (January 2023) Annex A lists 0x03 for the site
+# (connection point) real and reactive power.
+ROLE_FLAGS_SITE = 0x03  # isMirror | isPremisesAggregationPoint
+
+# RoleFlagsType bit 4, isRevenueQuality (IEEE 2030.5-2023 RoleFlagsType).
+ROLE_FLAG_REVENUE_QUALITY = 0x10
+
+
+class DeviceRole(StrEnum):
+    """What a configured device measures, which sets its MUP roleFlags.
+
+    - ``DER``: a DER. Its readings are mirrored with roleFlags 0x49.
+    - ``SITE_METER``: the meter at the premises point of delivery, mirrored
+      with roleFlags 0x03. Positive real power is import, from the grid to the
+      premises, which IEEE 2030.5 FlowDirectionType names Forward.
+    - ``DER_METER``: a meter on one DER's circuit, mirrored with roleFlags
+      0x49 like the DER itself. Positive real power is the DER's output.
+
+    A meter takes no controls and has no DER resources.
+    """
+
+    DER = "der"
+    SITE_METER = "site_meter"
+    DER_METER = "der_meter"
+
+
+def role_flags_for(role: DeviceRole, revenue_quality: bool = False) -> int:
+    """Return the MUP roleFlags for a device role, with isRevenueQuality when set."""
+    flags = ROLE_FLAGS_SITE if role is DeviceRole.SITE_METER else ROLE_FLAGS_DER
+    return (flags | ROLE_FLAG_REVENUE_QUALITY) if revenue_quality else flags
+
+
+_ROLE_DESCRIPTION: dict[DeviceRole, str] = {
+    DeviceRole.DER: "DER",
+    DeviceRole.SITE_METER: "Site meter",
+    DeviceRole.DER_METER: "DER meter",
+}
 
 # Status: on = 1
 STATUS_ON = 1
@@ -123,12 +180,12 @@ class ReadingTypeSpec:
     multiplier: int
     phase: int | None = None
     scale_func: Callable[[float | None], ScaledReading] | None = None
-    # AccumulationBehaviourType: 12 = Instantaneous. Correct for every reading
-    # we publish (all are point-in-time samples). Accumulated quantities -- e.g.
-    # energy (Wh) -- would instead use 9 (Summation); override per-spec if added.
+    # AccumulationBehaviourType: 12 = Instantaneous, for the point-in-time
+    # samples. The energy totals (Wh) set 9 (Summation).
     accumulation_behaviour: int = 12
-    # Fixed flowDirection (see PowerDirection). None takes the direction from
-    # the value's sign when the MUP is built, the DEFAULT encoding.
+    # Fixed flowDirection (see PowerDirection and the energy totals). None takes
+    # the direction from the value's sign when the MUP is built, the DEFAULT
+    # encoding.
     flow_direction: int | None = None
 
 
@@ -403,6 +460,46 @@ def _directed_value(spec: ReadingTypeSpec, monitoring_data: dict[str, Any]) -> i
     return max(signed, 0)
 
 
+#: Energy totals, registered when the device supplies them. Each is a Summation
+#: (accumulationBehaviour 9) of real energy (kind 12) in Wh (uom 72) with a fixed
+#: flowDirection: ``WhFwd`` is the energy delivered in the forward direction (1)
+#: and ``WhRev`` in the reverse direction (19), each a positive total in the
+#: device role's frame (see :class:`DeviceRole`).
+_ENERGY_SPECS: tuple[tuple[int, ReadingTypeSpec], ...] = tuple(
+    (
+        slot,
+        ReadingTypeSpec(
+            key=key,
+            description=f"Real Energy {_DIRECTION_SUFFIX[direction]}",
+            commodity=1,
+            data_qualifier=12,
+            kind=12,
+            uom=72,
+            multiplier=0,
+            scale_func=scale_wh,
+            accumulation_behaviour=9,
+            flow_direction=direction,
+        ),
+    )
+    for slot, key, direction in ((61, "WhFwd", FLOW_NORMAL), (62, "WhRev", FLOW_REVERSE))
+)
+
+
+def _default_specs_for(
+    monitoring_data: dict[str, Any], power_direction: PowerDirection
+) -> list[tuple[int, ReadingTypeSpec]]:
+    """Return ``(mrid_index, spec)`` for a DEFAULT-profile device.
+
+    The system and per-line readings with W and var as ``power_direction``
+    posts them, then each energy total the device supplies.
+    """
+    specs = _directed_specs(_all_specs_for(monitoring_data), power_direction)
+    specs += [
+        (slot, spec) for slot, spec in _ENERGY_SPECS if monitoring_data.get(spec.key) is not None
+    ]
+    return specs
+
+
 # SIGNED_LOAD_CONVENTION only. The slots sit outside every DEFAULT slot, so a
 # device switched between profiles keeps all of its existing mRIDs.
 _STATE_OF_ENERGY_SPEC: tuple[int, ReadingTypeSpec] = (
@@ -531,7 +628,7 @@ def registration_slots(
     if profile is ReadingProfile.SIGNED_LOAD_CONVENTION:
         specs = _signed_load_specs_for(monitoring_data, registered)
     else:
-        specs = _directed_specs(_all_specs_for(monitoring_data), power_direction)
+        specs = _default_specs_for(monitoring_data, power_direction)
     return frozenset(index for index, _ in specs)
 
 
@@ -671,6 +768,11 @@ def _create_mrid(lfdi: str, index: int = 0, pen: int = DEFAULT_PEN) -> MRidtype:
     return MRidtype(value=bytes.fromhex(mrid_hex))
 
 
+def mup_mrid(lfdi: str, pen: int = DEFAULT_PEN) -> bytes:
+    """Return the mRID of the MirrorUsagePoint :func:`create_mup` builds for ``lfdi``."""
+    return _create_mrid(lfdi.lower(), index=0, pen=pen).value
+
+
 # ReadingOverride fields that map onto ReadingTypeSpec attributes. All are
 # non-negative int enum codes EXCEPT ``multiplier`` (powerOfTenMultiplier), which
 # is signed (IEEE 2030.5: -9..9); invalid values are ignored (default kept).
@@ -801,12 +903,17 @@ def create_mup(
     profile: ReadingProfile = ReadingProfile.DEFAULT,
     registered: frozenset[int] = frozenset(),
     power_direction: PowerDirection = PowerDirection.DEFAULT,
+    role: DeviceRole = DeviceRole.DER,
+    revenue_quality: bool = False,
+    device_lfdi: str | None = None,
 ) -> MirrorUsagePoint:
     """Create a MirrorUsagePoint with system + per-line MirrorMeterReadings.
 
     Args:
         lfdi: Device LFDI (will be normalized to lowercase internally,
-              stored as uppercase in deviceLFDI per spec)
+              stored as uppercase in deviceLFDI per spec). Every mRID is
+              derived from it, so two devices mirrored under one
+              ``device_lfdi`` never share an mRID.
         monitoring_data: Raw monitoring values from connector.fetch_monitoring().
               May include ``ACType`` (SunSpec 701 enum) and per-line
               keys (``WL1``, ``VL2`` etc.); on a multi-phase device per-line
@@ -823,6 +930,11 @@ def create_mup(
         power_direction: How W and var carry their direction under the
               DEFAULT profile (see :class:`PowerDirection`). Ignored under
               SIGNED_LOAD_CONVENTION, which signs every value.
+        role: What the device measures; sets roleFlags (see
+              :class:`DeviceRole`).
+        revenue_quality: Set isRevenueQuality in roleFlags.
+        device_lfdi: LFDI of the EndDevice the MUP is posted under, put in
+              deviceLFDI. Defaults to ``lfdi``.
 
     Returns:
         MirrorUsagePoint with system + per-line meter readings.
@@ -836,7 +948,7 @@ def create_mup(
     specs = (
         _signed_load_specs_for(monitoring_data, registered)
         if signed_load
-        else _directed_specs(_all_specs_for(monitoring_data), power_direction)
+        else _default_specs_for(monitoring_data, power_direction)
     )
     meter_readings: list[MirrorMeterReading1] = []
     for mrid_index, spec in specs:
@@ -857,13 +969,13 @@ def create_mup(
         meter_readings.append(mmr)
 
     # deviceLFDI is stored as uppercase hex bytes per spec
-    device_lfdi_bytes = bytes.fromhex(lfdi_norm)
+    device_lfdi_bytes = bytes.fromhex((device_lfdi or lfdi_norm).lower())
 
     return MirrorUsagePoint(
         m_rid=mup_mrid,
-        description=f"DER {lfdi_norm[:8]}",
+        description=f"{_ROLE_DESCRIPTION[role]} {lfdi_norm[:8]}",
         version=VersionType(value=1),
-        role_flags=RoleFlagsType(value=ROLE_FLAGS_DER.to_bytes(2, "big")),
+        role_flags=RoleFlagsType(value=role_flags_for(role, revenue_quality).to_bytes(2, "big")),
         service_category_kind=ServiceKind(value=SERVICE_CATEGORY_ELECTRICITY),
         status=STATUS_ON,
         device_lfdi=device_lfdi_bytes,
@@ -940,7 +1052,7 @@ def create_meter_reading_list(
     specs = (
         _signed_load_specs_for(monitoring_data, frozenset())
         if signed_load
-        else _directed_specs(_all_specs_for(monitoring_data), power_direction)
+        else _default_specs_for(monitoring_data, power_direction)
     )
     posted: dict[str, int] = {}
     meter_readings: list[MirrorMeterReading1] = []
@@ -961,9 +1073,11 @@ def create_meter_reading_list(
             posted[spec.key] = value
             duration = 0
         else:
+            # An energy total also has a fixed flowDirection, but its value is
+            # already the magnitude for that direction.
             value = (
                 _directed_value(spec, monitoring_data)
-                if spec.flow_direction is not None
+                if spec.flow_direction is not None and spec.key in _DIRECTED_KEYS
                 else _scaled_for(spec, monitoring_data).value
             )
             # timePeriod duration: an interval reading (Average/Maximum/Minimum)

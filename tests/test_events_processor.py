@@ -5013,3 +5013,60 @@ class TestPartlySupersededEvent:
             "an ended event is still registered on the shared device"
         )
         assert proc._mode_tracker.covered("/edev/2") == frozenset()
+
+
+class _MeterAwareDispatcher(NullDispatcher):
+    """A dispatcher that knows which local devices are meters, and refuses them."""
+
+    def __init__(self, meters: set[str]) -> None:
+        self.meters = meters
+        self.asked: list[str] = []
+
+    def takes_controls(self, lfdi: str) -> bool:
+        return lfdi not in self.meters
+
+    async def apply_control_by_lfdi(self, lfdi, derc, curves) -> None:  # type: ignore[no-untyped-def]
+        self.asked.append(lfdi)
+        if lfdi in self.meters:
+            raise DeviceNotConfiguredError(f"{lfdi} is a meter")
+
+
+class TestGroupDispatchSkipsMeters:
+    """A site-wide control fans out to the devices that take controls, not to meters."""
+
+    DER = "aa" * 20
+    METER = "bb" * 20
+
+    async def _activate(self, shutdown: asyncio.Event, group: list[str]):
+        now = int(time.time())
+        derc = _make_derc(0x01, start=now + 50, duration=3600)
+        state = _setup_state(der_controls=[derc], dderc=_make_dderc())
+        http = _activation_http()
+        dispatcher = _MeterAwareDispatcher({self.METER})
+        proc = EventProcessor(
+            http, state, dispatcher, shutdown, group_lookup=lambda _href: list(group)
+        )
+        await proc.process_controls("/derp/1")
+        rec = proc._store.get(derc.m_rid.value)
+        assert rec is not None
+        http.post.reset_mock()
+        await proc._on_activation(rec)
+        await proc.shutdown()
+        return dispatcher, rec, _codes_by_lfdi(http)[_DEV1_LFDI]
+
+    @pytest.mark.asyncio
+    async def test_a_meter_in_the_group_is_not_sent_the_control(self, shutdown: asyncio.Event):
+        dispatcher, rec, codes = await self._activate(shutdown, [self.DER, self.METER])
+
+        assert dispatcher.asked == [self.DER]
+        assert rec.applied_local == {self.DER}
+        assert self.METER not in rec.rejected_local
+        assert ResponseCode.ACTIVE in codes
+
+    @pytest.mark.asyncio
+    async def test_a_group_of_meters_only_is_reported_not_applicable(self, shutdown: asyncio.Event):
+        dispatcher, _rec, codes = await self._activate(shutdown, [self.METER])
+
+        assert dispatcher.asked == []
+        assert ResponseCode.NOT_APPLICABLE in codes
+        assert ResponseCode.ACTIVE not in codes

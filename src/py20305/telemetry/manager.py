@@ -45,11 +45,13 @@ from py20305.telemetry.log_events import (
     unmapped_alarm_bits,
 )
 from py20305.telemetry.mup import (
+    DeviceRole,
     PowerDirection,
     ReadingProfile,
     ac_type_of,
     create_meter_reading_list,
     create_mup,
+    mup_mrid,
     registration_slots,
 )
 from py20305.xml.serialization import to_xml
@@ -147,6 +149,18 @@ class DeviceTelemetryState:
     #   server-side identity issue.
     telemetry_blocked: bool = False
     blocked_reason: str | None = None
+    #: What the device measures. Sets the MUP roleFlags, and a meter posts no
+    #: LogEvents and no DERAvailability.
+    role: DeviceRole = DeviceRole.DER
+    revenue_quality: bool = False
+    #: LFDI of the EndDevice the MUP is posted under, when not the device's own.
+    #: The mRIDs still derive from ``lfdi``.
+    mirror_lfdi: str | None = None
+
+    @property
+    def posted_under(self) -> str:
+        """Return the LFDI of the EndDevice this device's MUP is posted under."""
+        return self.mirror_lfdi or self.lfdi
 
 
 class TelemetryManager:
@@ -178,6 +192,7 @@ class TelemetryManager:
         reading_profile: ReadingProfile = ReadingProfile.DEFAULT,
         interval_history: IntervalHistory | None = None,
         power_direction: PowerDirection = PowerDirection.DEFAULT,
+        site_interval_history: IntervalHistory | None = None,
     ) -> None:
         """Initialize the TelemetryManager.
 
@@ -190,6 +205,8 @@ class TelemetryManager:
             is_provisioned: Optional gate. When set, the metering cycle posts a
                 device's MirrorUsagePoint/readings only if ``is_provisioned(lfdi)``
                 returns True (e.g. the LFDI is in the server's EndDeviceList).
+                ``lfdi`` is the LFDI the MUP is posted under, which for a site
+                meter is the site's EndDevice rather than the meter's own.
                 Re-checked each cycle, so mirroring starts/stops as the device is
                 provisioned/removed. ``None`` (default) mirrors every device.
             connector_resolver: Callback to resolve LFDI -> connector.
@@ -221,6 +238,9 @@ class TelemetryManager:
             power_direction: How W and var carry their direction under the
                 DEFAULT reading profile. Fixed for the manager's lifetime, like
                 the profile.
+            site_interval_history: Integrates each site meter's readings into
+                the site series of the operations history, apart from the
+                devices. Optional.
         """
         self._client = client
         self._reading_profile = reading_profile
@@ -250,13 +270,19 @@ class TelemetryManager:
         self._devices: dict[str, DeviceTelemetryState] = {}
         self._scheduler = PollScheduler()
         self._intervals = interval_history
+        self._site_intervals = site_interval_history
 
-    def start_metering(
+    # One keyword per DeviceTelemetryState setting.
+    def start_metering(  # pylint: disable=too-many-arguments
         self,
         lfdi: str,
         post_rate: int,
         log_event_list_href: str | None = None,
         der_availability_href: str | None = None,
+        *,
+        role: DeviceRole = DeviceRole.DER,
+        revenue_quality: bool = False,
+        mirror_lfdi: str | None = None,
     ) -> None:
         """Start metering loop for a device.
 
@@ -265,6 +291,11 @@ class TelemetryManager:
             post_rate: Posting interval in seconds
             log_event_list_href: Server path for LogEventList POST
             der_availability_href: Server path for DERAvailability PUT
+            role: What the device measures (see :class:`DeviceRole`). A meter
+                posts no LogEvents and no DERAvailability.
+            revenue_quality: Set isRevenueQuality in the MUP roleFlags.
+            mirror_lfdi: LFDI of the EndDevice to post the MUP under, when not
+                the device's own. The mRIDs still derive from ``lfdi``.
         """
         lfdi_norm = lfdi.lower()
         existing = self._devices.get(lfdi_norm)
@@ -273,6 +304,9 @@ class TelemetryManager:
             post_rate=post_rate,
             log_event_list_href=log_event_list_href,
             der_availability_href=der_availability_href,
+            role=role,
+            revenue_quality=revenue_quality,
+            mirror_lfdi=mirror_lfdi.lower() if mirror_lfdi else None,
         )
         if existing is not None:
             # Preserve MUP state from a previous metering session so we
@@ -377,12 +411,14 @@ class TelemetryManager:
 
         # only_mirror_discovered_devices gate: skip mirroring a device that the
         # server hasn't provisioned (not in its EndDeviceList). Re-checked each
-        # cycle, so it starts automatically once the device is provisioned.
-        if self._is_provisioned is not None and not self._is_provisioned(lfdi):
+        # cycle, so it starts automatically once the device is provisioned. The
+        # EndDevice that has to be listed is the one the MUP is posted under.
+        if self._is_provisioned is not None and not self._is_provisioned(state.posted_under):
             logger.debug(
-                "Metering cycle for %s skipped: device not in the server's "
+                "Metering cycle for %s skipped: %s not in the server's "
                 "EndDeviceList (only_mirror_discovered_devices)",
                 state.lfdi[:8],
+                state.posted_under[:8],
             )
             return
 
@@ -467,11 +503,26 @@ class TelemetryManager:
                 stale=stale,
             )
 
+        # A meter has no DER alarms and no DER availability.
+        if state.role is not DeviceRole.DER:
+            return
+
         # Stage 2: LogEvent POST (alarm-driven)
         await self._post_log_event(state, connector)
 
         # Stage 3: DERAvailability PUT
         await self._put_der_availability(state, connector)
+
+    def _history_for(self, lfdi: str) -> IntervalHistory | None:
+        """Return the interval history a device's readings go to.
+
+        A site meter's readings go to the site series, kept apart from the
+        devices so a premises total is never summed with the devices behind it.
+        """
+        state = self._devices.get(lfdi)
+        if state is not None and state.role is DeviceRole.SITE_METER:
+            return self._site_intervals
+        return self._intervals
 
     def _keep_interval(
         self, lfdi: str, at: float, monitoring: dict[str, Any], stale: bool
@@ -482,13 +533,14 @@ class TelemetryManager:
         it would count energy nobody measured. It ends the hold on the last
         good reading instead.
         """
-        if self._intervals is None:
+        history = self._history_for(lfdi)
+        if history is None:
             return
         try:
             if stale:
-                self._intervals.interrupt(lfdi)
+                history.interrupt(lfdi)
             else:
-                self._intervals.observe(lfdi, at, monitoring)
+                history.observe(lfdi, at, monitoring)
         except Exception:
             logger.debug("Interval history failed for %s", lfdi[:8], exc_info=True)
 
@@ -504,9 +556,10 @@ class TelemetryManager:
         """
         # The device could not be read, so its last reading stops counting:
         # holding it across the failure would report energy nobody measured.
-        if self._intervals is not None:
+        history = self._history_for(lfdi)
+        if history is not None:
             try:
-                self._intervals.interrupt(lfdi)
+                history.interrupt(lfdi)
             except Exception:
                 logger.debug("Interval history failed for %s", lfdi[:8], exc_info=True)
         if error is None:
@@ -559,6 +612,9 @@ class TelemetryManager:
             profile=self._reading_profile,
             registered=state.registered_slots,
             power_direction=self._power_direction,
+            role=state.role,
+            revenue_quality=state.revenue_quality,
+            device_lfdi=state.posted_under,
         )
         body = to_xml(mup, server_2018_compat=self._client.server_2018_compat)
 
@@ -758,7 +814,7 @@ class TelemetryManager:
         """
         # Discover MUP href if not known
         if not state.mup_href:
-            state.mup_href = await self._discover_mup_href(state.lfdi)
+            state.mup_href = await self._discover_mup_href(state)
 
         if not state.mup_href:
             logger.warning("No MUP href for %s, cannot post readings", state.lfdi[:8])
@@ -1150,17 +1206,25 @@ class TelemetryManager:
                 exc_info=True,
             )
 
-    async def _discover_mup_href(self, lfdi: str) -> str | None:
-        """Scan server MUP list to find our MUP by deviceLFDI.
+    async def _discover_mup_href(self, state: DeviceTelemetryState) -> str | None:
+        """Scan server MUP list to find our MUP by deviceLFDI and mRID.
 
         This is a fallback when the server didn't return a Location header
-        after the MUP POST.
+        after the MUP POST. The mRID is compared too, because a site meter
+        mirrored under the site's EndDevice shares its deviceLFDI with the DER
+        that EndDevice belongs to.
         """
+        lfdi = state.lfdi
+        expected_mrid = mup_mrid(state.lfdi)
         try:
             pages = await self._client.get_list(self._mup_list_href_source(), MirrorUsagePointList)
             for page in pages:
                 for mup in page.mirror_usage_point or []:
-                    if mup.device_lfdi and mup.device_lfdi.hex().lower() == lfdi:
+                    if (
+                        mup.device_lfdi
+                        and mup.device_lfdi.hex().lower() == state.posted_under
+                        and (mup.m_rid is None or mup.m_rid.value == expected_mrid)
+                    ):
                         logger.debug("Discovered MUP href for %s: %s", lfdi[:8], mup.href)
                         return mup.href
         except Sep2ConnectionError as e:

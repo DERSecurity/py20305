@@ -21,6 +21,7 @@ from py20305.client.state import DerProgramState, DiscoveredState
 from py20305.client.timebase import ServerTimebase
 from py20305.commands import CommandOrigin
 from py20305.connectors.base import ScheduleNotification
+from py20305.connectors.control_errors import DeviceNotConfiguredError
 from py20305.events.active_modes import ActiveModeTracker
 from py20305.events.comms_loss import CommsLossState
 from py20305.events.dderc import DdercTracker
@@ -1062,7 +1063,14 @@ class EventProcessor:
         for lfdi, failure in zip(local_lfdis, failures, strict=True):
             (record.applied_local if failure is None else record.rejected_local).add(lfdi)
         failed = [f for f in failures if f is not None]
-        aggregate = failed[0] if len(failed) == len(failures) else None
+        aggregate: BaseException | None = (
+            failed[0] if failed and len(failed) == len(failures) else None
+        )
+        if not local_lfdis:
+            # Every device in the group is a meter, so none can take the control.
+            aggregate = DeviceNotConfiguredError(
+                "no device in the group takes controls; every device is a meter"
+            )
         if failed and aggregate is None:
             logger.info(
                 "Event %s: %d/%d sub-devices failed; aggregate still reported ACTIVE",
@@ -1097,11 +1105,24 @@ class EventProcessor:
         Returns None when no ``group_lookup`` is configured or the callback
         finds no group for this program -- in which case the dispatcher
         dispatches 1-to-1 by server-side href, which is the default.
+
+        A device the dispatcher says takes no controls, a meter, is left out of
+        the group, so a site-wide control is not reported rejected because of
+        the meters measuring it. A group of meters only is returned empty.
         """
         if self._group_lookup is None:
             return None
         local_lfdis = self._group_lookup(program_href)
-        return local_lfdis if local_lfdis else None
+        if not local_lfdis:
+            return None
+        # The ControlDispatcher protocol does not require ``takes_controls``, and
+        # a dispatcher without it has every device take controls. Looked up on
+        # the class, so an attribute an object creates on access is not taken
+        # for the method.
+        if getattr(type(self._dispatcher), "takes_controls", None) is None:
+            return local_lfdis
+        dispatcher: Any = self._dispatcher
+        return [lfdi for lfdi in local_lfdis if dispatcher.takes_controls(lfdi)]
 
     # ------------------------------------------------------------------
     # Schedule-notification relay (informational push; not a control path)

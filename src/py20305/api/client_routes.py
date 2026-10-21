@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -292,12 +292,17 @@ def create_client_router(
         since: float | None = Query(None),
         until: float | None = Query(None),
         limit: int = Query(10000, ge=1, le=100000),
+        series: Literal["device", "site"] = Query(
+            "device", description="'device' for the devices, 'site' for the site meter."
+        ),
     ) -> dict[str, Any]:
-        """Return measured intervals, oldest first."""
+        """Return measured intervals of one series, oldest first."""
         service = service_getter()
         if service is None:
             return {"enabled": False, "intervals": []}
-        return service.get_history_intervals(lfdi=lfdi, since=since, until=until, limit=limit)
+        return service.get_history_intervals(
+            lfdi=lfdi, since=since, until=until, limit=limit, series=series
+        )
 
     @router.get("/history/baseline", response_model=None)
     def get_history_baseline(
@@ -309,6 +314,9 @@ def create_client_router(
         weekdays_only: bool = Query(True),
         tz: str | None = Query(
             None, description="IANA zone for local days, e.g. America/Los_Angeles."
+        ),
+        series: Literal["device", "site"] = Query(
+            "device", description="'device' for the devices, 'site' for the site meter."
         ),
     ) -> dict[str, Any] | JSONResponse:
         """Return a comparison-day baseline for a window, with event days left out."""
@@ -324,6 +332,7 @@ def create_client_router(
                 lookback_days=lookback_days,
                 weekdays_only=weekdays_only,
                 tz=tz,
+                series=series,
             )
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"detail": str(exc)})
