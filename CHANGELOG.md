@@ -9,6 +9,51 @@ below says so explicitly.
 
 Nothing yet.
 
+## [0.16.0] - 2026-10-21
+
+### Added
+
+- **A battery's real and reactive power can be mirrored with its direction kept (#75).**
+  Under the default reading profile, a MirrorMeterReading's flowDirection was set
+  once, from the sign when the MirrorUsagePoint was created, and later readings
+  posted the magnitude. IEEE 2030.5 does not let a ReadingType change, so a
+  battery that registered while discharging and later charged was still reported
+  as delivering power. `telemetry.power_direction` (and `PowerDirection` on
+  `TelemetryManager` and `TelemetryCoordinator`) now chooses how W and var carry
+  their direction: `default` keeps the historical encoding, `net` posts
+  flowDirection 4 with the sign on the value, and `split` posts a Forward (1) and
+  a Reverse (19) reading for each quantity, each a magnitude. `net` and `split`
+  use new mRIDs, so switching modes never posts a value under a ReadingType
+  registered for another mode. The option applies to total and per-line W and var
+  under the default profile, and is refused with `signed_load_convention`.
+
+- **A SunSpec meter can be configured as the site meter or as a DER's meter (#76).**
+  Each device now has a `role`. `der`, the default, changes nothing. `site_meter`
+  is the meter at the premises point of delivery: its MirrorUsagePoint carries
+  roleFlags 0x03 (isMirror, isPremisesAggregationPoint), the value CSIP-AUS v1.1a
+  Annex A lists for the site readings, and carries the client's own EndDevice LFDI
+  in deviceLFDI unless `mirror_under: own` says to use the meter's `lfdi`. `der_meter`
+  is a meter on one DER's circuit, mirrored with roleFlags 0x49 under its own
+  `lfdi`. `revenue_quality: true` adds isRevenueQuality (0x10). A meter's mRIDs
+  always derive from its own `lfdi`, so a site meter under the site's EndDevice
+  never collides with the DER mirrored under the same LFDI. A meter takes no
+  controls and gets no DER resources: no DERCapability, DERSettings, DERStatus or
+  DERAvailability, and no LogEvents. A control addressed to a meter is answered
+  with status 252 (Not Applicable), and a control fanned out across several local
+  devices skips the meters. The SunSpec connector reads models 201-204, 211-214
+  and 220 for a meter, reports real and reactive power import positive for a site
+  meter and output positive for a DER meter, and adds two energy totals in Wh
+  (accumulationBehaviour 9, flowDirection 1 and 19) in new mRID slots 61 and 62.
+  The meter models do not say which sign of `W` is import, so `power_sign: auto`
+  learns it from which of `TotWhImp` and `TotWhExp` rises and posts no real or
+  reactive power until it has; `import_positive` and `export_positive` set it. A
+  device configured as a meter that exposes no meter model fails at scan naming
+  the models it has, and a DER that exposes only meter models is warned about
+  once. The operations history keeps site meter readings in a series of their
+  own, `site_intervals`, which `GET /api/v1/history/intervals` and
+  `/api/v1/history/baseline` return with `series=site`; responses without the
+  parameter are unchanged apart from naming their series.
+
 ## [0.15.0] - 2026-10-20
 
 ### Fixed
