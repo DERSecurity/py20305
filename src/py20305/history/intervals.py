@@ -21,6 +21,11 @@ last batch it includes, so the query adds a copy only when the read does not
 already include it. An interval that ends while a query runs is counted
 exactly once.
 
+The same integration keeps more than one series, each in a table of its own:
+the devices' readings in ``device_intervals``, and the site meter's readings in
+``site_intervals``, so a premises total is never summed with the devices behind
+it. A site meter reports import, from the grid to the premises, as positive.
+
 Signs are the connector's own. Positive and negative real and reactive energy
 are kept apart, so a reader applies whichever convention the device uses
 without the two cancelling inside one interval. Curtailed energy assumes the
@@ -32,6 +37,7 @@ minus actual output, never below zero.
 from __future__ import annotations
 
 import math
+import re
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -40,10 +46,16 @@ from typing import Any
 
 from py20305.history.database import HistoryDatabase
 
-_TABLE = "device_intervals"
+#: The table the device series is kept in.
+DEVICE_TABLE = "device_intervals"
+#: The table the site series is kept in.
+SITE_TABLE = "site_intervals"
 
-_DDL = (
-    """CREATE TABLE IF NOT EXISTS device_intervals (
+#: A table name is put into SQL text, so it is held to a plain identifier.
+_TABLE_NAME = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+_DDL_TEMPLATE = (
+    """CREATE TABLE IF NOT EXISTS {table} (
         lfdi TEXT NOT NULL,
         start REAL NOT NULL,
         seconds INTEGER NOT NULL,
@@ -62,14 +74,14 @@ _DDL = (
         curtailed_ws REAL NOT NULL,
         PRIMARY KEY (lfdi, start, seconds)
     )""",
-    "CREATE INDEX IF NOT EXISTS device_intervals_start ON device_intervals (start)",
+    "CREATE INDEX IF NOT EXISTS {table}_start ON {table} (start)",
 )
 
 # A bucket written twice (once before a restart and once after, or flushed
 # partial at shutdown) is added to, not replaced. The sums are additive; the
 # extremes take the wider of the two.
-_UPSERT = """
-INSERT INTO device_intervals (lfdi, start, seconds, covered_seconds, samples, ws_positive,
+_UPSERT_TEMPLATE = """
+INSERT INTO {table} (lfdi, start, seconds, covered_seconds, samples, ws_positive,
     ws_negative, w_min, w_max, var_seconds, vars_positive, vars_negative, avail_seconds,
     avail_ws, curtail_seconds, curtailed_ws)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -180,7 +192,10 @@ class IntervalHistory:
         *,
         interval_seconds: int = 900,
         max_gap_seconds: float = 900.0,
+        table: str = DEVICE_TABLE,
     ) -> None:
+        if not _TABLE_NAME.fullmatch(table):
+            raise ValueError(f"table must be a plain SQL identifier; got {table!r}")
         if interval_seconds <= 0 or 86400 % interval_seconds:
             raise ValueError("interval_seconds must divide a day evenly")
         if max_gap_seconds <= 0:
@@ -190,7 +205,10 @@ class IntervalHistory:
         self.max_gap_seconds = max_gap_seconds
         self._devices: dict[str, _Device] = {}
         self._lock = threading.Lock()
-        database.register_table(_TABLE, "start", _DDL)
+        #: The table this series is kept in.
+        self.table = table
+        self._upsert = _UPSERT_TEMPLATE.format(table=table)
+        database.register_table(table, "start", [ddl.format(table=table) for ddl in _DDL_TEMPLATE])
 
     # -- Recording -------------------------------------------------------------
 
@@ -294,7 +312,7 @@ class IntervalHistory:
         if not done:
             return
         rows = [self._row(lfdi, start, bucket) for lfdi, start, bucket in done]
-        batch = self._db.queue_batch(_TABLE, _UPSERT, rows)
+        batch = self._db.queue_batch(self.table, self._upsert, rows)
         for _, _, bucket in done:
             bucket.batch = batch
 
@@ -354,7 +372,7 @@ class IntervalHistory:
             ),
         )
         rows, through = self._db.query_through(
-            f"SELECT {_SELECT} FROM {_TABLE} "
+            f"SELECT {_SELECT} FROM {self.table} "
             f"WHERE {' AND '.join(clauses)} ORDER BY start, lfdi LIMIT ?",
             [*params, max(1, limit)],
         )
@@ -421,7 +439,7 @@ class IntervalHistory:
                 device_clause = " AND lfdi = ?"
                 params.append(lfdi.lower())
             rows, through = self._db.query_through(
-                f"SELECT {_SELECT} FROM {_TABLE} WHERE seconds = ? "
+                f"SELECT {_SELECT} FROM {self.table} WHERE seconds = ? "
                 f"AND start IN ({', '.join('?' * len(batch))}){device_clause}",
                 params,
             )

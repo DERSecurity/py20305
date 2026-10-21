@@ -27,6 +27,29 @@ SunSpecDeviceConfig(
 
 Install it with the `sunspec` extra.
 
+### Meters
+
+A device with `role: site_meter` or `role: der_meter` (see
+[Meters](running.md#meters)) is read through a SunSpec meter model instead of
+the 700-series models. The connector reads the first of these the device
+exposes: 201 to 204 (single-phase, split-phase, wye and delta, with scale
+factors), 211 to 214 (the same in floating point), then 220 (the secure AC
+meter). A device configured as a meter that exposes none of them fails at scan
+with a message naming the models it does expose.
+
+A device left as a DER that exposes a meter model and no 700-series model is
+not changed to a meter. The connector logs a WARNING once suggesting
+`site_meter` or `der_meter`, and the scan fails as it does for any device
+without model 702.
+
+The connector reports a meter's real and reactive power in its role's frame:
+import positive for a site meter, the DER's output positive for a DER meter.
+The meter models do not say which sign of `W` is import, so the connector
+learns it from `TotWhImp` and `TotWhExp`, or takes it from `power_sign`, and
+leaves `W` and `Var` out of the monitoring until it knows. The energy totals
+are reported as `WhFwd` and `WhRev`, forward and reverse in the role's frame.
+A connector of your own for a meter reports the same keys in the same frame.
+
 ### CSIP-AUS operating envelope limits
 
 Of the four CSIP-AUS limits, the SunSpec connector enforces the generation
@@ -184,6 +207,13 @@ Every control that reaches a device goes through one funnel, whether it came fro
 a translated DERControl, a default-control fallback, a comms-loss clear, or a
 caller naming a control directly. Two seams hang off that funnel, and both are
 optional: omit them and the dispatcher behaves as though neither existed.
+
+A device configured as a meter never reaches the funnel. A control or a named
+operation addressed to it raises `DeviceNotConfiguredError`, which the event
+processor reports as status 252 (Not Applicable); a default control, a clear or
+a mode disable skips it. When a control is fanned out across several local
+devices, the meters are left out of the fan-out, so they are neither sent the
+control nor counted as refusing it.
 
 ### Naming a control directly
 

@@ -110,6 +110,25 @@ devices:
   # - type: print_demo
   #   lfdi: "1111111111111111111111111111111111111111"
 
+  # A SunSpec meter (models 201-204, 211-214 or 220). A meter takes no controls
+  # and gets no DER resources. role: site_meter is the meter at the premises
+  # point of delivery (roleFlags 0x03, import positive); der_meter is a meter
+  # on one DER's circuit (roleFlags 0x49, the DER's output positive). The lfdi
+  # names the meter and seeds its mRIDs; it needs no certificate.
+  # - type: sunspec
+  #   lfdi: "2222222222222222222222222222222222222222"
+  #   host: 192.168.1.60
+  #   port: 502
+  #   role: site_meter
+  #   revenue_quality: false   # true adds isRevenueQuality (0x10) to roleFlags
+  #   # site_meter only: site posts under this client's own EndDevice, own
+  #   # under the lfdi above.
+  #   mirror_under: site
+  #   # Which sign of the meter's W is import. auto learns it from the energy
+  #   # totals and posts no real or reactive power until it has; or set
+  #   # import_positive or export_positive.
+  #   power_sign: auto
+
 logging:
   level: INFO
   # file: /var/log/py20305/client.log
@@ -168,6 +187,18 @@ connection:
 #   der_settings_poll_rate_seconds: 60
 #   reading_profile: default   # or signed_load_convention
 #   power_direction: default   # or net, or split (default profile only)
+
+# The operations history: events, device writes, and measured intervals, in one
+# SQLite file. On by default. site_intervals keeps a site meter's readings as a
+# series of their own, import positive, beside the devices' intervals.
+#
+# history:
+#   enabled: true
+#   path: py20305-history.sqlite3
+#   intervals:
+#     enabled: true
+#   site_intervals:
+#     enabled: true
 
 # forwarders:
 #   mqtt:

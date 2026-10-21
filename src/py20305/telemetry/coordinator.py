@@ -15,10 +15,11 @@ resource contains stays in the managers it composes.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Iterable
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
-from py20305.telemetry.mup import PowerDirection, ReadingProfile
+from py20305.telemetry.mup import DeviceRole, PowerDirection, ReadingProfile
 
 if TYPE_CHECKING:
     from py20305.client.csip_client import CsipClient
@@ -38,6 +39,26 @@ DEFAULT_CAPABILITY_POLL_RATE = 86400
 #: DERSettings tracks configuration an operator can change at any time.
 DEFAULT_SETTINGS_POLL_RATE = 60
 DEFAULT_POST_RATE = 300
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceRoleConfig:
+    """What one device measures, and where a site meter's readings are mirrored.
+
+    Attributes:
+        role: See :class:`~py20305.telemetry.mup.DeviceRole`. A meter gets no
+            DER resources and posts no LogEvents.
+        revenue_quality: Set isRevenueQuality in the MUP roleFlags.
+        mirror_under: Site meters only. ``"site"`` posts the MUP under the
+            site's EndDevice LFDI; ``"own"`` posts it under the meter's own.
+    """
+
+    role: DeviceRole = DeviceRole.DER
+    revenue_quality: bool = False
+    mirror_under: Literal["site", "own"] = "site"
+
+
+_DER_ROLE = DeviceRoleConfig()
 
 
 class TelemetryCoordinator:
@@ -70,6 +91,12 @@ class TelemetryCoordinator:
             :class:`~py20305.telemetry.mup.ReadingProfile`.
         power_direction: How W and var carry their direction under the
             DEFAULT profile; see :class:`~py20305.telemetry.mup.PowerDirection`.
+        roles: Each device's role, by LFDI. A device not named is a DER.
+        site_lfdi: LFDI of the site's EndDevice, which a site meter's MUP is
+            posted under by default. Defaults to this client's own certificate
+            LFDI, the EndDevice it registers for itself.
+        site_interval_history: Integrates site meter readings into the site
+            series of the operations history.
     """
 
     def __init__(
@@ -88,8 +115,16 @@ class TelemetryCoordinator:
         reading_profile: ReadingProfile = ReadingProfile.DEFAULT,
         interval_history: IntervalHistory | None = None,
         power_direction: PowerDirection = PowerDirection.DEFAULT,
+        roles: Mapping[str, DeviceRoleConfig] | None = None,
+        site_lfdi: str | None = None,
+        site_interval_history: IntervalHistory | None = None,
     ) -> None:
         self._client = client
+        self._roles = {lfdi.lower(): role for lfdi, role in (roles or {}).items()}
+        self._site_lfdi = site_lfdi.lower() if site_lfdi else None
+        self._site_interval_history = site_interval_history
+        #: Whether the missing-site-LFDI warning has been said.
+        self._warned_no_site_lfdi = False
         self._interval_history = interval_history
         self._reading_profile = reading_profile
         self._power_direction = power_direction
@@ -169,6 +204,7 @@ class TelemetryCoordinator:
             reading_profile=self._reading_profile,
             interval_history=self._interval_history,
             power_direction=self._power_direction,
+            site_interval_history=self._site_interval_history,
         )
 
     def _setup_der_resources(self) -> None:
@@ -213,9 +249,15 @@ class TelemetryCoordinator:
         for target in targets:
             if self._started.get(target, True):
                 continue
-            post_rate = self._device_post_rate(target)
+            role = self._roles.get(target, _DER_ROLE)
+            mirror_lfdi = self._mirror_lfdi(role)
+            # The rate of the EndDevice the readings are posted under.
+            post_rate = self._device_post_rate(mirror_lfdi or target)
             if self._telemetry is not None:
-                log_href, avail_href = self._telemetry_hrefs(target)
+                # A meter has no alarms or availability to report.
+                log_href, avail_href = (
+                    self._telemetry_hrefs(target) if role.role is DeviceRole.DER else (None, None)
+                )
                 logger.info(
                     "starting telemetry for %s: post_rate=%ds, log_events=%s, availability=%s",
                     target[:8],
@@ -228,9 +270,36 @@ class TelemetryCoordinator:
                     post_rate,
                     log_event_list_href=log_href,
                     der_availability_href=avail_href,
+                    role=role.role,
+                    revenue_quality=role.revenue_quality,
+                    mirror_lfdi=mirror_lfdi,
                 )
-            self._start_der_resources_for_device(target, post_rate)
+            if role.role is DeviceRole.DER:
+                self._start_der_resources_for_device(target, post_rate)
             self._started[target] = True
+
+    def _mirror_lfdi(self, role: DeviceRoleConfig) -> str | None:
+        """Return the LFDI to post a device's MUP under, or None for its own.
+
+        A site meter is mirrored under the site's EndDevice unless configured
+        otherwise. Without a site LFDI it falls back to its own, and says so
+        once.
+        """
+        if role.role is not DeviceRole.SITE_METER or role.mirror_under != "site":
+            return None
+        site = self._site_lfdi
+        if site is None:
+            # getattr and the type check: an embedding caller's client may not
+            # carry a certificate LFDI.
+            own = getattr(self._client.http, "client_lfdi", None)
+            site = own.lower() if isinstance(own, str) and own else None
+        if site is None and not self._warned_no_site_lfdi:
+            self._warned_no_site_lfdi = True
+            logger.warning(
+                "no site EndDevice LFDI is known; site meter readings are posted under "
+                "the meter's own lfdi"
+            )
+        return site
 
     def stop_device_telemetry(self, lfdi: str) -> None:
         """Stop reporting one device and unregister it.

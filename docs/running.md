@@ -80,6 +80,8 @@ schedule and reported to the server:
 | DERCapability, when it has changed | `der_capability_poll_rate_seconds` |
 | LogEvents, when a device raises an alarm | On the reading cycle |
 
+A device configured as a meter reports its readings only; see [Meters](#meters).
+
 The server has the final say on the posting rate: an `EndDevice.postRate` above
 zero replaces `post_rate_seconds` for that device, which is what IEEE 2030.5
 specifies. A server exposing no MirrorUsagePointList stops the readings only —
@@ -114,6 +116,73 @@ is read at startup.
 Rediscovery re-reads every path. A server that moves its resources, or that
 brings the MirrorUsagePoint function set online only after the client
 connected, is picked up without a restart.
+
+## Meters
+
+A configured device is a DER unless its `role` says otherwise. A meter is
+configured like any other device, with a `role`:
+
+```yaml
+devices:
+  - type: sunspec
+    lfdi: "0000000000000000000000000000000000000000"
+    host: 192.168.1.50
+  - type: sunspec
+    lfdi: "2222222222222222222222222222222222222222"
+    host: 192.168.1.60
+    role: site_meter
+```
+
+| `role` | The device | MirrorUsagePoint roleFlags | Positive real power |
+|---|---|---|---|
+| `der` (default) | A DER | 0x49: isMirror, isDER, isSubmeter | Output |
+| `site_meter` | The meter at the premises point of delivery | 0x03: isMirror, isPremisesAggregationPoint, as CSIP-AUS v1.1a Annex A requires for the site readings | Import, from the grid to the premises |
+| `der_meter` | A meter on one DER's circuit | 0x49, as for the DER | The DER's output |
+
+`revenue_quality: true` adds isRevenueQuality (0x10) to the roleFlags.
+
+A meter takes no controls and has no DER resources. The client PUTs no
+DERCapability, DERSettings, DERStatus or DERAvailability for it and posts no
+LogEvents. A control addressed to a meter is answered with status 252 (Not
+Applicable), and a control fanned out across several local devices skips the
+meters rather than reporting them.
+
+`mirror_under` says where a site meter's MirrorUsagePoint is posted. `site`,
+the default, posts it under the client's own EndDevice, the one its certificate
+identifies, which stands for the site. `own` posts it under the meter's `lfdi`.
+The setting is refused on any other role; a `der_meter` is always posted under
+its own `lfdi`. A meter's `lfdi` names it and seeds the mRIDs of its readings,
+so it must differ from every other device's, but the meter needs no certificate.
+A site meter under the site's EndDevice therefore shares that EndDevice's LFDI
+with the site's DER without sharing an mRID with it.
+
+A meter's readings are real power, reactive power, frequency, current, average
+voltage, the power factor's magnitude, apparent power, the per-phase values its
+model has, and two energy totals in Wh, each a Summation (accumulationBehaviour
+9): energy in the forward direction (flowDirection 1) and in the reverse
+direction (19). For a site meter forward is energy imported. For a DER meter it
+is the DER's output, which such a meter counts as exported. The energy totals are posted under the `default` reading
+profile only; `signed_load_convention` does not define them.
+
+The SunSpec meter models do not say which sign of real power is import, and
+meters differ. `power_sign` sets it for a SunSpec meter:
+
+| `power_sign` | What the client does |
+|---|---|
+| `auto` (default) | Learns the sign from which energy total, imported or exported, rises while real power is not zero. Real and reactive power are not posted until two readings agree; the client logs once at INFO when it has learned the sign. |
+| `import_positive` | Positive W from the meter is import. |
+| `export_positive` | Positive W from the meter is export. |
+
+The client keeps comparing the totals with the sign in use, and logs a WARNING
+once if they contradict it on three readings in a row. Reactive power is
+oriented like real power. `power_sign` is refused on a DER.
+
+A site meter's power changes direction during the day, so `power_direction:
+net` or `split` keeps that direction on the server, where `default` fixes it
+when the MirrorUsagePoint is created.
+
+The [operations history](history.md) keeps a site meter's readings in a series
+of their own, beside the devices'.
 
 ## How an event ends
 
@@ -263,9 +332,9 @@ Needs the `api` extra. See [Management API](api.md).
 ## The operations history
 
 On by default. The client keeps every event's lifecycle and responses, every
-device write, and each device's readings in 15-minute intervals, in
-`py20305-history.sqlite3` in the working directory. Each part can be switched
-off, or all of it:
+device write, and each device's readings in 15-minute intervals, with a site
+meter's readings in a series of their own, in `py20305-history.sqlite3` in the
+working directory. Each part can be switched off, or all of it:
 
 ```yaml
 history:

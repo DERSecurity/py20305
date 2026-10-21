@@ -269,6 +269,18 @@ class ConnectorConfigRegistry:
                 return stored
         return None
 
+    def role_of(self, lfdi: str) -> str:
+        """Return the configured role of ``lfdi``, or ``"der"`` for an unknown device.
+
+        An unknown device keeps the behavior every device had before roles
+        existed, so a caller asking about it is not told it is a meter.
+        """
+        canonical = self._canonical_lfdi(lfdi)
+        if canonical is None:
+            return "der"
+        # getattr: a downstream configuration model may predate roles.
+        return str(getattr(self._device_configs[canonical], "role", "der"))
+
     def iter_device_specs(self) -> list[DeviceConfig]:
         """Return all registered device configurations."""
         return list(self._device_configs.values())
@@ -311,7 +323,7 @@ class ConnectorConfigRegistry:
                     "your BaseConnector subclass, or pass a factory_resolver that "
                     "claims this type."
                 ) from exc
-            kwargs = device.model_dump(exclude={"type", "lfdi", "description", "pin"})
+            kwargs = device.connector_kwargs()
 
         def factory() -> Any:
             cls = self._import_class(class_path)

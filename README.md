@@ -110,8 +110,8 @@ Swap in `SunSpecDeviceConfig` when you have one. Full walkthrough in the
 | **Finding a server** | DNS-SD query over mDNS or xmDNS when no server URL is configured, as IEEE 2030.5 §6.9.2 asks of a client; optional announcement of this client so an operator can find it on their own network |
 | **Event engine** | DERControl five-state machine, supersession across programs, randomized start and duration, `Response` acknowledgments |
 | **Pricing** | IEEE 2030.5 Pricing function set, off by default: discovers the tariff tree and relays each active interval's price to connectors as it changes; relay-only, so the client does not act on price, the connector decides |
-| **Telemetry** | DERStatus, DERCapability, DERSettings, DERAvailability, metered readings as MirrorUsagePoints, started and rediscovered for you by the runner |
-| **Connectors** | SunSpec Modbus over TCP, RTU and TLS; a no-hardware print connector; your own by subclass or factory |
+| **Telemetry** | DERStatus, DERCapability, DERSettings, DERAvailability, metered readings as MirrorUsagePoints, started and rediscovered for you by the runner; site and DER meters mirrored with their own roleFlags |
+| **Connectors** | SunSpec Modbus over TCP, RTU and TLS, for inverters and meters; a no-hardware print connector; your own by subclass or factory |
 | **Subscriptions** | Subscribe/notify as an alternative to polling, with a notification listener |
 | **Runner** | A CLI, config file, connection retry and signal-handled shutdown |
 | **Management API** | Optional HTTP API for observing and nudging a running client |

@@ -37,6 +37,18 @@ def scale_w(raw: float | None) -> ScaledReading:
     return ScaledReading(value=value, flow_direction=FLOW_NORMAL)
 
 
+def scale_wh(raw: float | None) -> ScaledReading:
+    """Scale an energy total (Wh).
+
+    No multiplier scaling. A total is a magnitude, so the value is never
+    negative; the reading's flowDirection says which way the energy flowed.
+    """
+    if raw is None:
+        return ScaledReading(value=0, flow_direction=FLOW_NORMAL)
+
+    return ScaledReading(value=abs(int(raw)), flow_direction=FLOW_NORMAL)
+
+
 def scale_var(raw: float | None) -> ScaledReading:
     """Scale reactive power (Var).
 

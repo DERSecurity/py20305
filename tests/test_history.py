@@ -1346,3 +1346,132 @@ class TestFileModes:
         _create_owner_only(path)
 
         assert stat.S_IMODE(path.stat().st_mode) == 0o755
+
+
+# -- Site series -----------------------------------------------------------------------
+
+SITE_METER = "5e" * 20
+
+
+class TestSiteSeries:
+    """The site meter's readings are kept apart from the devices behind it."""
+
+    def test_site_readings_are_kept_in_the_site_series_only(self):
+        history = _memory()
+        assert history.site_intervals is not None and history.intervals is not None
+        _feed(history.site_intervals, T0, T0 + 900, 4000.0, lfdi=SITE_METER)
+        _feed(history.intervals, T0, T0 + 900, -1500.0)
+
+        site = history.site_intervals.query()
+        devices = history.intervals.query()
+
+        assert {row["lfdi"] for row in site} == {SITE_METER}
+        assert {row["lfdi"] for row in devices} == {DEV}
+        assert site[0]["w_avg"] == pytest.approx(4000.0)
+        assert site[0]["wh_positive"] == pytest.approx(1000.0)
+
+    def test_the_site_series_is_stored_in_its_own_table(self):
+        history = _memory()
+        assert history.site_intervals is not None
+        _feed(history.site_intervals, T0, T0 + 900, 4000.0, lfdi=SITE_METER)
+        history.site_intervals.flush()
+        history.database.drain()
+
+        assert history.database.count("site_intervals") >= 1
+        assert history.database.count("device_intervals") == 0
+
+    def test_the_site_series_is_on_by_default(self):
+        history = build_history(HistoryConfig(path=MEMORY))
+
+        assert history is not None
+        assert history.site_intervals is not None
+        assert history.status()["site_intervals"] is True
+
+    def test_the_site_series_can_be_switched_off(self):
+        history = build_history(HistoryConfig(path=MEMORY, site_intervals={"enabled": False}))
+
+        assert history is not None
+        assert history.site_intervals is None
+        assert history.intervals is not None
+
+    def test_the_site_series_is_off_when_the_intervals_are(self):
+        history = build_history(HistoryConfig(path=MEMORY, intervals={"enabled": False}))
+
+        assert history is not None
+        assert history.site_intervals is None
+
+    def test_a_table_name_that_is_not_an_identifier_is_refused(self):
+        database = HistoryDatabase(MEMORY)
+
+        with pytest.raises(ValueError, match="identifier"):
+            IntervalHistory(database, table="site; DROP TABLE device_writes")
+
+    def test_a_baseline_can_be_computed_for_the_site_series(self):
+        history = _memory()
+        assert history.site_intervals is not None
+        for back in range(1, 8):
+            day = T0 - back * DAY
+            _feed(history.site_intervals, day, day + 900, 3000.0, lfdi=SITE_METER)
+        _feed(history.site_intervals, T0, T0 + 900, 1000.0, lfdi=SITE_METER)
+
+        site = history.baseline(T0, T0 + 900, series="site", weekdays_only=False)
+        devices = history.baseline(T0, T0 + 900, weekdays_only=False)
+
+        assert site["devices"] == [SITE_METER]
+        assert site["slots"][0]["baseline_w"] == pytest.approx(3000.0)
+        assert devices["devices"] == []
+
+
+class TestSiteSeriesApi:
+    def _history(self) -> History:
+        history = _memory()
+        assert history.site_intervals is not None and history.intervals is not None
+        _feed(history.site_intervals, T0, T0 + 900, 4000.0, lfdi=SITE_METER)
+        _feed(history.intervals, T0, T0 + 900, 1500.0)
+        return history
+
+    def test_the_site_series_is_returned_when_asked_for(self):
+        api = _api(self._history())
+
+        body = api.get("/api/v1/history/intervals", params={"series": "site"}).json()
+
+        assert body["series"] == "site"
+        assert {row["lfdi"] for row in body["intervals"]} == {SITE_METER}
+
+    def test_the_device_series_is_returned_by_default(self):
+        body = _api(self._history()).get("/api/v1/history/intervals").json()
+
+        assert body["enabled"] is True
+        assert body["series"] == "device"
+        assert {row["lfdi"] for row in body["intervals"]} == {DEV}
+
+    def test_an_unknown_series_is_a_bad_request(self):
+        response = _api(self._history()).get(
+            "/api/v1/history/intervals", params={"series": "premises"}
+        )
+
+        assert response.status_code == 422
+
+    def test_a_switched_off_site_series_says_so(self):
+        api = _api(_memory(site_intervals=False))
+
+        body = api.get("/api/v1/history/intervals", params={"series": "site"}).json()
+
+        assert body["enabled"] is False
+        assert body["intervals"] == []
+
+    def test_a_site_baseline_is_returned_when_asked_for(self):
+        api = _api(self._history())
+        params = {"start": T0, "end": T0 + 900, "series": "site"}
+
+        body = api.get("/api/v1/history/baseline", params=params).json()
+
+        assert body["series"] == "site"
+        assert body["devices"] == [SITE_METER]
+
+    def test_the_series_parameter_is_in_the_openapi_document(self):
+        paths = _api(self._history()).get("/openapi.json").json()["paths"]
+
+        for path in ("/api/v1/history/intervals", "/api/v1/history/baseline"):
+            names = {p["name"] for p in paths[path]["get"]["parameters"]}
+            assert "series" in names, path

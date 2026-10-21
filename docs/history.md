@@ -6,7 +6,7 @@ the control, and what that did to the power the devices delivered. The
 operations history keeps the answers on disk, in one SQLite file, for as long
 as you configure.
 
-It has three parts. Each is on by default and each can be switched off on its
+It has four parts. Each is on by default and each can be switched off on its
 own:
 
 | Part | What it keeps | Fed by |
@@ -14,6 +14,7 @@ own:
 | `events` | Every event's lifecycle (scheduled, active with which devices, how it ended), the control's description and settings, and every DERControlResponse posted or failed | The event processor |
 | `writes` | Every control written to a device: applied, failed, or refused by the command gate, with the mRID of the control and of the event that caused it | The dispatcher |
 | `intervals` | Each device's readings integrated into fixed intervals: real and reactive energy, coverage, and curtailed energy | The telemetry cycle |
+| `site_intervals` | The site meter's readings, integrated the same way into a series of their own | The telemetry cycle |
 
 Nothing in the client's operation depends on the history. A history that
 cannot be written is logged and skipped, and never stops a control.
@@ -33,6 +34,8 @@ history:
     enabled: true
     interval_seconds: 900             # must divide a day evenly
     max_gap_seconds: 900
+  site_intervals:
+    enabled: true                     # kept only while intervals is on
 ```
 
 Every key is optional; the values above are the defaults. To keep no history
@@ -152,6 +155,19 @@ A row is written when the interval ends. Intervals still open when the client
 stops are written then, and readings after a restart are added to the same
 row.
 
+### The site series
+
+A device with `role: site_meter` measures the premises at its point of
+delivery, which includes every device behind it. Its readings are integrated
+into a series of their own, the site series, so a premises total is never
+summed with the devices it already contains. The site series is kept in the
+same way as the device intervals, with the same interval length and gap, and
+in the site meter's sign: import, from the grid to the premises, is positive,
+so `wh_positive` is energy imported and `wh_negative` energy exported. It is
+kept only while `intervals` is on, and `site_intervals.enabled: false` turns it
+off on its own. A DER meter's readings go to the device intervals, like the
+DER's.
+
 ## Baselines
 
 A baseline answers "what would the devices have done without the control?" The
@@ -178,8 +194,11 @@ With the [management API](api.md) enabled:
 | `GET /api/v1/history/events?since=&until=&program_href=` | One summary per event whose time under control overlaps the window, newest first |
 | `GET /api/v1/history/events/{mrid}` | One event's summary, audit records, responses and device writes |
 | `GET /api/v1/history/writes?event_mrid=&lfdi=&control=&since=&until=` | Device writes, oldest first |
-| `GET /api/v1/history/intervals?lfdi=&since=&until=` | Measured intervals, oldest first, including the one in progress |
-| `GET /api/v1/history/baseline?start=&end=&lfdi=&days=&tz=` | A comparison-day baseline for the window |
+| `GET /api/v1/history/intervals?lfdi=&since=&until=&series=` | Measured intervals, oldest first, including the one in progress |
+| `GET /api/v1/history/baseline?start=&end=&lfdi=&days=&tz=&series=` | A comparison-day baseline for the window |
+
+`series` is `device`, the default, for the device intervals, or `site` for the
+site series. Both answers name the series they read.
 
 Times are epoch seconds. `tz` is an IANA zone name such as
 `America/Los_Angeles` and decides where local days begin; it defaults to UTC.
@@ -216,7 +235,9 @@ history = History.open("py20305-history.sqlite3")
 events = history.events.events(since=start, until=end)
 writes = history.writes.query(event_mrid=events[0]["event_mrid"])
 intervals = history.intervals.query(lfdi=lfdi, since=start, until=end)
+site = history.site_intervals.query(since=start, until=end)
 baseline = history.baseline(event_start, event_end, lfdi=lfdi)
+site_baseline = history.baseline(event_start, event_end, series="site")
 ```
 
 ## In an application of your own
@@ -231,10 +252,15 @@ from py20305.history import History
 history = History.open("/var/lib/myapp/history.sqlite3")
 client.attach_history(history)                        # events and responses
 dispatcher.attach_write_history(history.writes)       # device writes
-manager = TelemetryManager(..., interval_history=history.intervals)
+manager = TelemetryManager(
+    ...,
+    interval_history=history.intervals,
+    site_interval_history=history.site_intervals,     # site meter readings
+)
 ...
 history.close()                                       # writes open intervals
 ```
 
-Pass `events=False`, `writes=False` or `intervals=False` to
-`History.open` to leave a part out; that part is then `None`.
+Pass `events=False`, `writes=False`, `intervals=False` or
+`site_intervals=False` to `History.open` to leave a part out; that part is then
+`None`. The site series follows `intervals` unless `site_intervals` is given.

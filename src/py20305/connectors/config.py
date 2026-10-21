@@ -13,9 +13,9 @@ To add a connector type, subclass :class:`_DeviceConfigBase` with a literal
 from __future__ import annotations
 
 import re
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 #: An IEEE 2030.5 LFDI is a 160-bit value, written here as 40 hex characters.
 _LFDI_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -43,6 +43,45 @@ class _DeviceConfigBase(BaseModel):
             "mismatch. Omit to skip verification."
         ),
     )
+    role: Literal["der", "site_meter", "der_meter"] = Field(
+        default="der",
+        description=(
+            "What the device measures. 'der' is a DER: its readings are mirrored "
+            "with roleFlags 0x49 and it takes controls. 'site_meter' is the meter at "
+            "the premises point of delivery, mirrored with roleFlags 0x03. "
+            "'der_meter' is a meter on one DER's circuit, mirrored with roleFlags "
+            "0x49. A meter takes no controls and has no DER resources."
+        ),
+    )
+    revenue_quality: bool = Field(
+        default=False,
+        description="Set isRevenueQuality (0x10) in the MirrorUsagePoint roleFlags.",
+    )
+    mirror_under: Literal["site", "own"] = Field(
+        default="site",
+        description=(
+            "site_meter only. 'site' posts the meter's MirrorUsagePoint under this "
+            "client's own EndDevice LFDI; 'own' posts it under the meter's lfdi."
+        ),
+    )
+
+    #: Fields the client uses itself and does not pass to the connector.
+    _CLIENT_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {"type", "lfdi", "description", "pin", "role", "revenue_quality", "mirror_under"}
+    )
+
+    @model_validator(mode="after")
+    def _mirror_under_needs_a_site_meter(self) -> Self:
+        """Reject ``mirror_under`` on a device that is not a site meter."""
+        if "mirror_under" in self.model_fields_set and self.role != "site_meter":
+            raise ValueError(
+                f"mirror_under applies to role site_meter only; this device's role is {self.role}"
+            )
+        return self
+
+    def connector_kwargs(self) -> dict[str, Any]:
+        """Return the keyword arguments this device's connector is constructed with."""
+        return self.model_dump(exclude=set(self._CLIENT_FIELDS))
 
     @field_validator("lfdi")
     @classmethod
@@ -95,6 +134,25 @@ class SunSpecDeviceConfig(_DeviceConfigBase):
     scan_retries: int = 3
     scan_retry_delay: float = 2.0
     der_type: int = 83
+    power_sign: Literal["auto", "import_positive", "export_positive"] = Field(
+        default="auto",
+        description=(
+            "Meters only: which sign of the meter's W is import. 'auto' learns it "
+            "from which of TotWhImp and TotWhExp rises while W is not zero, and "
+            "reports no real or reactive power until it has."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _power_sign_needs_a_meter(self) -> Self:
+        """Reject ``power_sign`` on a device that is not a meter."""
+        if "power_sign" in self.model_fields_set and self.role == "der":
+            raise ValueError("power_sign applies to role site_meter or der_meter only")
+        return self
+
+    def connector_kwargs(self) -> dict[str, Any]:
+        """Return the connector's keyword arguments, with the role it reads the device as."""
+        return {**super().connector_kwargs(), "role": self.role}
 
 
 class PrintDemoDeviceConfig(_DeviceConfigBase):

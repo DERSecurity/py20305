@@ -541,3 +541,133 @@ class TestRunnerWiring:
             assert client._on_rediscovered is not None
         finally:
             await coordinator.shutdown()
+
+
+def _client_with_roles(tmp_path: Path, devices: list[dict[str, object]]):
+    """A client whose devices carry roles, with an EndDevice for the client itself.
+
+    The client's own EndDevice is the site's: its LFDI is the certificate's.
+    """
+    from py20305.cli import build_client
+    from py20305.config import ClientConfig
+
+    cert = _write_client_cert(tmp_path)
+    config = ClientConfig.model_validate(
+        {
+            "server": {"url": "https://server.example.com:8443"},
+            "tls": {"client_cert": str(cert), "client_key": str(cert), "ca_cert": str(cert)},
+            "devices": [{"type": "print_demo", **device} for device in devices],
+            "telemetry": {"enabled": True, "post_rate_seconds": 60},
+        }
+    )
+    client, own_lfdi = build_client(config)
+    client.state.mup_list_href = "/mup"
+    client.state.end_devices = {
+        "/edev/0": _end_device(own_lfdi, post_rate=90),
+        "/edev/1": _end_device(LFDI_A),
+    }
+    return client, config, own_lfdi
+
+
+class TestMeterRoles:
+    """A meter is mirrored with its role and gets no DER resources."""
+
+    @pytest.mark.asyncio
+    async def test_a_site_meter_is_mirrored_under_the_clients_own_end_device(self, tmp_path):
+        from py20305.cli import _start_telemetry
+        from py20305.telemetry import DeviceRole
+
+        client, config, own_lfdi = _client_with_roles(
+            tmp_path, [{"lfdi": LFDI_A}, {"lfdi": LFDI_B, "role": "site_meter"}]
+        )
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None and coordinator.telemetry is not None
+        try:
+            state = coordinator.telemetry._devices[LFDI_B]
+            assert state.role is DeviceRole.SITE_METER
+            assert state.posted_under == own_lfdi.lower()
+            # The postRate of the EndDevice the readings are posted under.
+            assert state.post_rate == 90
+        finally:
+            await coordinator.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_site_meter_set_to_its_own_lfdi_is_mirrored_under_it(self, tmp_path):
+        from py20305.cli import _start_telemetry
+
+        client, config, _ = _client_with_roles(
+            tmp_path, [{"lfdi": LFDI_B, "role": "site_meter", "mirror_under": "own"}]
+        )
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None and coordinator.telemetry is not None
+        try:
+            assert coordinator.telemetry._devices[LFDI_B].posted_under == LFDI_B
+        finally:
+            await coordinator.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_der_meter_is_mirrored_under_its_own_lfdi(self, tmp_path):
+        from py20305.cli import _start_telemetry
+        from py20305.telemetry import DeviceRole
+
+        client, config, _ = _client_with_roles(
+            tmp_path, [{"lfdi": LFDI_B, "role": "der_meter", "revenue_quality": True}]
+        )
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None and coordinator.telemetry is not None
+        try:
+            state = coordinator.telemetry._devices[LFDI_B]
+            assert state.role is DeviceRole.DER_METER
+            assert state.revenue_quality is True
+            assert state.posted_under == LFDI_B
+        finally:
+            await coordinator.shutdown()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("role", ["site_meter", "der_meter"])
+    async def test_a_meter_gets_no_der_resources(self, tmp_path, role):
+        from py20305.cli import _start_telemetry
+
+        client, config, _ = _client_with_roles(
+            tmp_path, [{"lfdi": LFDI_A}, {"lfdi": LFDI_B, "role": role}]
+        )
+        client.state.end_devices["/edev/2"] = _end_device(LFDI_B)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None and coordinator.der_resources is not None
+        try:
+            assert coordinator.der_resources.active_devices == [LFDI_A]
+        finally:
+            await coordinator.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_meter_is_given_no_log_event_or_availability_href(self, tmp_path):
+        from py20305.cli import _start_telemetry
+
+        client, config, _ = _client_with_roles(tmp_path, [{"lfdi": LFDI_B, "role": "der_meter"}])
+        client.state.end_devices["/edev/2"] = _end_device(LFDI_B)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None and coordinator.telemetry is not None
+        try:
+            state = coordinator.telemetry._devices[LFDI_B]
+            assert state.log_event_list_href is None
+            assert state.der_availability_href is None
+        finally:
+            await coordinator.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_site_meters_readings_go_to_the_site_series(self, tmp_path):
+        from py20305.cli import _attach_history, _start_telemetry
+
+        client, config, _ = _client_with_roles(tmp_path, [{"lfdi": LFDI_B, "role": "site_meter"}])
+        history_config = config.history.model_copy(update={"path": tmp_path / "h.sqlite3"})
+        config = config.model_copy(update={"history": history_config})
+        _attach_history(client, config)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None and coordinator.telemetry is not None
+        try:
+            assert client.history is not None
+            assert coordinator.telemetry._site_intervals is client.history.site_intervals
+            assert coordinator.telemetry._intervals is client.history.intervals
+        finally:
+            await coordinator.shutdown()
+            client.history.close()

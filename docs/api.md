@@ -67,7 +67,8 @@ Build your own router for the additions and include both.
 The `/api/v1/history` endpoints read the [operations history](history.md):
 event summaries, device writes, measured intervals and comparison-day
 baselines. Each answers `{"enabled": false}` when its part of the history is
-switched off.
+switched off. The intervals and baseline endpoints take `series=site` to read
+the site meter's series instead of the devices'.
 
 ## Reading the head-end's clock
 

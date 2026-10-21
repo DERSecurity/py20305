@@ -22,6 +22,7 @@ from py20305.commands import (
     NullCommandObserver,
 )
 from py20305.connectors.base import BaseConnector, ScheduleNotification
+from py20305.connectors.control_errors import DeviceNotConfiguredError
 from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
 from py20305.connectors.errors import ConnectorError
 from py20305.connectors.modes import (
@@ -93,6 +94,9 @@ DISABLE_CALLS: tuple[tuple[str, dict[str, Any]], ...] = (
 )
 
 _DISABLE_BY_METHOD: dict[str, dict[str, Any]] = dict(DISABLE_CALLS)
+
+#: Device roles that take no controls.
+_METER_ROLES = frozenset({"site_meter", "der_meter"})
 
 #: The disable call for each mode the event processor tracks: DERControlBase
 #: field names and the CSIP-AUS limit element names. Connect, energize and
@@ -237,6 +241,42 @@ class ConnectorDispatcher:
         """
         return self._registry
 
+    def takes_controls(self, lfdi: str | None) -> bool:
+        """Return whether the device takes controls. A meter does not.
+
+        Only a device configured with a meter role is refused. A device the
+        registry does not know, a control with no LFDI, and a registry that
+        keeps no roles all take controls, as every device did before roles
+        existed.
+        """
+        return lfdi is None or self._role_of(lfdi) not in _METER_ROLES
+
+    def _role_of(self, lfdi: str) -> object:
+        # getattr: a registry supplied by an embedding application may keep no roles.
+        role_of = getattr(self._registry, "role_of", None)
+        return role_of(lfdi) if role_of is not None else "der"
+
+    def _refuse_meter(self, lfdi: str | None) -> None:
+        """Raise ``DeviceNotConfiguredError`` for a control addressed to a meter.
+
+        A meter is configured to measure, not to be commanded, so the control
+        is not applicable to it as configured: IEEE 2030.5-2023 Table 31 status
+        252 (Not Applicable), the code ``DeviceNotConfiguredError`` reports. 251
+        (Not Supported) would say the device lacks the function, which is a
+        statement about its hardware rather than its configuration.
+        """
+        if not self.takes_controls(lfdi):
+            raise DeviceNotConfiguredError(
+                f"{lfdi} is configured as a {self._role_of(lfdi or '')}, which takes no controls"
+            )
+
+    def _skips_meter(self, lfdi: str | None, action: str) -> bool:
+        """Return True, and log it, when a write that needs no response targets a meter."""
+        if self.takes_controls(lfdi):
+            return False
+        logger.debug("Skipped %s for %s: a meter takes no controls", action, lfdi)
+        return True
+
     async def _resolve_connector(self, device_href: str) -> BaseConnector | None:
         """Resolve a device_href to a connector instance.
 
@@ -308,7 +348,9 @@ class ConnectorDispatcher:
                 2030.5-2023 Table 31). With a gate that answers the same for a
                 device and origin throughout, as :class:`CommandGate` requires,
                 no mode was written.
+            DeviceNotConfiguredError: the device is configured as a meter.
         """
+        self._refuse_meter(self._lfdi_resolver(device_href))
         connector = await self._resolve_connector(device_href)
         await self._apply_control_to_connector(
             connector,
@@ -331,7 +373,9 @@ class ConnectorDispatcher:
 
         Raises:
             CommandNotPermittedError: as for :meth:`apply_control`.
+            DeviceNotConfiguredError: the device is configured as a meter.
         """
+        self._refuse_meter(lfdi)
         connector = await self._resolve_connector_by_lfdi(lfdi)
         await self._apply_control_to_connector(
             connector, derc, curves, lfdi=lfdi, device_href=None, origin=origin
@@ -588,7 +632,9 @@ class ConnectorDispatcher:
                 named the control and has somewhere to put the answer -- a
                 protocol server owes its own client the distinction between a
                 write that failed and one that was not permitted.
+            DeviceNotConfiguredError: the device is configured as a meter.
         """
+        self._refuse_meter(lfdi)
         connector = await self._resolve_connector_by_lfdi(lfdi)
         if connector is None:
             raise ConnectorError(f"no connector for LFDI {lfdi}")
@@ -617,8 +663,11 @@ class ConnectorDispatcher:
         """Apply default DER control (DDERC fallback) to a device.
 
         ``cause_mrid`` names the event whose end brought the default back, for
-        the audit trail. ``None`` when no single event caused it.
+        the audit trail. ``None`` when no single event caused it. A meter is
+        skipped: a default control carries no response to refuse it with.
         """
+        if self._skips_meter(self._lfdi_resolver(device_href), "default control"):
+            return
         connector = await self._resolve_connector(device_href)
         await self._apply_default_control_to_connector(
             connector,
@@ -639,7 +688,12 @@ class ConnectorDispatcher:
         origin: str = CommandOrigin.DDERC_REAPPLY,
         cause_mrid: bytes | None = None,
     ) -> None:
-        """Apply default DER control directly to a device identified by LFDI."""
+        """Apply default DER control directly to a device identified by LFDI.
+
+        A meter is skipped, as in :meth:`apply_default_control`.
+        """
+        if self._skips_meter(lfdi, "default control"):
+            return
         connector = await self._resolve_connector_by_lfdi(lfdi)
         await self._apply_default_control_to_connector(
             connector,
@@ -920,6 +974,8 @@ class ConnectorDispatcher:
         override it and take the fan-out.
         """
         logger.debug("Clearing all controls on %s", device_href)
+        if self._skips_meter(self._lfdi_resolver(device_href), "clear"):
+            return
         connector = await self._resolve_connector(device_href)
         await self._clear_control_on_connector(
             connector,
@@ -941,6 +997,8 @@ class ConnectorDispatcher:
         resolution step.
         """
         logger.debug("Clearing all controls on LFDI %s", lfdi)
+        if self._skips_meter(lfdi, "clear"):
+            return
         connector = await self._resolve_connector_by_lfdi(lfdi)
         await self._clear_control_on_connector(
             connector, lfdi=lfdi, label=lfdi, cause_mrid=cause_mrid
@@ -958,8 +1016,10 @@ class ConnectorDispatcher:
         ``modes`` are DERControlBase field names (``op_mod_fixed_w``) or the
         CSIP-AUS limit element names (``opModExpLimW``), as the event processor
         tracks them. Called at event end for the modes the ended event set and
-        the DefaultDERControl does not carry.
+        the DefaultDERControl does not carry. A meter is skipped.
         """
+        if self._skips_meter(self._lfdi_resolver(device_href), "mode disable"):
+            return
         connector = await self._resolve_connector(device_href)
         await self._disable_modes_on_connector(
             connector,
@@ -977,6 +1037,8 @@ class ConnectorDispatcher:
         cause_mrid: bytes | None = None,
     ) -> None:
         """The by-LFDI counterpart of ``disable_modes``."""
+        if self._skips_meter(lfdi, "mode disable"):
+            return
         connector = await self._resolve_connector_by_lfdi(lfdi)
         await self._disable_modes_on_connector(
             connector, modes, lfdi=lfdi, label=lfdi, cause_mrid=cause_mrid
