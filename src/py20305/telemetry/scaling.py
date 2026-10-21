@@ -11,6 +11,7 @@ from dataclasses import dataclass
 # Flow direction codes per IEEE 2030.5
 FLOW_NOT_APPLICABLE = 0
 FLOW_NORMAL = 1
+FLOW_NET = 4
 FLOW_REVERSE = 19
 
 

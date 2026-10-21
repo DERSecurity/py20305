@@ -39,7 +39,10 @@ from py20305.models.sep import (
     VersionType,
 )
 from py20305.telemetry.scaling import (
+    FLOW_NET,
+    FLOW_NORMAL,
     FLOW_NOT_APPLICABLE,
+    FLOW_REVERSE,
     ScaledReading,
     scale_a,
     scale_hz,
@@ -124,6 +127,9 @@ class ReadingTypeSpec:
     # we publish (all are point-in-time samples). Accumulated quantities -- e.g.
     # energy (Wh) -- would instead use 9 (Summation); override per-spec if added.
     accumulation_behaviour: int = 12
+    # Fixed flowDirection (see PowerDirection). None takes the direction from
+    # the value's sign when the MUP is built, the DEFAULT encoding.
+    flow_direction: int | None = None
 
 
 # ReadingType specifications per IEEE 2030.5 and spec doc
@@ -319,6 +325,84 @@ class ReadingProfile(StrEnum):
     SIGNED_LOAD_CONVENTION = "signed_load_convention"
 
 
+class PowerDirection(StrEnum):
+    """How real and reactive power carry their direction under the DEFAULT profile.
+
+    IEEE 2030.5 forbids changing a MeterReading's ReadingType once created,
+    and its flow directions other than Net carry a positive magnitude. So:
+
+    - ``DEFAULT`` sets each reading's flowDirection once, from the value's sign
+      when the MUP is built (1 Forward or 19 Reverse), and posts magnitudes.
+      A value that changes sign later, a battery that registered while
+      discharging and then charges, is posted under the first direction.
+    - ``NET`` posts flowDirection 4 (Net, forward minus reverse) with the
+      sign on the value: positive while the DER delivers, negative while it
+      absorbs.
+    - ``SPLIT`` posts two readings per quantity, flowDirection 1 (Forward)
+      and 19 (Reverse), each a magnitude, with the inactive one 0.
+
+    ``NET`` and ``SPLIT`` use mRID slots of their own (31 and up), so a device
+    switched between modes never posts a value under a ReadingType registered
+    for another mode. It applies to W and var, system and per line.
+    """
+
+    DEFAULT = "default"
+    NET = "net"
+    SPLIT = "split"
+
+
+#: The readings PowerDirection applies to, in slot order: the offset of each
+#: from a mode's first slot.
+_DIRECTED_KEYS: tuple[str, ...] = ("W", "Var", "WL1", "VarL1", "WL2", "VarL2", "WL3", "VarL3")
+#: First mRID slot of each fixed flowDirection's readings.
+_DIRECTED_SLOT_BASE: dict[int, int] = {FLOW_NET: 31, FLOW_NORMAL: 41, FLOW_REVERSE: 51}
+_DIRECTION_SUFFIX: dict[int, str] = {
+    FLOW_NET: "(net)",
+    FLOW_NORMAL: "(forward)",
+    FLOW_REVERSE: "(reverse)",
+}
+
+
+def _directed_specs(
+    specs: list[tuple[int, ReadingTypeSpec]], power_direction: PowerDirection
+) -> list[tuple[int, ReadingTypeSpec]]:
+    """Replace W and var readings with the ones ``power_direction`` posts."""
+    if power_direction is PowerDirection.DEFAULT:
+        return specs
+    directions = (
+        (FLOW_NET,) if power_direction is PowerDirection.NET else (FLOW_NORMAL, FLOW_REVERSE)
+    )
+    out: list[tuple[int, ReadingTypeSpec]] = []
+    for index, spec in specs:
+        if spec.key not in _DIRECTED_KEYS:
+            out.append((index, spec))
+            continue
+        offset = _DIRECTED_KEYS.index(spec.key)
+        for direction in directions:
+            directed = replace(
+                spec,
+                flow_direction=direction,
+                description=f"{spec.description} {_DIRECTION_SUFFIX[direction]}",
+            )
+            out.append((_DIRECTED_SLOT_BASE[direction] + offset, directed))
+    return out
+
+
+def _directed_value(spec: ReadingTypeSpec, monitoring_data: dict[str, Any]) -> int:
+    """Return a reading's value under its fixed flowDirection.
+
+    Net carries the sign; Forward and Reverse carry the magnitude of their
+    own direction and 0 otherwise.
+    """
+    scaled = _scaled_for(spec, monitoring_data)
+    signed = -scaled.value if scaled.flow_direction == FLOW_REVERSE else scaled.value
+    if spec.flow_direction == FLOW_NET:
+        return signed
+    if spec.flow_direction == FLOW_REVERSE:
+        return max(-signed, 0)
+    return max(signed, 0)
+
+
 # SIGNED_LOAD_CONVENTION only. The slots sit outside every DEFAULT slot, so a
 # device switched between profiles keeps all of its existing mRIDs.
 _STATE_OF_ENERGY_SPEC: tuple[int, ReadingTypeSpec] = (
@@ -436,6 +520,7 @@ def registration_slots(
     monitoring_data: dict[str, Any],
     profile: ReadingProfile,
     registered: frozenset[int] = frozenset(),
+    power_direction: PowerDirection = PowerDirection.DEFAULT,
 ) -> frozenset[int]:
     """The mRID slots a MUP built now would register.
 
@@ -446,7 +531,7 @@ def registration_slots(
     if profile is ReadingProfile.SIGNED_LOAD_CONVENTION:
         specs = _signed_load_specs_for(monitoring_data, registered)
     else:
-        specs = _all_specs_for(monitoring_data)
+        specs = _directed_specs(_all_specs_for(monitoring_data), power_direction)
     return frozenset(index for index, _ in specs)
 
 
@@ -715,6 +800,7 @@ def create_mup(
     *,
     profile: ReadingProfile = ReadingProfile.DEFAULT,
     registered: frozenset[int] = frozenset(),
+    power_direction: PowerDirection = PowerDirection.DEFAULT,
 ) -> MirrorUsagePoint:
     """Create a MirrorUsagePoint with system + per-line MirrorMeterReadings.
 
@@ -734,6 +820,9 @@ def create_mup(
         registered: Slots registered by an earlier POST of this MUP. Under
               SIGNED_LOAD_CONVENTION their optional readings are kept even
               when absent from ``monitoring_data``.
+        power_direction: How W and var carry their direction under the
+              DEFAULT profile (see :class:`PowerDirection`). Ignored under
+              SIGNED_LOAD_CONVENTION, which signs every value.
 
     Returns:
         MirrorUsagePoint with system + per-line meter readings.
@@ -747,16 +836,17 @@ def create_mup(
     specs = (
         _signed_load_specs_for(monitoring_data, registered)
         if signed_load
-        else _all_specs_for(monitoring_data)
+        else _directed_specs(_all_specs_for(monitoring_data), power_direction)
     )
     meter_readings: list[MirrorMeterReading1] = []
     for mrid_index, spec in specs:
         override = overrides.get(spec.key) if overrides else None
-        flow_direction = (
-            FLOW_NOT_APPLICABLE
-            if signed_load
-            else _scaled_for(spec, monitoring_data).flow_direction
-        )
+        if signed_load:
+            flow_direction = FLOW_NOT_APPLICABLE
+        elif spec.flow_direction is not None:
+            flow_direction = spec.flow_direction
+        else:
+            flow_direction = _scaled_for(spec, monitoring_data).flow_direction
         reading_type = _create_reading_type(_effective_spec(spec, override), flow_direction)
         mmr_mrid = _create_mrid(lfdi_norm, index=mrid_index)
         mmr = MirrorMeterReading1(
@@ -793,6 +883,7 @@ def create_meter_reading_list(
     stale: bool = False,
     profile: ReadingProfile = ReadingProfile.DEFAULT,
     registered: frozenset[int] | None = None,
+    power_direction: PowerDirection = PowerDirection.DEFAULT,
 ) -> MirrorMeterReadingList:
     """Create a MirrorMeterReadingList with current readings.
 
@@ -836,6 +927,9 @@ def create_meter_reading_list(
     effective multiplier (see ``_signed_load_value``). ``registered``, when given,
     limits it to slots the MUP has registered, so a reading whose registration
     has not succeeded yet is held back rather than met with Rule h.3.
+
+    ``power_direction`` must be the one the MUP was created with; it chooses
+    the W and var readings posted and how each carries its sign.
     """
     if timestamp is None:
         timestamp = int(time.time())
@@ -846,7 +940,7 @@ def create_meter_reading_list(
     specs = (
         _signed_load_specs_for(monitoring_data, frozenset())
         if signed_load
-        else _all_specs_for(monitoring_data)
+        else _directed_specs(_all_specs_for(monitoring_data), power_direction)
     )
     posted: dict[str, int] = {}
     meter_readings: list[MirrorMeterReading1] = []
@@ -867,7 +961,11 @@ def create_meter_reading_list(
             posted[spec.key] = value
             duration = 0
         else:
-            value = _scaled_for(spec, monitoring_data).value
+            value = (
+                _directed_value(spec, monitoring_data)
+                if spec.flow_direction is not None
+                else _scaled_for(spec, monitoring_data).value
+            )
             # timePeriod duration: an interval reading (Average/Maximum/Minimum)
             # covers a window, and CSIP-AUS requires that window to match the MUP
             # postRate, so its duration is post_rate; an instantaneous reading is a

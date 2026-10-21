@@ -45,6 +45,7 @@ from py20305.telemetry.log_events import (
     unmapped_alarm_bits,
 )
 from py20305.telemetry.mup import (
+    PowerDirection,
     ReadingProfile,
     ac_type_of,
     create_meter_reading_list,
@@ -176,6 +177,7 @@ class TelemetryManager:
         device_telemetry: DeviceTelemetryEmitter | None = None,
         reading_profile: ReadingProfile = ReadingProfile.DEFAULT,
         interval_history: IntervalHistory | None = None,
+        power_direction: PowerDirection = PowerDirection.DEFAULT,
     ) -> None:
         """Initialize the TelemetryManager.
 
@@ -216,9 +218,13 @@ class TelemetryManager:
                 changes units and sign on existing mRIDs, so it is a restart.
             interval_history: Integrates each reading, and each available-power
                 reading, into the operations history. Optional.
+            power_direction: How W and var carry their direction under the
+                DEFAULT reading profile. Fixed for the manager's lifetime, like
+                the profile.
         """
         self._client = client
         self._reading_profile = reading_profile
+        self._power_direction = power_direction
         # Server timebase for telemetry timestamp defaults. isinstance guard
         # keeps AsyncMock clients in tests (whose .timebase is a Mock)
         # falling back to an identity timebase; production Sep2Client always
@@ -542,7 +548,9 @@ class TelemetryManager:
         IEEE B.17.1: The server MAY modify postRate to indicate its preferred
         posting rate. We read back the created MUP to honour the server's rate.
         """
-        slots = registration_slots(monitoring_data, self._reading_profile, state.registered_slots)
+        slots = registration_slots(
+            monitoring_data, self._reading_profile, state.registered_slots, self._power_direction
+        )
         mup = create_mup(
             state.lfdi,
             monitoring_data,
@@ -550,6 +558,7 @@ class TelemetryManager:
             overrides,
             profile=self._reading_profile,
             registered=state.registered_slots,
+            power_direction=self._power_direction,
         )
         body = to_xml(mup, server_2018_compat=self._client.server_2018_compat)
 
@@ -661,7 +670,9 @@ class TelemetryManager:
         if self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION:
             return False
         ac_type = ac_type_of(monitoring_data)
-        slots = registration_slots(monitoring_data, self._reading_profile, state.registered_slots)
+        slots = registration_slots(
+            monitoring_data, self._reading_profile, state.registered_slots, self._power_direction
+        )
         if (slots, ac_type) == state.rejected_registration:
             return False
         return ac_type != state.registered_ac_type or slots != state.registered_slots
@@ -763,6 +774,7 @@ class TelemetryManager:
             stale=stale,
             profile=self._reading_profile,
             registered=state.registered_slots,
+            power_direction=self._power_direction,
         )
         body = to_xml(readings, server_2018_compat=self._client.server_2018_compat)
 

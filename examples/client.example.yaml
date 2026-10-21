@@ -167,6 +167,7 @@ connection:
 #   der_capability_poll_rate_seconds: 86400
 #   der_settings_poll_rate_seconds: 60
 #   reading_profile: default   # or signed_load_convention
+#   power_direction: default   # or net, or split (default profile only)
 
 # forwarders:
 #   mqtt:

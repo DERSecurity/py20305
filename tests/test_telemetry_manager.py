@@ -1807,6 +1807,43 @@ class TestManagerReadsAreReported:
         await manager.shutdown()
 
 
+class TestPowerDirection:
+    """The manager registers and posts W and var in the configured PowerDirection."""
+
+    async def test_the_manager_registers_and_posts_net_power(
+        self, mock_client, connector_resolver, mock_connector
+    ):
+        from py20305.models.sep import MirrorMeterReadingList, MirrorUsagePoint
+        from py20305.telemetry.mup import PowerDirection
+        from py20305.xml.serialization import from_xml
+
+        manager = TelemetryManager(
+            mock_client, MUP_LIST_HREF, connector_resolver, power_direction=PowerDirection.NET
+        )
+        mock_connector.fetch_monitoring.return_value = {
+            "W": -800.0,
+            "Var": 100.0,
+            "Hz": 60.0,
+            "V": 240.0,
+        }
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        posts = mock_client.post_bytes.call_args_list
+        mup = from_xml(posts[0].args[1], MirrorUsagePoint)
+        readings = from_xml(posts[-1].args[1], MirrorMeterReadingList)
+        assert any(
+            m.reading_type.flow_direction.value == 4 and m.description == "Real Power (net)"
+            for m in mup.mirror_meter_reading
+        )
+        assert any(
+            m.description == "Real Power (net)" and m.reading.value == -800
+            for m in readings.mirror_meter_reading
+        )
+        await manager.shutdown()
+
+
 class TestSignedLoadRegistration:
     """SIGNED_LOAD_CONVENTION re-POSTs the MUP when a new reading appears."""
 

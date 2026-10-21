@@ -94,6 +94,23 @@ and adds line-to-line voltage and State of Energy readings when the device
 supplies them. It is read at startup: a change alters the units and sign of
 readings already on the server, so it takes a restart.
 
+`power_direction` sets how real and reactive power carry their direction under
+the `default` profile. IEEE 2030.5 does not let a MeterReading's ReadingType
+change once it is created, so the choice matters for a device whose power
+changes direction, such as a battery:
+
+| Value | What is posted |
+|---|---|
+| `default` | flowDirection 1 (Forward) or 19 (Reverse), set once from the sign when the MirrorUsagePoint is created, with the magnitude. A battery that registered while discharging and later charges is still posted as Forward. |
+| `net` | flowDirection 4 (Net, forward minus reverse) with the sign on the value: positive while the device delivers power, negative while it absorbs it. |
+| `split` | Two readings per quantity, flowDirection 1 (Forward) and 19 (Reverse), each a magnitude; the direction not in use posts 0. |
+
+`net` and `split` post their readings under new mRIDs, so switching between
+modes never posts a value under a ReadingType registered for another mode. They
+apply to total and per-line W and var. `power_direction` is refused with
+`signed_load_convention`, which already signs every value. Like the profile, it
+is read at startup.
+
 Rediscovery re-reads every path. A server that moves its resources, or that
 brings the MirrorUsagePoint function set online only after the client
 connected, is picked up without a restart.

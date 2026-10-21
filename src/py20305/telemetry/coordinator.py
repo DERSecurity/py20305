@@ -18,7 +18,7 @@ import logging
 from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING
 
-from py20305.telemetry.mup import ReadingProfile
+from py20305.telemetry.mup import PowerDirection, ReadingProfile
 
 if TYPE_CHECKING:
     from py20305.client.csip_client import CsipClient
@@ -68,6 +68,8 @@ class TelemetryCoordinator:
             reads, as confirmation evidence for outstanding commands.
         reading_profile: How MirrorMeterReadings are encoded; see
             :class:`~py20305.telemetry.mup.ReadingProfile`.
+        power_direction: How W and var carry their direction under the
+            DEFAULT profile; see :class:`~py20305.telemetry.mup.PowerDirection`.
     """
 
     def __init__(
@@ -85,10 +87,12 @@ class TelemetryCoordinator:
         command_observer: CommandObserver | None = None,
         reading_profile: ReadingProfile = ReadingProfile.DEFAULT,
         interval_history: IntervalHistory | None = None,
+        power_direction: PowerDirection = PowerDirection.DEFAULT,
     ) -> None:
         self._client = client
         self._interval_history = interval_history
         self._reading_profile = reading_profile
+        self._power_direction = power_direction
         self._resolve_connector = connector_resolver
         self._post_rate = post_rate_seconds
         self._capability_poll_rate = der_capability_poll_rate_seconds
@@ -164,6 +168,7 @@ class TelemetryCoordinator:
             device_telemetry=self._device_telemetry,
             reading_profile=self._reading_profile,
             interval_history=self._interval_history,
+            power_direction=self._power_direction,
         )
 
     def _setup_der_resources(self) -> None:
