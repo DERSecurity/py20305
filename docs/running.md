@@ -136,10 +136,18 @@ devices:
 | `role` | The device | MirrorUsagePoint roleFlags | Positive real power |
 |---|---|---|---|
 | `der` (default) | A DER | 0x49: isMirror, isDER, isSubmeter | Output |
-| `site_meter` | The meter at the premises point of delivery | 0x03: isMirror, isPremisesAggregationPoint, as CSIP-AUS v1.1a Annex A requires for the site readings | Import, from the grid to the premises |
+| `site_meter` | The meter at the premises point of delivery | 0x03: isMirror, isPremisesAggregationPoint | Import, from the grid to the premises |
 | `der_meter` | A meter on one DER's circuit | 0x49, as for the DER | The DER's output |
 
 `revenue_quality: true` adds isRevenueQuality (0x10) to the roleFlags.
+
+The two values follow the RoleFlagsType definitions in IEEE 2030.5-2023: isSubmeter
+"SHALL be set if the usage point is not a premises aggregation point", so the site
+value leaves it clear. CSIP-AUS v1.1a (January 2023), Annex A, lists the same values,
+0x03 for the site's real and reactive power and 0x49 for the DER's. The CSIP-AUS v1.2
+explainer (May 2025) keeps one MirrorUsagePoint for site measurements and one for
+device measurements and refers their definition to the utility handbook, so check
+the values against the edition the utility tests to.
 
 A meter takes no controls and has no DER resources. The client PUTs no
 DERCapability, DERSettings, DERStatus or DERAvailability for it and posts no
@@ -147,11 +155,16 @@ LogEvents. A control addressed to a meter is answered with status 252 (Not
 Applicable), and a control fanned out across several local devices skips the
 meters rather than reporting them.
 
-`mirror_under` says where a site meter's MirrorUsagePoint is posted. `site`,
-the default, posts it under the client's own EndDevice, the one its certificate
-identifies, which stands for the site. `own` posts it under the meter's `lfdi`.
-The setting is refused on any other role; a `der_meter` is always posted under
-its own `lfdi`. A meter's `lfdi` names it and seeds the mRIDs of its readings,
+`mirror_under` sets the LFDI a site meter's MirrorUsagePoint carries in its
+`deviceLFDI` element. IEEE 2030.5 defines that element as "the LFDI of the device
+being mirrored", so `own`, which puts the meter's `lfdi` there, is the literal
+reading. `site`, the default, puts the client's own EndDevice LFDI there instead,
+the one its certificate identifies, which stands for the site: a meter has no
+EndDevice of its own on the server, and a server that accepts mirrors only for
+registered EndDevices refuses a MirrorUsagePoint naming an LFDI it does not know.
+If a server rejects a site meter's MirrorUsagePoint, or expects the meter's own
+LFDI there, set `mirror_under: own`. The setting is refused on any other role; a
+`der_meter` always carries its own `lfdi`. A meter's `lfdi` names it and seeds the mRIDs of its readings,
 so it must differ from every other device's, but the meter needs no certificate.
 A site meter under the site's EndDevice therefore shares that EndDevice's LFDI
 with the site's DER without sharing an mRID with it.

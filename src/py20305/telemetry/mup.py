@@ -87,9 +87,11 @@ SERVICE_CATEGORY_ELECTRICITY = 0
 # metering location ("Site type is unknown").
 ROLE_FLAGS_DER = 0x49  # isMirror | isDER | isSubmeter
 
-# RoleFlagsType for the meter at the premises point of delivery. CSIP-AUS v1.1a
-# Annex A requires 0x03 for the site (connection point) real and reactive power:
-# isMirror (bit 0) and isPremisesAggregationPoint (bit 1).
+# RoleFlagsType for the meter at the premises point of delivery: isMirror (bit 0)
+# and isPremisesAggregationPoint (bit 1). isSubmeter (bit 6) stays clear, since
+# IEEE 2030.5 sets it only on a usage point that is not a premises aggregation
+# point. CSIP-AUS v1.1a (January 2023) Annex A lists 0x03 for the site
+# (connection point) real and reactive power.
 ROLE_FLAGS_SITE = 0x03  # isMirror | isPremisesAggregationPoint
 
 # RoleFlagsType bit 4, isRevenueQuality (IEEE 2030.5-2023 RoleFlagsType).

@@ -60,8 +60,10 @@ class _DeviceConfigBase(BaseModel):
     mirror_under: Literal["site", "own"] = Field(
         default="site",
         description=(
-            "site_meter only. 'site' posts the meter's MirrorUsagePoint under this "
-            "client's own EndDevice LFDI; 'own' posts it under the meter's lfdi."
+            "site_meter only. The LFDI the meter's MirrorUsagePoint carries in "
+            "deviceLFDI: 'site' uses this client's own EndDevice LFDI, which a server "
+            "that accepts mirrors only for registered EndDevices needs; 'own' uses the "
+            "meter's lfdi, the literal reading of deviceLFDI."
         ),
     )
 
