@@ -108,7 +108,10 @@ class DeviceRole(StrEnum):
     - ``DER_METER``: a meter on one DER's circuit, mirrored with roleFlags
       0x49 like the DER itself. Positive real power is the DER's output.
 
-    A meter takes no controls and has no DER resources.
+    Reactive power takes the same orientation as real power. The role also
+    sets how ``SIGNED_LOAD_CONVENTION`` signs W and var (see
+    :class:`ReadingProfile`). A meter takes no controls and has no DER
+    resources.
     """
 
     DER = "der"
@@ -372,10 +375,16 @@ class ReadingProfile(StrEnum):
 
     ``DEFAULT`` is the historical encoding. ``SIGNED_LOAD_CONVENTION`` carries
     the sign on every value (flowDirection 0) using the load convention --
-    active power negative on export, reactive power negative when the DER
-    injects -- with commodity, dataQualifier and kind left Not Applicable, and
-    adds line-to-line voltage and State of Energy readings when the device
-    supplies them.
+    active power negative on export, reactive power negative on injection --
+    with commodity, dataQualifier and kind left Not Applicable, and adds
+    line-to-line voltage and State of Energy readings when the device supplies
+    them.
+
+    How W and var are signed depends on the device's :class:`DeviceRole`. A
+    DER and a DER meter report them positive for the DER's output, which the
+    load convention counts as export, so both are negated. A site meter
+    reports them positive for import, from the grid to the premises, which is
+    already the load convention, so both are posted as reported.
     """
 
     DEFAULT = "default"
@@ -554,7 +563,12 @@ _SPEC_BY_SLOT: dict[int, ReadingTypeSpec] = {
 }
 _TOTAL_KEYS = frozenset({"W", "Var", "VA", "A", "WHAvail"})
 _PER_LINE_KEY = re.compile(r"^(W|Var|V|PF|VA|A)L[1-3]$")
-_NEGATED_QUANTITIES = frozenset({"W", "Var"})
+#: The quantities whose sign the load convention sets from the device role.
+_POWER_QUANTITIES = frozenset({"W", "Var"})
+#: Roles whose connector reports W and var import positive, which is already
+#: the load convention. Every other role reports them positive for a DER's
+#: output, so their values are negated.
+_IMPORT_POSITIVE_ROLES = frozenset({DeviceRole.SITE_METER})
 
 
 def ac_type_of(monitoring_data: dict[str, Any]) -> int | None:
@@ -644,19 +658,26 @@ def _scale_half_away(raw: float, multiplier: int) -> int:
 
 
 def _signed_load_value(
-    spec: ReadingTypeSpec, monitoring_data: dict[str, Any], posted: dict[str, int]
+    spec: ReadingTypeSpec,
+    monitoring_data: dict[str, Any],
+    posted: dict[str, int],
+    *,
+    role: DeviceRole,
 ) -> int:
     """Scale a SIGNED_LOAD_CONVENTION value from the effective multiplier.
 
-    Connectors report W and var DER-referenced (positive for generation and
-    for injection), so both are negated. PF takes the sign of the var posted
-    with it -- negative when the DER injects -- and stays an unsigned
-    magnitude when that var is missing. Everything else is a magnitude.
+    W and var are signed by ``role``. A DER and a DER meter report them
+    positive for the DER's output (generation and reactive injection), so
+    both are negated. A site meter reports them positive for import, which is
+    already the load convention, so both are kept. PF takes the sign of the
+    var posted with it -- negative on reactive injection -- and stays an
+    unsigned magnitude when that var is missing. Everything else is a
+    magnitude.
     """
     scaled = _scale_half_away(monitoring_data[spec.key], spec.multiplier)
     quantity = _quantity(spec.key)
-    if quantity in _NEGATED_QUANTITIES:
-        return -scaled
+    if quantity in _POWER_QUANTITIES:
+        return scaled if role in _IMPORT_POSITIVE_ROLES else -scaled
     if quantity == "PF":
         var = posted.get("Var" + spec.key[2:])
         return -abs(scaled) if var is not None and var < 0 else abs(scaled)
@@ -996,6 +1017,7 @@ def create_meter_reading_list(
     profile: ReadingProfile = ReadingProfile.DEFAULT,
     registered: frozenset[int] | None = None,
     power_direction: PowerDirection = PowerDirection.DEFAULT,
+    role: DeviceRole = DeviceRole.DER,
 ) -> MirrorMeterReadingList:
     """Create a MirrorMeterReadingList with current readings.
 
@@ -1036,9 +1058,11 @@ def create_meter_reading_list(
 
     Under ``SIGNED_LOAD_CONVENTION`` every reading is an instantaneous sample, so
     its duration is 0 whatever the dataQualifier, and its value is scaled from the
-    effective multiplier (see ``_signed_load_value``). ``registered``, when given,
-    limits it to slots the MUP has registered, so a reading whose registration
-    has not succeeded yet is held back rather than met with Rule h.3.
+    effective multiplier (see ``_signed_load_value``). ``role`` must be the
+    device's role: it decides whether W and var are negated (see
+    :class:`ReadingProfile`). ``registered``, when given, limits it to slots the
+    MUP has registered, so a reading whose registration has not succeeded yet is
+    held back rather than met with Rule h.3.
 
     ``power_direction`` must be the one the MUP was created with; it chooses
     the W and var readings posted and how each carries its sign.
@@ -1069,7 +1093,9 @@ def create_meter_reading_list(
         if signed_load:
             # Var precedes PF in slot order, system and per-line, so the sign
             # PF takes from it is already in `posted`.
-            value = _signed_load_value(_effective_spec(spec, override), monitoring_data, posted)
+            value = _signed_load_value(
+                _effective_spec(spec, override), monitoring_data, posted, role=role
+            )
             posted[spec.key] = value
             duration = 0
         else:

@@ -145,8 +145,11 @@ the readings rather than posted as zero.
 Signs are a requirement on every connector, referenced to the DER as in
 SunSpec model 701: `W` is positive for generation and negative for absorption,
 and `Var` is positive for reactive power injection (over-excited) and negative
-for absorption. The `SIGNED_LOAD_CONVENTION` reading profile negates both, so a
-connector that reports another convention posts the wrong sign.
+for absorption. A meter's connector reports them in its role's frame instead,
+as described above. The `SIGNED_LOAD_CONVENTION` reading profile negates both
+for a DER and a DER meter and posts a site meter's as reported, since import
+positive is already the load convention. A connector that reports another
+convention posts the wrong sign.
 
 Point a device at it by import path — no registration needed:
 

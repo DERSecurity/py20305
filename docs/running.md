@@ -94,7 +94,10 @@ historical encoding. `signed_load_convention` carries the sign on every value
 negative on injection, leaves commodity, dataQualifier and kind Not Applicable,
 and adds line-to-line voltage and State of Energy readings when the device
 supplies them. It is read at startup: a change alters the units and sign of
-readings already on the server, so it takes a restart.
+readings already on the server, so it takes a restart. For a DER and a DER
+meter, export is the DER's output, so generation posts negative W. For a site
+meter, export is power from the premises to the grid: import posts positive
+W and var, and export negative (see [Meters](#meters)).
 
 `power_direction` sets how real and reactive power carry their direction under
 the `default` profile. IEEE 2030.5 does not let a MeterReading's ReadingType
@@ -192,7 +195,16 @@ oriented like real power. `power_sign` is refused on a DER.
 
 A site meter's power changes direction during the day, so `power_direction:
 net` or `split` keeps that direction on the server, where `default` fixes it
-when the MirrorUsagePoint is created.
+when the MirrorUsagePoint is created. For a site meter, `net` posts import
+positive and export negative, and `split` posts import as Forward (1) and export
+as Reverse (19), the same directions as its energy totals.
+
+Under `reading_profile: signed_load_convention`, real and reactive power carry
+the load convention's sign: negative on export. A site meter's import positive
+values already follow it, so they are posted as the meter reports them: import
+positive, export negative. A DER meter's values, like a DER's, are positive for
+the DER's output, which is export, so they are negated. The power factor takes
+the sign of the reactive power posted with it.
 
 The [operations history](history.md) keeps a site meter's readings in a series
 of their own, beside the devices'.

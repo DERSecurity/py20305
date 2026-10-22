@@ -149,8 +149,9 @@ class DeviceTelemetryState:
     #   server-side identity issue.
     telemetry_blocked: bool = False
     blocked_reason: str | None = None
-    #: What the device measures. Sets the MUP roleFlags, and a meter posts no
-    #: LogEvents and no DERAvailability.
+    #: What the device measures. Sets the MUP roleFlags and the sign of W and var
+    #: under SIGNED_LOAD_CONVENTION, and a meter posts no LogEvents and no
+    #: DERAvailability.
     role: DeviceRole = DeviceRole.DER
     revenue_quality: bool = False
     #: LFDI of the EndDevice the MUP is posted under, when not the device's own.
@@ -291,7 +292,8 @@ class TelemetryManager:
             post_rate: Posting interval in seconds
             log_event_list_href: Server path for LogEventList POST
             der_availability_href: Server path for DERAvailability PUT
-            role: What the device measures (see :class:`DeviceRole`). A meter
+            role: What the device measures (see :class:`DeviceRole`). It sets
+                the sign of W and var under SIGNED_LOAD_CONVENTION. A meter
                 posts no LogEvents and no DERAvailability.
             revenue_quality: Set isRevenueQuality in the MUP roleFlags.
             mirror_lfdi: LFDI of the EndDevice to post the MUP under, when not
@@ -831,6 +833,7 @@ class TelemetryManager:
             profile=self._reading_profile,
             registered=state.registered_slots,
             power_direction=self._power_direction,
+            role=state.role,
         )
         body = to_xml(readings, server_2018_compat=self._client.server_2018_compat)
 

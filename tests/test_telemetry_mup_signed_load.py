@@ -8,6 +8,7 @@ import pytest
 
 from py20305.connectors.base import ReadingOverride
 from py20305.telemetry.mup import (
+    DeviceRole,
     ReadingProfile,
     _create_mrid,
     create_meter_reading_list,
@@ -187,6 +188,80 @@ class TestValues:
         )
 
         assert _readings(built)[SYSTEM_SLOTS["W"]].time_period.duration == 0
+
+
+# Per-line slots for L1: W 10, Var 11, PF 13.
+WL1, VARL1, PFL1 = 10, 11, 13
+
+
+class TestDeviceRoleSigns:
+    """W and var are signed by the device role; a site meter reports import positive."""
+
+    def test_a_site_meter_importing_posts_positive_power(self) -> None:
+        values = _values(_three_phase(W=3000.0, Var=300.0), role=DeviceRole.SITE_METER)
+
+        assert values[SYSTEM_SLOTS["W"]] == 3000
+        assert values[SYSTEM_SLOTS["Var"]] == 300
+        assert values[WL1] == 1000
+        assert values[VARL1] == 100
+
+    def test_a_site_meter_exporting_posts_negative_power(self) -> None:
+        monitoring = _three_phase(W=-3000.0, Var=-300.0, WL1=-1000.0, VarL1=-100.0)
+
+        values = _values(monitoring, role=DeviceRole.SITE_METER)
+
+        assert values[SYSTEM_SLOTS["W"]] == -3000
+        assert values[SYSTEM_SLOTS["Var"]] == -300
+        assert values[WL1] == -1000
+        assert values[VARL1] == -100
+
+    def test_a_der_meter_posts_the_ders_output_negative(self) -> None:
+        values = _values(_three_phase(W=3000.0, Var=300.0), role=DeviceRole.DER_METER)
+
+        assert values[SYSTEM_SLOTS["W"]] == -3000
+        assert values[SYSTEM_SLOTS["Var"]] == -300
+        assert values[WL1] == -1000
+
+    def test_a_der_meter_posts_power_into_the_der_positive(self) -> None:
+        values = _values(_three_phase(W=-2000.0, Var=-200.0), role=DeviceRole.DER_METER)
+
+        assert values[SYSTEM_SLOTS["W"]] == 2000
+        assert values[SYSTEM_SLOTS["Var"]] == 200
+
+    def test_a_der_posts_generation_negative_when_its_role_is_given(self) -> None:
+        values = _values(_three_phase(W=3000.0, Var=300.0), role=DeviceRole.DER)
+
+        assert values[SYSTEM_SLOTS["W"]] == -3000
+        assert values[SYSTEM_SLOTS["Var"]] == -300
+
+    def test_a_site_meter_importing_reactive_power_posts_positive_pf(self) -> None:
+        values = _values(_three_phase(Var=500.0, PF=0.95), role=DeviceRole.SITE_METER)
+
+        assert values[SYSTEM_SLOTS["Var"]] == 500
+        assert values[SYSTEM_SLOTS["PF"]] == 950
+
+    def test_a_site_meter_exporting_reactive_power_posts_negative_pf(self) -> None:
+        values = _values(_three_phase(Var=-500.0, PF=0.95), role=DeviceRole.SITE_METER)
+
+        assert values[SYSTEM_SLOTS["Var"]] == -500
+        assert values[SYSTEM_SLOTS["PF"]] == -950
+
+    def test_a_site_meter_per_line_pf_follows_that_lines_posted_var(self) -> None:
+        monitoring = _three_phase(VarL1=200.0, PFL1=0.9, VarL2=-200.0, PFL2=0.9)
+
+        values = _values(monitoring, role=DeviceRole.SITE_METER)
+
+        assert values[PFL1] == 900
+        assert values[19] == -900  # PFL2
+
+    def test_the_role_does_not_change_unsigned_quantities(self) -> None:
+        monitoring = _three_phase(W=-3000.0, Var=-300.0)
+
+        site = _values(monitoring, role=DeviceRole.SITE_METER)
+        der = _values(monitoring, role=DeviceRole.DER)
+
+        for key in ("Hz", "V", "VA", "A"):
+            assert site[SYSTEM_SLOTS[key]] == der[SYSTEM_SLOTS[key]], key
 
 
 class TestOptionalReadings:

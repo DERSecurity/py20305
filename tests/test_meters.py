@@ -24,6 +24,7 @@ from py20305.connectors.sunspec_core._meter import PowerSignCalibrator, read_met
 from py20305.telemetry.mup import (
     DeviceRole,
     PowerDirection,
+    ReadingProfile,
     compute_sfdi,
     create_meter_reading_list,
     create_mup,
@@ -487,6 +488,118 @@ class TestMeterEnergyAndPhases:
         out = read_meter(_fresh_meter(), 220, "site_meter", PowerSignCalibrator())
 
         assert "ACType" not in out
+
+
+# -- Posted sign ----------------------------------------------------------------------
+
+#: mRID -> slot for every slot a MUP can register.
+_SLOT_BY_MRID = {_slot_mrid(METER_LFDI, slot): slot for slot in range(1, 63)}
+
+#: A site meter importing 2000 W and 100 var, then exporting the same. Its positive
+#: W is import, so TotWhImp rises while W is positive and TotWhExp while it is
+#: negative.
+SITE_IMPORTING = [
+    {"W": 2000.0, "VAR": 100.0, "TotWhImp": 1000.0, "TotWhExp": 50.0},
+    {"W": 2000.0, "VAR": 100.0, "TotWhImp": 1010.0, "TotWhExp": 50.0},
+    {"W": 2000.0, "VAR": 100.0, "TotWhImp": 1020.0, "TotWhExp": 50.0},
+]
+SITE_EXPORTING = [
+    *SITE_IMPORTING,
+    {"W": -2000.0, "VAR": -100.0, "TotWhImp": 1020.0, "TotWhExp": 60.0},
+]
+
+
+def _site_monitoring(steps: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the last monitoring a site meter reports after ``steps``."""
+    return _readings(_fresh_meter(), "site_meter", PowerSignCalibrator(), steps)[-1]
+
+
+def _posted(monitoring: dict[str, Any], **kwargs: Any) -> dict[int, int]:
+    """Return the posted reading values by slot."""
+    readings = create_meter_reading_list(METER_LFDI, monitoring, timestamp=0, **kwargs)
+    return {_SLOT_BY_MRID[m.m_rid.value]: m.reading.value for m in readings.mirror_meter_reading}
+
+
+class TestSiteMeterPostedSign:
+    """A site meter's import is posted as import under every encoding.
+
+    IEEE 2030.5 FlowDirectionType 1 (Forward) is energy delivered to the
+    premises, and 4 (Net) is forward minus reverse. The load convention posts
+    export negative. So for a site meter, import is Forward, positive Net and
+    positive under SIGNED_LOAD_CONVENTION.
+    """
+
+    def test_import_is_posted_positive_under_net(self):
+        posted = _posted(
+            _site_monitoring(SITE_IMPORTING),
+            power_direction=PowerDirection.NET,
+            role=DeviceRole.SITE_METER,
+        )
+
+        assert (posted[31], posted[32]) == (2000, 100)
+
+    def test_export_is_posted_negative_under_net(self):
+        posted = _posted(
+            _site_monitoring(SITE_EXPORTING),
+            power_direction=PowerDirection.NET,
+            role=DeviceRole.SITE_METER,
+        )
+
+        assert (posted[31], posted[32]) == (-2000, -100)
+
+    def test_import_is_posted_forward_under_split(self):
+        posted = _posted(
+            _site_monitoring(SITE_IMPORTING),
+            power_direction=PowerDirection.SPLIT,
+            role=DeviceRole.SITE_METER,
+        )
+
+        assert (posted[41], posted[42]) == (2000, 100), "Forward W and var"
+        assert (posted[51], posted[52]) == (0, 0), "Reverse W and var"
+
+    def test_export_is_posted_reverse_under_split(self):
+        posted = _posted(
+            _site_monitoring(SITE_EXPORTING),
+            power_direction=PowerDirection.SPLIT,
+            role=DeviceRole.SITE_METER,
+        )
+
+        assert (posted[41], posted[42]) == (0, 0), "Forward W and var"
+        assert (posted[51], posted[52]) == (2000, 100), "Reverse W and var"
+
+    def test_import_is_posted_positive_under_the_signed_load_profile(self):
+        posted = _posted(
+            _site_monitoring(SITE_IMPORTING),
+            profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+            role=DeviceRole.SITE_METER,
+        )
+
+        assert (posted[1], posted[2]) == (2000, 100), "W and var"
+        assert posted[5] == 950, "PF takes the sign of the posted var"
+
+    def test_export_is_posted_negative_under_the_signed_load_profile(self):
+        posted = _posted(
+            _site_monitoring(SITE_EXPORTING),
+            profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+            role=DeviceRole.SITE_METER,
+        )
+
+        assert (posted[1], posted[2]) == (-2000, -100), "W and var"
+        assert posted[5] == -950, "PF takes the sign of the posted var"
+
+    def test_a_der_meters_output_is_posted_negative_under_the_signed_load_profile(self):
+        """A DER meter's export is the DER's output, which the load convention negates."""
+        monitoring = _readings(
+            _fresh_meter(), "der_meter", PowerSignCalibrator(), EXPORT_POSITIVE_STEPS
+        )[-1]
+
+        posted = _posted(
+            monitoring,
+            profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+            role=DeviceRole.DER_METER,
+        )
+
+        assert (posted[1], posted[2]) == (-2000, -100), "W and var"
 
 
 # -- The SunSpec connector ------------------------------------------------------------

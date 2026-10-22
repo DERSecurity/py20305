@@ -2251,6 +2251,52 @@ class TestMeterDevices:
         assert mup.device_lfdi == bytes.fromhex(SITE_LFDI)
         assert mup.role_flags.value == b"\x00\x03"
 
+    @staticmethod
+    async def _signed_load_readings(mock_client, connector_resolver, role) -> dict[int, int]:
+        """Run two cycles under SIGNED_LOAD_CONVENTION; return the posted values by slot."""
+        from py20305.models.sep import MirrorMeterReadingList
+        from py20305.telemetry.mup import ReadingProfile, _create_mrid
+        from py20305.xml.serialization import from_xml
+
+        manager = TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
+        )
+        manager.start_metering(SAMPLE_LFDI, post_rate=300, role=role)
+        await manager._metering_cycle(SAMPLE_LFDI)
+        await manager._metering_cycle(SAMPLE_LFDI)
+        await manager.shutdown()
+
+        href, body = mock_client.post_bytes.call_args_list[-1].args
+        assert href == "/mup/device1"
+        slot_by_mrid = {_create_mrid(SAMPLE_LFDI, index=i).value: i for i in range(1, 8)}
+        readings = from_xml(body, MirrorMeterReadingList)
+        return {slot_by_mrid[m.m_rid.value]: m.reading.value for m in readings.mirror_meter_reading}
+
+    @pytest.mark.asyncio
+    async def test_a_site_meters_import_is_posted_positive_under_the_signed_load_profile(
+        self, mock_client, connector_resolver
+    ):
+        from py20305.telemetry.mup import DeviceRole
+
+        values = await self._signed_load_readings(
+            mock_client, connector_resolver, DeviceRole.SITE_METER
+        )
+
+        assert (values[1], values[2]) == (1000, 200), "W and var"
+
+    @pytest.mark.asyncio
+    async def test_a_ders_output_is_posted_negative_under_the_signed_load_profile(
+        self, mock_client, connector_resolver
+    ):
+        from py20305.telemetry.mup import DeviceRole
+
+        values = await self._signed_load_readings(mock_client, connector_resolver, DeviceRole.DER)
+
+        assert (values[1], values[2]) == (-1000, -200), "W and var"
+
     @pytest.mark.asyncio
     async def test_a_meter_posts_no_log_event_and_no_availability(
         self, mock_client, connector_resolver, mock_connector

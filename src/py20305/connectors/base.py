@@ -140,8 +140,11 @@ class BaseConnector:
         ``W`` SHALL be positive for generation and negative for absorption, and
         ``Var`` positive for reactive power injection (over-excited) and negative
         for absorption (under-excited). This is the SunSpec model 701 convention.
-        The ``SIGNED_LOAD_CONVENTION`` reading profile negates both, so a
-        connector reporting another convention posts the wrong sign.
+        A connector for a meter reports both in the frame of its role instead
+        (see ``py20305.telemetry.mup.DeviceRole``). The
+        ``SIGNED_LOAD_CONVENTION`` reading profile negates both for a DER and a
+        DER meter and posts a site meter's as reported, so a connector reporting
+        another convention posts the wrong sign.
 
         Beyond the keys below, a connector may supply per-line keys (``WL1``,
         ``VarL2``, ...), ``ACType`` (SunSpec 701 enum), phase-to-phase voltages
