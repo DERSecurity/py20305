@@ -36,7 +36,12 @@ logger = logging.getLogger(__name__)
 
 
 class ResponseCode(enum.IntEnum):
-    """IEEE 2030.5 Table 31 response status codes for DER function set."""
+    """IEEE 2030.5 response status codes for the DER function set.
+
+    The values follow IEEE 2030.5-2023 Table 31. IEEE 2030.5-2018 Table 27
+    assigns the same values to 1 to 14 and 252 to 254, and reserves 15
+    (``RESUMED``) and 251 (``NOT_SUPPORTED``); see ``_CODE_2018_OVERRIDES``.
+    """
 
     ACKNOWLEDGED = 1
     ACTIVE = 2
@@ -48,9 +53,9 @@ class ResponseCode(enum.IntEnum):
     PARTIAL_OPT_OUT = 8
     PARTIAL_OPT_IN = 9
     COMPLETE_NO_PARTICIPATION = 10
-    SUPERSEDED_ALTERNATE_SERVER = 12
-    SUPERSEDED_ALTERNATE_PROGRAM = 13
-    RESUMED = 14
+    SUPERSEDED_ALTERNATE_SERVER = 13
+    SUPERSEDED_ALTERNATE_PROGRAM = 14
+    RESUMED = 15
     NOT_SUPPORTED = 251
     NOT_APPLICABLE = 252
     INVALID = 253
@@ -165,10 +170,12 @@ def response_code_for_dispatch_error(exc: BaseException) -> ResponseCode:
 #:
 #: ``INVALID`` (253) is deliberately absent: 2030.5-2018 assigns 253 the same
 #: meaning, so it needs no translation and a 2018 head-end can still tell
-#: invalid-event-data apart from a capability limit. Like the rejection code
-#: itself, this records
-#: the standard's semantics as supplied by the team -- both bundled schemas type
-#: ``Response.status`` as a bare ``UInt8``, so the repository cannot settle it.
+#: invalid-event-data apart from a capability limit.
+#:
+#: Both bundled schemas type ``Response.status`` as a bare ``UInt8`` and defer
+#: the meanings to the standard's text: IEEE 2030.5-2018 Table 27 ("15 to 251
+#: Reserved", 252 "Rejected: control parameter not applicable") and
+#: IEEE 2030.5-2023 Table 31 (251 "Not Supported", 252 "Not Applicable").
 _CODE_2018_OVERRIDES = {ResponseCode.NOT_SUPPORTED: ResponseCode.NOT_APPLICABLE}
 
 

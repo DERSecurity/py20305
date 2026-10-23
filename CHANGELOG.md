@@ -9,6 +9,30 @@ below says so explicitly.
 
 Nothing yet.
 
+## [0.16.1] - 2026-10-23
+
+### Fixed
+
+- **`ResponseCode` numbers the superseded and resumed statuses as IEEE 2030.5
+  does (#78).** `SUPERSEDED_ALTERNATE_SERVER`, `SUPERSEDED_ALTERNATE_PROGRAM`
+  and `RESUMED` were 12, 13 and 14, one below the standard's 13, 14 and 15
+  (IEEE 2030.5-2018 Table 27 and -2023 Table 31; 15 is defined only in 2023,
+  and 2018 reserves 15 to 251). 12 is "Cannot be displayed", a messaging
+  status. Only the constants are corrected: this client emits none of the
+  three, so nothing it posts to a server changes.
+- **A site meter's real and reactive power carry the right sign under the signed
+  load convention profile (#78).** `signed_load_convention` negated W and var for
+  every device, because a DER's connector reports them positive for its output.
+  A site meter reports them import positive, from the grid to the premises, which
+  is already the load convention, so its import was posted as export and its
+  export as import, and the power factor took the same wrong sign. A site meter's
+  W and var are now posted as the meter reports them: import positive, export
+  negative. A DER and a DER meter are unchanged. Under the `default` profile,
+  `power_direction: net` and `split` already posted a site meter's import as
+  positive Net and as Forward; tests now pin that. `create_meter_reading_list`
+  takes the device's `role`, which `TelemetryManager` passes; a caller that builds
+  readings for a site meter itself must pass `role=DeviceRole.SITE_METER`.
+
 ## [0.16.0] - 2026-10-21
 
 ### Added
