@@ -9,6 +9,23 @@ below says so explicitly.
 
 Nothing yet.
 
+## [0.16.1] - 2026-10-23
+
+### Fixed
+
+- **A site meter's real and reactive power carry the right sign under the signed
+  load convention profile (#78).** `signed_load_convention` negated W and var for
+  every device, because a DER's connector reports them positive for its output.
+  A site meter reports them import positive, from the grid to the premises, which
+  is already the load convention, so its import was posted as export and its
+  export as import, and the power factor took the same wrong sign. A site meter's
+  W and var are now posted as the meter reports them: import positive, export
+  negative. A DER and a DER meter are unchanged. Under the `default` profile,
+  `power_direction: net` and `split` already posted a site meter's import as
+  positive Net and as Forward; tests now pin that. `create_meter_reading_list`
+  takes the device's `role`, which `TelemetryManager` passes; a caller that builds
+  readings for a site meter itself must pass `role=DeviceRole.SITE_METER`.
+
 ## [0.16.0] - 2026-10-21
 
 ### Added
