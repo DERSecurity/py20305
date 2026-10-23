@@ -13,6 +13,12 @@ Nothing yet.
 
 ### Fixed
 
+- **`ResponseCode` numbers the superseded and resumed statuses as IEEE 2030.5
+  does (#78).** `SUPERSEDED_ALTERNATE_SERVER`, `SUPERSEDED_ALTERNATE_PROGRAM`
+  and `RESUMED` were 12, 13 and 14, one below the standard's 13, 14 and 15
+  (IEEE 2030.5-2018 and -2023, Response status). 12 is "Cannot be displayed",
+  a messaging status. A client posting one of these three statuses now posts
+  the standard's value.
 - **A site meter's real and reactive power carry the right sign under the signed
   load convention profile (#78).** `signed_load_convention` negated W and var for
   every device, because a DER's connector reports them positive for its output.
