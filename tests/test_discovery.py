@@ -1064,6 +1064,47 @@ async def test_discovery_prefers_the_csipaus_prefix_when_several_csipaus_namespa
     assert client.csipaus_namespace == "https://csipaus.org/ns/v1.3"
 
 
+@pytest.mark.parametrize(
+    ("raw_dcap", "expected"),
+    [
+        pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns"'
+            b' xmlns:csipaus="https://csipaus.org/ns/v1.3">'
+            b'<!-- xmlns:csipaus="https://csipaus.org/ns/v9" --></DeviceCapability>',
+            "https://csipaus.org/ns/v1.3",
+            id="declaration-text-in-a-comment",
+        ),
+        pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns">'
+            b'<ConnectionPoint xmlns="https://csipaus.org/ns/v1.3"/></DeviceCapability>',
+            "https://csipaus.org/ns/v1.3",
+            id="default-namespace-on-a-child",
+        ),
+        pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns"'
+            b' xmlns:csipaus="https://csipaus.org/ns/v1.3&quot;&gt;"/>',
+            NS_CSIPAUS,
+            id="uri-with-markup",
+        ),
+        pytest.param(
+            b'<DeviceCapability xmlns:csipaus="https://csipaus.org/ns/v1.3">',
+            NS_CSIPAUS,
+            id="malformed-body",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_discovery_reads_only_real_csipaus_namespace_declarations(raw_dcap, expected):
+    """Declarations come from the parser; a URI that is not plainly CSIP-AUS is not written."""
+    client = _MockClient(
+        {"/dcap": _make_dcap(edev_href=None), "/tm": _make_time()},
+        raw_bodies={"/dcap": raw_dcap},
+    )
+    await discover(client, DiscoveredState())  # type: ignore[arg-type]
+
+    assert client.csipaus_namespace == expected
+
+
 @pytest.mark.asyncio
 async def test_discovery_keeps_the_default_csipaus_namespace_for_a_standard_server():
     client = _MockClient(

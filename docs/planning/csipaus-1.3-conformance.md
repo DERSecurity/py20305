@@ -33,12 +33,17 @@ local name, so limits in either namespace already apply.
   models keep their pre-1.3 `Meta.namespace`. `to_xml` renders as today, then
   replaces the URI on the `csipaus` prefix declaration. The models stay
   registered for parsing, and no second set of classes is needed.
-- **D3. RateComponentLink is an optional field on the generated model.**
-  `TimeTariffInterval1` gains `rate_component_link: RateComponentLink | None`,
-  with a comment citing `csipaus-core-v1.3.xsd`. It is optional because plain
-  IEEE 2030.5 servers do not send it. Rejected: bundling the 1.3 schema files
-  (larger change, schema files are ask-first) and lenient parsing (hides real
-  schema errors from other servers).
+- **D3. RateComponentLink is an optional field on hand-written subclasses.**
+  `models/csipaus/tariff.py` subclasses the generated TimeTariffInterval and
+  TimeTariffIntervalList to add `rate_component_link: RateComponentLink | None`,
+  citing `csipaus-core-v1.3.xsd`, and discovery parses tariff lists with them.
+  The generated models stay as the schemas define them. The link is optional
+  because plain IEEE 2030.5 servers do not send it. Rejected: adding the field
+  to the generated `sep.py` (the models are generated, and a regeneration would
+  drop it), regenerating from the official 1.3 schema (it makes the link and
+  `ConsumptionTariffIntervalListSummary` mandatory, so lists from other servers
+  would fail to parse; schema files are also ask-first), and lenient parsing
+  (hides real schema errors from other servers).
 - **D4. Out of scope: copying the detected mode to the HTTP client.**
   `CsipClient.connect()` leaves `Sep2Client.csip_aus_mode` False after discovery
   detects CSIP-AUS, so a standalone client sends no extensions at all. Callers
@@ -48,15 +53,19 @@ local name, so limits in either namespace already apply.
 
 ## Changes
 
-- `client/discovery.py`: detect the declared CSIP-AUS namespace URI from the raw
-  DeviceCapability body, set `client.csipaus_namespace`, and keep setting
-  `state.csip_aus_mode` as today.
+- `client/discovery.py`: read the CSIP-AUS namespace declarations of the raw
+  DeviceCapability body with the XML parser (entities and network access off),
+  prefer the `csipaus` prefix, then another prefix, then a default namespace,
+  accept only `https://csipaus.org/ns` and paths under it, and set
+  `client.csipaus_namespace`. Keep setting `state.csip_aus_mode` as today.
+  Parse TimeTariffIntervalLists with the subclass from D3.
 - `client/http.py`: a `csipaus_namespace` property (default
   `https://csipaus.org/ns`), passed to `to_xml` on POST and PUT.
 - `telemetry/der_resource_manager.py`: pass the namespace on the DERCapability
   and DERSettings PUTs.
 - `xml/serialization.py`: `to_xml(..., csipaus_namespace=NS_CSIPAUS)`.
-- `models/sep/sep.py`: the optional `rate_component_link` field.
+- `models/csipaus/tariff.py`: the subclasses with the optional
+  `rate_component_link`.
 - Documentation and a changelog fragment.
 
 ## Acceptance criteria

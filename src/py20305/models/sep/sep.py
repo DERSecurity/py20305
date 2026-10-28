@@ -19694,10 +19694,6 @@ class TimeTariffInterval1(RandomizableEvent):
     :ivar tou_tier: Indicates the time of use tier related to the
         reading. If not specified, is assumed to be "0 - N/A".
     :ivar time_tariff_interval_r2_3:
-    :ivar rate_component_link: Not in IEEE 2030.5. CSIP-AUS 1.3
-        (csipaus-core-v1.3.xsd) extends TimeTariffInterval with a mandatory
-        RateComponentLink in the IEEE 2030.5 namespace, which the wildcard
-        does not admit. Optional here, because other servers do not send it.
     """
 
     class Meta:
@@ -19726,14 +19722,6 @@ class TimeTariffInterval1(RandomizableEvent):
         default=None,
         metadata={
             "name": "TimeTariffInterval_r2_3",
-            "type": "Element",
-            "namespace": "urn:ieee:std:2030.5:ns",
-        },
-    )
-    rate_component_link: None | RateComponentLink = field(
-        default=None,
-        metadata={
-            "name": "RateComponentLink",
             "type": "Element",
             "namespace": "urn:ieee:std:2030.5:ns",
         },

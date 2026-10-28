@@ -3,13 +3,13 @@
 import pytest
 from lxml import etree
 
+from py20305.models.csipaus.tariff import CsipausTimeTariffIntervalList
 from py20305.models.sep.sep import (
     Dercapability,
     DeviceCapability,
     EndDeviceList,
     Registration,
     Time,
-    TimeTariffIntervalList,
 )
 from py20305.telemetry.der_capability import build_der_capability
 from py20305.xml.serialization import (
@@ -288,7 +288,7 @@ _CSIPAUS_13_TTI_LIST = b"""<?xml version="1.0" encoding="UTF-8"?>
 
 def test_csipaus_13_time_tariff_interval_list_parses_with_its_rate_component_link():
     """A CSIP-AUS 1.3 interval carries a RateComponentLink, and the client reads it."""
-    intervals = from_xml(_CSIPAUS_13_TTI_LIST, TimeTariffIntervalList)
+    intervals = from_xml(_CSIPAUS_13_TTI_LIST, CsipausTimeTariffIntervalList)
     assert len(intervals.time_tariff_interval) == 1
     link = intervals.time_tariff_interval[0].rate_component_link
     assert link is not None
@@ -298,7 +298,7 @@ def test_csipaus_13_time_tariff_interval_list_parses_with_its_rate_component_lin
 def test_time_tariff_interval_without_rate_component_link_still_parses():
     """Plain IEEE 2030.5 servers send no RateComponentLink; it stays optional."""
     body = _CSIPAUS_13_TTI_LIST.replace(b'<RateComponentLink href="/tp/1/rc/1"/>', b"")
-    intervals = from_xml(body, TimeTariffIntervalList)
+    intervals = from_xml(body, CsipausTimeTariffIntervalList)
     assert intervals.time_tariff_interval[0].rate_component_link is None
 
 

@@ -6,7 +6,10 @@ import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any
+
+from lxml import etree
 
 from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
 from py20305.client.http import Sep2Client
@@ -21,6 +24,7 @@ from py20305.client.state import (
     TariffRateComponentState,
 )
 from py20305.client.timebase import observe_time_resource
+from py20305.models.csipaus.tariff import CsipausTimeTariffIntervalList
 from py20305.models.sep.sep import (
     DefaultDercontrol,
     Der1,
@@ -37,17 +41,14 @@ from py20305.models.sep.sep import (
     SubscriptionList,
     TariffProfileList,
     Time,
-    TimeTariffIntervalList,
 )
 from py20305.xml.serialization import NS_CSIPAUS
 
 logger = logging.getLogger(__name__)
 
-# A namespace declaration whose URI is a CSIP-AUS one. The URI is limited to
-# URI characters because the client writes it back into its own request bodies.
-_CSIPAUS_NS_DECL_RE = re.compile(
-    rb"""xmlns:([A-Za-z_][\w.-]*)\s*=\s*["'](https?://csipaus\.org/ns[\w.~:/?#@!$&()*+,;=%-]*)["']"""
-)
+# A CSIP-AUS namespace URI. Only these characters are accepted, because the
+# client writes the URI back into its own request bodies.
+_CSIPAUS_NS_RE = re.compile(r"https?://csipaus\.org/ns(/[A-Za-z0-9._~-]+)*")
 
 
 def _declared_csipaus_namespace(raw_dcap: bytes) -> str:
@@ -55,15 +56,28 @@ def _declared_csipaus_namespace(raw_dcap: bytes) -> str:
 
     CSIP-AUS 1.3 moved its extensions from ``https://csipaus.org/ns`` to
     ``https://csipaus.org/ns/v1.3`` (csipaus-ext-v1.3.xsd), and a server reads
-    only its own. A declaration on the ``csipaus`` prefix wins over others.
-    The pre-1.3 namespace when the server declares none.
+    only its own. The declarations are read with the XML parser, so text in a
+    comment is not one. A declaration on the ``csipaus`` prefix wins, then one
+    on another prefix, then a default namespace. The pre-1.3 namespace when the
+    server declares none.
     """
-    declared = {
-        prefix.decode(): uri.decode() for prefix, uri in _CSIPAUS_NS_DECL_RE.findall(raw_dcap)
-    }
-    if "csipaus" in declared:
-        return declared["csipaus"]
-    return next(iter(declared.values()), NS_CSIPAUS)
+    prefixed: dict[str, str] = {}
+    default: str | None = None
+    try:
+        for _event, (prefix, uri) in etree.iterparse(
+            BytesIO(raw_dcap), events=("start-ns",), resolve_entities=False, no_network=True
+        ):
+            if not _CSIPAUS_NS_RE.fullmatch(uri):
+                continue
+            if prefix:
+                prefixed.setdefault(prefix, uri)
+            elif default is None:
+                default = uri
+    except etree.XMLSyntaxError:
+        return NS_CSIPAUS
+    if "csipaus" in prefixed:
+        return prefixed["csipaus"]
+    return next(iter(prefixed.values()), default or NS_CSIPAUS)
 
 
 def _paging_fault(exc: Sep2ProtocolError) -> bool:
@@ -336,7 +350,7 @@ async def _discover_rate_component(client: Sep2Client, rc: Any) -> TariffRateCom
     if tti_list_href:
         rc_state.tti_list_href = tti_list_href
         try:
-            tti_pages = await client.get_list(tti_list_href, TimeTariffIntervalList)
+            tti_pages = await client.get_list(tti_list_href, CsipausTimeTariffIntervalList)
             for tti_page in tti_pages:
                 rc_state.time_tariff_intervals.extend(tti_page.time_tariff_interval)
                 if getattr(tti_page, "subscribable", None):
