@@ -235,6 +235,7 @@ class DerResourceManager:
                     model,
                     server_2018_compat=self._client.server_2018_compat,
                     include_csipaus=self._client.csip_aus_mode,
+                    csipaus_namespace=self._client.csipaus_namespace,
                 ),
             )
             logger.debug("DERCapability PUT for %s", lfdi[:8])
@@ -319,6 +320,7 @@ class DerResourceManager:
                     model,
                     server_2018_compat=self._client.server_2018_compat,
                     include_csipaus=self._client.csip_aus_mode,
+                    csipaus_namespace=self._client.csipaus_namespace,
                 ),
             )
             state.last_settings_data = configuration

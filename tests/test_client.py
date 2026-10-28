@@ -196,6 +196,27 @@ async def test_put_includes_csipaus_when_mode_on(aiohttp_server):
     assert b"csipaus" in sent_bodies[0]
 
 
+async def test_put_declares_the_csipaus_namespace_the_server_uses(aiohttp_server):
+    """A client talking to a CSIP-AUS 1.3 server declares the 1.3 namespace."""
+    sent_bodies: list[bytes] = []
+
+    async def handler(request):
+        sent_bodies.append(await request.read())
+        return web.Response(status=204)
+
+    app = web.Application()
+    app.router.add_put("/res/1", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        client.csip_aus_mode = True
+        client.csipaus_namespace = "https://csipaus.org/ns/v1.3"
+        await client.put("/res/1", make_time())
+
+    assert b'xmlns:csipaus="https://csipaus.org/ns/v1.3"' in sent_bodies[0]
+    assert b'"https://csipaus.org/ns"' not in sent_bodies[0]
+
+
 async def test_get_with_body_returns_parsed_and_raw(aiohttp_server):
     """get_with_body returns both parsed model and raw bytes."""
     t = make_time(999, 3)

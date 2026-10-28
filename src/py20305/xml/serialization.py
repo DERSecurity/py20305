@@ -54,6 +54,7 @@ def to_xml(
     model: object,
     *,
     include_csipaus: bool = False,
+    csipaus_namespace: str = NS_CSIPAUS,
     server_2018_compat: bool = False,
 ) -> bytes:
     """Serialize a Pydantic model to IEEE 2030.5 XML bytes.
@@ -62,6 +63,10 @@ def to_xml(
         model: Pydantic model to serialize.
         include_csipaus: If True, include the CSIP-AUS namespace declaration.
             Only pass True when connected to a CSIP-AUS server.
+        csipaus_namespace: The namespace the CSIP-AUS extensions are written
+            in, the one the server declares. CSIP-AUS 1.3 moved them from
+            ``https://csipaus.org/ns`` to ``https://csipaus.org/ns/v1.3``, and a
+            server reads only its own. Applies when ``include_csipaus`` is True.
         server_2018_compat: If True, strip attributes from the root element
             that are not present in the IEEE 2030.5-2018 schema (schemaVer,
             subscribable on MirrorUsagePoint).
@@ -72,6 +77,13 @@ def to_xml(
     xml_str = _serializer.render(model, ns_map=ns_map)
     if include_csipaus and "<csipaus:" in xml_str:
         xml_str = _reorder_csipaus_extensions(xml_str)
+    if include_csipaus and csipaus_namespace != NS_CSIPAUS:
+        # The extension models are bound to the pre-1.3 URI; every extension
+        # element carries the csipaus prefix, so moving the prefix's one
+        # declaration moves them all.
+        xml_str = xml_str.replace(
+            f'xmlns:csipaus="{NS_CSIPAUS}"', f'xmlns:csipaus="{csipaus_namespace}"', 1
+        )
     if server_2018_compat:
         # Strip 2023-only attributes from the root element only.
         # Skip past the XML declaration (ends with "?>") to find the
