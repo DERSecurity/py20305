@@ -718,3 +718,12 @@ async def test_href_with_unencoded_space_is_still_sent_as_a_valid_uri(aiohttp_se
     async with Sep2Client(base_url) as client:
         await client.delete("/a b/c")
     assert seen == ["/a%20b/c"]
+
+
+def test_unicode_hostname_is_sent_in_idna_form():
+    """Keeping an href's escapes must not percent-encode the host: a Unicode
+    hostname still resolves through its IDNA form."""
+    from py20305.client.http import _wire_url
+
+    wire = _wire_url("https://münich.example:8443/derp/a1%3Battr/derc?s=0")
+    assert str(wire) == "https://xn--mnich-kva.example:8443/derp/a1%3Battr/derc?s=0"

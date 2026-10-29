@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, TypeVar
-from urllib.parse import SplitResult, quote, urljoin, urlparse, urlsplit
+from urllib.parse import SplitResult, quote, urljoin, urlparse, urlsplit, urlunsplit
 
 import aiohttp
 from yarl import URL
@@ -95,16 +95,19 @@ def _wire_url(url: str) -> URL:
     ``%3A`` to ``;`` and ``:``. That changes the href: a server that reads
     ``;`` as the start of a path parameter strips the rest of the segment and
     answers 404 for a resource it listed itself. Only characters that may not
-    appear in a URI at all are encoded here.
+    appear in a URI at all are encoded in the path and query.
+
+    The origin goes through yarl's ordinary parse, which validates it and
+    converts a Unicode hostname to its IDNA form; an encoded URL would do
+    neither.
     """
     try:
-        wire = URL(quote(url, safe=_URI_SAFE), encoded=True)
-        # An encoded URL parses its authority lazily; parse it now so a bad
-        # port surfaces here as InvalidURL, not later as a bare ValueError.
-        wire.explicit_port  # noqa: B018
-        return wire
+        parts = urlsplit(url)
+        origin = URL(f"{parts.scheme}://{parts.netloc}")
     except ValueError as exc:
-        raise aiohttp.InvalidURL(url, str(exc)) from exc
+        raise aiohttp.InvalidURL(url) from exc
+    rest = urlunsplit(("", "", parts.path, parts.query, ""))
+    return URL(f"{origin}{quote(rest, safe=_URI_SAFE)}", encoded=True)
 
 
 def _port(url: SplitResult) -> int | None:
