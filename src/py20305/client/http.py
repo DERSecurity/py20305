@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import ssl
 import time
 from collections.abc import Awaitable, Callable
@@ -86,6 +87,7 @@ _RAW_PROXY_METHODS = frozenset({"GET", "POST", "PUT", "DELETE"})
 # RFC 3986 reserved characters plus "%", which quote() must leave alone so the
 # escapes already in an href survive.
 _URI_SAFE = "!#$%&'()*+,/:;=?@[]~"
+_STRAY_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 
 def _wire_url(url: str) -> URL:
@@ -95,7 +97,8 @@ def _wire_url(url: str) -> URL:
     ``%3A`` to ``;`` and ``:``. That changes the href: a server that reads
     ``;`` as the start of a path parameter strips the rest of the segment and
     answers 404 for a resource it listed itself. Only characters that may not
-    appear in a URI at all are encoded in the path and query.
+    appear in a URI at all are encoded in the path and query, along with a
+    ``%`` that does not start an escape.
 
     The origin goes through yarl's ordinary parse, which validates it and
     converts a Unicode hostname to its IDNA form; an encoded URL would do
@@ -103,10 +106,12 @@ def _wire_url(url: str) -> URL:
     """
     try:
         parts = urlsplit(url)
+        if not parts.scheme or not parts.netloc:
+            raise ValueError("not an absolute URL")
         origin = URL(f"{parts.scheme}://{parts.netloc}")
     except ValueError as exc:
         raise aiohttp.InvalidURL(url) from exc
-    rest = urlunsplit(("", "", parts.path, parts.query, ""))
+    rest = _STRAY_PERCENT.sub("%25", urlunsplit(("", "", parts.path, parts.query, "")))
     return URL(f"{origin}{quote(rest, safe=_URI_SAFE)}", encoded=True)
 
 

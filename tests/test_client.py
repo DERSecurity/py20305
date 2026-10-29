@@ -727,3 +727,21 @@ def test_unicode_hostname_is_sent_in_idna_form():
 
     wire = _wire_url("https://münich.example:8443/derp/a1%3Battr/derc?s=0")
     assert str(wire) == "https://xn--mnich-kva.example:8443/derp/a1%3Battr/derc?s=0"
+
+
+@pytest.mark.parametrize(
+    ("href", "sent"),
+    [("/a%zz/b", "/a%25zz/b"), ("/a%", "/a%25"), ("/a%3B%2/b", "/a%3B%252/b")],
+)
+def test_stray_percent_is_encoded(href, sent):
+    """A "%" that does not start an escape is encoded, so the request-target
+    stays valid while real escapes are kept."""
+    from py20305.client.http import _wire_url
+
+    assert _wire_url(f"https://h.example{href}").raw_path_qs == sent
+
+
+async def test_get_raw_relative_url_reports_the_url_as_given():
+    async with Sep2Client("https://server.example.com") as client:
+        result = await client.get_raw("/dcap")
+    assert result == {"status_code": 0, "error": "/dcap"}
