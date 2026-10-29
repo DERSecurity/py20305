@@ -1,8 +1,17 @@
 """Tests for XML serialization/deserialization."""
 
 import pytest
+from lxml import etree
 
-from py20305.models.sep.sep import DeviceCapability, EndDeviceList, Registration, Time
+from py20305.models.csipaus.tariff import CsipausTimeTariffIntervalList
+from py20305.models.sep.sep import (
+    Dercapability,
+    DeviceCapability,
+    EndDeviceList,
+    Registration,
+    Time,
+)
+from py20305.telemetry.der_capability import build_der_capability
 from py20305.xml.serialization import (
     APPLICATION_SEP_XML,
     XmlParseError,
@@ -250,3 +259,64 @@ def test_csipaus_limits_parse_as_typed_models_in_a_fresh_process():
         [sys.executable, "-c", script], capture_output=True, text=True, check=True, timeout=120
     )
     assert result.stdout.strip() == "OpModExpLimW"
+
+
+# --- CSIP-AUS 1.3 ---
+
+CSIPAUS_V13 = "https://csipaus.org/ns/v1.3"
+
+# csipaus-core-v1.3.xsd extends TimeTariffInterval with a csipaus summary and a
+# mandatory RateComponentLink in the IEEE 2030.5 namespace.
+_CSIPAUS_13_TTI_LIST = b"""<?xml version="1.0" encoding="UTF-8"?>
+<TimeTariffIntervalList xmlns="urn:ieee:std:2030.5:ns"
+    xmlns:csipaus="https://csipaus.org/ns/v1.3" href="/tp/1/rc/1/tti" all="1" results="1">
+  <TimeTariffInterval href="/tp/1/rc/1/tti/1">
+    <mRID>0123456789ABCDEF0123456789ABCDEF</mRID>
+    <creationTime>1700000000</creationTime>
+    <EventStatus><currentStatus>0</currentStatus><dateTime>1700000000</dateTime>
+      <potentiallySuperseded>false</potentiallySuperseded></EventStatus>
+    <interval><duration>3600</duration><start>1700000000</start></interval>
+    <ConsumptionTariffIntervalListLink href="/tp/1/rc/1/tti/1/cti" all="1"/>
+    <touTier>1</touTier>
+    <csipaus:ConsumptionTariffIntervalListSummary>
+      <csipaus:price>12</csipaus:price>
+    </csipaus:ConsumptionTariffIntervalListSummary>
+    <RateComponentLink href="/tp/1/rc/1"/>
+  </TimeTariffInterval>
+</TimeTariffIntervalList>"""
+
+
+def test_csipaus_13_time_tariff_interval_list_parses_with_its_rate_component_link():
+    """A CSIP-AUS 1.3 interval carries a RateComponentLink, and the client reads it."""
+    intervals = from_xml(_CSIPAUS_13_TTI_LIST, CsipausTimeTariffIntervalList)
+    assert len(intervals.time_tariff_interval) == 1
+    link = intervals.time_tariff_interval[0].rate_component_link
+    assert link is not None
+    assert link.href == "/tp/1/rc/1"
+
+
+def test_time_tariff_interval_without_rate_component_link_still_parses():
+    """Plain IEEE 2030.5 servers send no RateComponentLink; it stays optional."""
+    body = _CSIPAUS_13_TTI_LIST.replace(b'<RateComponentLink href="/tp/1/rc/1"/>', b"")
+    intervals = from_xml(body, CsipausTimeTariffIntervalList)
+    assert intervals.time_tariff_interval[0].rate_component_link is None
+
+
+def _doe_modes_supported_capability() -> Dercapability:
+    return build_der_capability({"WMaxRtg": 5000}, csip_aus_mode=True)
+
+
+def test_to_xml_writes_csipaus_extensions_in_the_given_namespace():
+    """A CSIP-AUS 1.3 server reads the extensions only in its own namespace."""
+    body = to_xml(
+        _doe_modes_supported_capability(), include_csipaus=True, csipaus_namespace=CSIPAUS_V13
+    )
+    root = etree.fromstring(body)
+    assert root.find(f"{{{CSIPAUS_V13}}}doeModesSupported") is not None
+    assert b'"https://csipaus.org/ns"' not in body
+
+
+def test_to_xml_keeps_the_pre_13_csipaus_namespace_by_default():
+    body = to_xml(_doe_modes_supported_capability(), include_csipaus=True)
+    root = etree.fromstring(body)
+    assert root.find("{https://csipaus.org/ns}doeModesSupported") is not None

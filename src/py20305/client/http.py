@@ -45,6 +45,7 @@ from py20305.client.tls import (
 )
 from py20305.xml.serialization import (
     APPLICATION_SEP_XML,
+    NS_CSIPAUS,
     XmlParseError,
     from_xml,
     to_xml,
@@ -222,6 +223,7 @@ class Sep2Client:
         self._forwarder = forwarder
         self._traffic_recorder = traffic_recorder
         self._csip_aus_mode = False
+        self._csipaus_namespace = NS_CSIPAUS
         self._timebase = timebase or ServerTimebase()
         self._server_2018_compat = server_2018_compat
         self._always_send_alarm_status = always_send_alarm_status
@@ -418,6 +420,15 @@ class Sep2Client:
     @csip_aus_mode.setter
     def csip_aus_mode(self, value: bool) -> None:
         self._csip_aus_mode = value
+
+    @property
+    def csipaus_namespace(self) -> str:
+        """The namespace CSIP-AUS extensions are written in; discovery sets it."""
+        return self._csipaus_namespace
+
+    @csipaus_namespace.setter
+    def csipaus_namespace(self, value: str) -> None:
+        self._csipaus_namespace = value
 
     @property
     def server_2018_compat(self) -> bool:
@@ -1313,6 +1324,7 @@ class Sep2Client:
             body = to_xml(
                 resource,
                 include_csipaus=self._csip_aus_mode,
+                csipaus_namespace=self._csipaus_namespace,
                 server_2018_compat=self._server_2018_compat,
             )
 
@@ -1405,6 +1417,7 @@ class Sep2Client:
             body = to_xml(
                 resource,
                 include_csipaus=self._csip_aus_mode,
+                csipaus_namespace=self._csipaus_namespace,
                 server_2018_compat=self._server_2018_compat,
             )
 

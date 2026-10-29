@@ -13,6 +13,7 @@ from py20305.client.discovery import (
 )
 from py20305.client.errors import Sep2ProtocolError
 from py20305.client.state import DiscoveredState
+from py20305.xml.serialization import from_xml
 
 
 class _MockClient:
@@ -190,3 +191,52 @@ async def test_rate_component_without_intervals():
     component = state.tariff_profiles["/tp/1"].rate_components[0]
     assert component.time_tariff_intervals == []
     assert component.tti_list_subscribable is False
+
+
+_CSIPAUS_13_TTI_LIST = b"""<?xml version="1.0" encoding="UTF-8"?>
+<TimeTariffIntervalList xmlns="urn:ieee:std:2030.5:ns"
+    xmlns:csipaus="https://csipaus.org/ns/v1.3" href="/tp/1/rc/1/tti" all="1" results="1">
+  <TimeTariffInterval href="/tp/1/rc/1/tti/1">
+    <mRID>0123456789ABCDEF0123456789ABCDEF</mRID>
+    <creationTime>1700000000</creationTime>
+    <EventStatus><currentStatus>0</currentStatus><dateTime>1700000000</dateTime>
+      <potentiallySuperseded>false</potentiallySuperseded></EventStatus>
+    <interval><duration>3600</duration><start>1700000000</start></interval>
+    <ConsumptionTariffIntervalListLink href="/tp/1/rc/1/tti/1/cti" all="1"/>
+    <touTier>1</touTier>
+    <csipaus:ConsumptionTariffIntervalListSummary>
+      <csipaus:price>12</csipaus:price>
+    </csipaus:ConsumptionTariffIntervalListSummary>
+    <RateComponentLink href="/tp/1/rc/1"/>
+  </TimeTariffInterval>
+</TimeTariffIntervalList>"""
+
+
+class _ParsingClient(_MockClient):
+    """get_list parses a raw body into the model the walk asks for."""
+
+    async def get_list(self, path: str, model_type: type) -> list[Any]:
+        val = self._responses.get(path.split("?")[0])
+        if isinstance(val, bytes):
+            return [from_xml(val, model_type)]
+        return await super().get_list(path, model_type)
+
+
+@pytest.mark.asyncio
+async def test_csipaus_13_intervals_are_discovered():
+    """A CSIP-AUS 1.3 interval carries a RateComponentLink; the walk still finds it."""
+    tp = _tariff_profile("/tp/1", "/tp/1/rc")
+    rc = _rate_component("/tp/1/rc/1", "/tp/1/rc/1/tti")
+    client = _ParsingClient(
+        {
+            "/tp": NS(poll_rate=900, tariff_profile=[tp]),
+            "/tp/1/rc": NS(rate_component=[rc]),
+            "/tp/1/rc/1/tti": _CSIPAUS_13_TTI_LIST,
+        }
+    )
+    state = DiscoveredState()
+    await _discover_tariffs_for_fsa(client, _fsa("/fsa/1", "/tp"), state)
+
+    intervals = state.tariff_profiles["/tp/1"].rate_components[0].time_tariff_intervals
+    assert [tti.href for tti in intervals] == ["/tp/1/rc/1/tti/1"]
+    assert intervals[0].rate_component_link.href == "/tp/1/rc/1"

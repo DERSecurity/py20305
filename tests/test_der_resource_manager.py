@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from lxml import etree
 
 from py20305.telemetry.der_resource_manager import DerResourceManager
 
@@ -117,6 +118,25 @@ class TestDerResourceManagerCapabilityCycle:
         assert path == "/cap"
         assert b"<DERCapability" in body
         assert b"<rtgMaxW>" in body
+
+    @pytest.mark.asyncio
+    async def test_capability_put_to_a_csipaus_13_server_uses_its_namespace(self) -> None:
+        """A CSIP-AUS 1.3 server refuses doeModesSupported in the pre-1.3 namespace."""
+        client = AsyncMock()
+        client.put_bytes = AsyncMock(return_value=200)
+        client.server_2018_compat = False
+        client.csip_aus_mode = True
+        client.csipaus_namespace = "https://csipaus.org/ns/v1.3"
+        connector = _make_connector(nameplate={"WMaxRtg": 15000})
+        manager = DerResourceManager(client, _aresolver(connector))
+
+        manager.start_device("ab", "/cap", None, None)
+        await manager._capability_cycle("ab")
+
+        _, body = client.put_bytes.call_args[0]
+        root = etree.fromstring(body)
+        assert root.find("{https://csipaus.org/ns/v1.3}doeModesSupported") is not None
+        assert b'"https://csipaus.org/ns"' not in body
 
     @pytest.mark.asyncio
     async def test_capability_error_does_not_propagate(self) -> None:

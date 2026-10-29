@@ -123,7 +123,10 @@ Swap in `SunSpecDeviceConfig` when you have one. Full walkthrough in the
 validation runs against them. The generated bindings track 2023; a
 `server_2018_compat` flag adjusts behavior for servers still on 2018.
 
-**CSIP-AUS**, including DOE (dynamic operating envelope) limits.
+**CSIP-AUS**, including DOE (dynamic operating envelope) limits. The client
+writes its CSIP-AUS extensions in the namespace the server declares, so it works
+with servers on CSIP-AUS 1.3 (`https://csipaus.org/ns/v1.3`) and on earlier
+versions (`https://csipaus.org/ns`).
 
 The client maps one certificate identity to one end device. It registers and
 drives that device, and does not fan a server-side EndDevice out across several

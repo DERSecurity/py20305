@@ -42,7 +42,10 @@ protocol exchange to a monitoring system over MQTT.
   the generated bindings track 2023, and a `server_2018_compat` flag adjusts
   behavior for servers still on 2018.
 - **CSIP-AUS.** The Australian Common Smart Inverter Profile, including DOE
-  (dynamic operating envelope) limits.
+  (dynamic operating envelope) limits. The client writes its CSIP-AUS
+  extensions in the namespace the server declares, so it works with servers on
+  CSIP-AUS 1.3 (`https://csipaus.org/ns/v1.3`) and on earlier versions
+  (`https://csipaus.org/ns`).
 
 The client maps one certificate identity to one end device: it registers and
 drives that device, rather than fanning one server-side EndDevice out across
