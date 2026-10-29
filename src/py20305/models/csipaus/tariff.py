@@ -6,6 +6,11 @@ such field, and its ``xs:any`` wildcard admits only other namespaces, so a 1.3
 TimeTariffIntervalList does not parse into it. These hand-written subclasses add
 the link as optional, because plain IEEE 2030.5 servers do not send it; the
 generated models stay as the schemas define them.
+
+Discovery parses tariff lists with these classes by name. A Notification's
+Resource is resolved by ``xsi:type`` instead, and resolves to these classes only
+because they are registered; ``xml/serialization.py`` imports this module so the
+registration does not depend on import order.
 """
 
 from __future__ import annotations

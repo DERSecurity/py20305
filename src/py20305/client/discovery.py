@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 # A CSIP-AUS namespace URI. Only these characters are accepted, because the
 # client writes the URI back into its own request bodies.
-_CSIPAUS_NS_RE = re.compile(r"https?://csipaus\.org/ns(/[A-Za-z0-9._~-]+)*")
+_CSIPAUS_NS_RE = re.compile(r"https://csipaus\.org/ns(/[A-Za-z0-9._~-]+)*")
 
 
 def _declared_csipaus_namespace(raw_dcap: bytes) -> str:

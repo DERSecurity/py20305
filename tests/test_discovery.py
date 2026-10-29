@@ -1087,6 +1087,12 @@ async def test_discovery_prefers_the_csipaus_prefix_when_several_csipaus_namespa
             id="uri-with-markup",
         ),
         pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns"'
+            b' xmlns:csipaus="http://csipaus.org/ns/v1.3"/>',
+            NS_CSIPAUS,
+            id="http-uri",
+        ),
+        pytest.param(
             b'<DeviceCapability xmlns:csipaus="https://csipaus.org/ns/v1.3">',
             NS_CSIPAUS,
             id="malformed-body",
