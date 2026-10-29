@@ -58,6 +58,7 @@ from py20305.models.sep.sep import (
     TimeOffsetType,
     TimeType,
 )
+from py20305.xml.serialization import NS_CSIPAUS
 
 
 def _make_dcap(
@@ -1023,6 +1024,102 @@ async def test_csip_aus_not_detected_for_standard_server():
     await discover(client, state)  # type: ignore[arg-type]
 
     assert state.csip_aus_mode is False
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        (b"https://csipaus.org/ns/v1.3", "https://csipaus.org/ns/v1.3"),
+        (b"https://csipaus.org/ns", "https://csipaus.org/ns"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_discovery_records_the_csipaus_namespace_the_server_declares(declared, expected):
+    """The client writes its CSIP-AUS extensions in the namespace the server reads."""
+    raw_dcap = (
+        b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="' + declared + b'"/>'
+    )
+    client = _MockClient(
+        {"/dcap": _make_dcap(edev_href=None), "/tm": _make_time()},
+        raw_bodies={"/dcap": raw_dcap},
+    )
+    await discover(client, DiscoveredState())  # type: ignore[arg-type]
+
+    assert client.csipaus_namespace == expected
+
+
+@pytest.mark.asyncio
+async def test_discovery_prefers_the_csipaus_prefix_when_several_csipaus_namespaces_are_declared():
+    raw_dcap = (
+        b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns"'
+        b' xmlns:storage="https://csipaus.org/ns/v1.3-beta/storage"'
+        b' xmlns:csipaus="https://csipaus.org/ns/v1.3"/>'
+    )
+    client = _MockClient(
+        {"/dcap": _make_dcap(edev_href=None), "/tm": _make_time()},
+        raw_bodies={"/dcap": raw_dcap},
+    )
+    await discover(client, DiscoveredState())  # type: ignore[arg-type]
+
+    assert client.csipaus_namespace == "https://csipaus.org/ns/v1.3"
+
+
+@pytest.mark.parametrize(
+    ("raw_dcap", "expected"),
+    [
+        pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns"'
+            b' xmlns:csipaus="https://csipaus.org/ns/v1.3">'
+            b'<!-- xmlns:csipaus="https://csipaus.org/ns/v9" --></DeviceCapability>',
+            "https://csipaus.org/ns/v1.3",
+            id="declaration-text-in-a-comment",
+        ),
+        pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns">'
+            b'<ConnectionPoint xmlns="https://csipaus.org/ns/v1.3"/></DeviceCapability>',
+            "https://csipaus.org/ns/v1.3",
+            id="default-namespace-on-a-child",
+        ),
+        pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns"'
+            b' xmlns:csipaus="https://csipaus.org/ns/v1.3&quot;&gt;"/>',
+            NS_CSIPAUS,
+            id="uri-with-markup",
+        ),
+        pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns"'
+            b' xmlns:csipaus="http://csipaus.org/ns/v1.3"/>',
+            NS_CSIPAUS,
+            id="http-uri",
+        ),
+        pytest.param(
+            b'<DeviceCapability xmlns:csipaus="https://csipaus.org/ns/v1.3">',
+            NS_CSIPAUS,
+            id="malformed-body",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_discovery_reads_only_real_csipaus_namespace_declarations(raw_dcap, expected):
+    """Declarations come from the parser; a URI that is not plainly CSIP-AUS is not written."""
+    client = _MockClient(
+        {"/dcap": _make_dcap(edev_href=None), "/tm": _make_time()},
+        raw_bodies={"/dcap": raw_dcap},
+    )
+    await discover(client, DiscoveredState())  # type: ignore[arg-type]
+
+    assert client.csipaus_namespace == expected
+
+
+@pytest.mark.asyncio
+async def test_discovery_keeps_the_default_csipaus_namespace_for_a_standard_server():
+    client = _MockClient(
+        {"/dcap": _make_dcap(edev_href=None), "/tm": _make_time()},
+        raw_bodies={"/dcap": b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns"/>'},
+    )
+    await discover(client, DiscoveredState())  # type: ignore[arg-type]
+
+    assert client.csipaus_namespace == NS_CSIPAUS
 
 
 @pytest.mark.asyncio

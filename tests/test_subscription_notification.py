@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 from unittest.mock import AsyncMock
 
 import pytest
@@ -1020,3 +1022,43 @@ class TestNotificationSuspension:
         assert drained is False
         # Suspended regardless: new notifications stop from the moment of the call.
         assert server.suspended is True
+
+
+_CSIPAUS_13_TARIFF_NOTIFICATION = """\
+<Notification xmlns="urn:ieee:std:2030.5:ns"
+              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+              xmlns:csipaus="https://csipaus.org/ns/v1.3">
+  <subscribedResource>/tp/1/rc/1/tti</subscribedResource>
+  <Resource xsi:type="TimeTariffIntervalList" href="/tp/1/rc/1/tti" all="1" results="1">
+    <TimeTariffInterval href="/tp/1/rc/1/tti/1">
+      <mRID>0123456789ABCDEF0123456789ABCDEF</mRID>
+      <creationTime>1700000000</creationTime>
+      <EventStatus><currentStatus>0</currentStatus><dateTime>1700000000</dateTime>
+        <potentiallySuperseded>false</potentiallySuperseded></EventStatus>
+      <interval><duration>3600</duration><start>1700000000</start></interval>
+      <touTier>1</touTier>
+      <csipaus:ConsumptionTariffIntervalListSummary>
+        <csipaus:price>12</csipaus:price>
+      </csipaus:ConsumptionTariffIntervalListSummary>
+      <RateComponentLink href="/tp/1/rc/1"/>
+    </TimeTariffInterval>
+  </Resource>
+  <status>0</status>
+  <subscriptionURI>https://server:8443/tp/1/rc/1/sub/1</subscriptionURI>
+</Notification>
+"""
+
+
+def test_csipaus_13_tariff_notification_parses_in_a_fresh_interpreter():
+    """The Resource is resolved by xsi:type; the 1.3 subclass must be registered
+    by the parser itself, not by whichever module happened to import it first."""
+    script = (
+        "from py20305.subscription.notification_server import parse_notification\n"
+        f"n = parse_notification({_CSIPAUS_13_TARIFF_NOTIFICATION.encode()!r})\n"
+        "print(n.resource.time_tariff_interval[0].rate_component_link.href)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "/tp/1/rc/1"

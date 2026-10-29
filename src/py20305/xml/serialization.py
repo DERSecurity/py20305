@@ -13,8 +13,10 @@ from xsdata_pydantic.bindings import XmlContext, XmlParser, XmlSerializer
 # The parser types an extension element (the CSIP-AUS limits in a
 # DERControlBase) only when its class is already imported, and leaves it a
 # generic element otherwise. Importing the models here makes that independent
-# of which other module happened to load first.
-from py20305.models.csipaus import csipaus_ext  # noqa: F401
+# of which other module happened to load first. The same holds for the
+# CSIP-AUS 1.3 tariff subclasses: a Notification's Resource is resolved by
+# xsi:type, and only a registered subclass admits the 1.3 RateComponentLink.
+from py20305.models.csipaus import csipaus_ext, tariff  # noqa: F401
 
 APPLICATION_SEP_XML = "application/sep+xml"
 
@@ -54,6 +56,7 @@ def to_xml(
     model: object,
     *,
     include_csipaus: bool = False,
+    csipaus_namespace: str = NS_CSIPAUS,
     server_2018_compat: bool = False,
 ) -> bytes:
     """Serialize a Pydantic model to IEEE 2030.5 XML bytes.
@@ -62,6 +65,10 @@ def to_xml(
         model: Pydantic model to serialize.
         include_csipaus: If True, include the CSIP-AUS namespace declaration.
             Only pass True when connected to a CSIP-AUS server.
+        csipaus_namespace: The namespace the CSIP-AUS extensions are written
+            in, the one the server declares. CSIP-AUS 1.3 moved them from
+            ``https://csipaus.org/ns`` to ``https://csipaus.org/ns/v1.3``, and a
+            server reads only its own. Applies when ``include_csipaus`` is True.
         server_2018_compat: If True, strip attributes from the root element
             that are not present in the IEEE 2030.5-2018 schema (schemaVer,
             subscribable on MirrorUsagePoint).
@@ -72,6 +79,13 @@ def to_xml(
     xml_str = _serializer.render(model, ns_map=ns_map)
     if include_csipaus and "<csipaus:" in xml_str:
         xml_str = _reorder_csipaus_extensions(xml_str)
+    if include_csipaus and csipaus_namespace != NS_CSIPAUS:
+        # The extension models are bound to the pre-1.3 URI; every extension
+        # element carries the csipaus prefix, so moving the prefix's one
+        # declaration moves them all.
+        xml_str = xml_str.replace(
+            f'xmlns:csipaus="{NS_CSIPAUS}"', f'xmlns:csipaus="{csipaus_namespace}"', 1
+        )
     if server_2018_compat:
         # Strip 2023-only attributes from the root element only.
         # Skip past the XML declaration (ends with "?>") to find the
