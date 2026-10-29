@@ -13,7 +13,23 @@ Nothing yet.
 
 ### Fixed
 
-- **An href is requested exactly as the server wrote it, percent-escapes included (#81).** aiohttp re-quotes a URL given as a string, which decoded escapes such as `%3B` and `%3A` in a server's href to `;` and `:` before the request was sent. A server that reads `;` as the start of a path parameter then stripped the rest of the segment and answered 404 for a resource it had listed itself, while Live Traffic showed the href as written. Every request now sends the href's escapes unchanged, and only characters that cannot appear in a URI at all are encoded.
+- **CSIP-AUS extensions are written in the namespace the server declares (#80).**
+  `doeModesSupported`, `doeModesEnabled` and `ConnectionPoint` were always written
+  in `https://csipaus.org/ns`. CSIP-AUS 1.3 (`csipaus-ext-v1.3.xsd`) moved them to
+  `https://csipaus.org/ns/v1.3`, so a 1.3 server refused the DERCapability PUT or
+  dropped the extension. Discovery now records the CSIP-AUS namespace the
+  DeviceCapability declares, and `Sep2Client.csipaus_namespace` holds it. A server
+  that declares the pre-1.3 namespace, or none, receives the same bodies as before.
+
+  **A CSIP-AUS 1.3 TimeTariffIntervalList parses (#80).** CSIP-AUS 1.3
+  (`csipaus-core-v1.3.xsd`) adds a mandatory `RateComponentLink` to each
+  TimeTariffInterval. The model had no such field, so the list failed to parse and
+  the client found no tariff intervals. Discovery now parses tariff lists with
+  `CsipausTimeTariffIntervalList` (`py20305.models.csipaus.tariff`), whose intervals
+  have an optional `rate_component_link`, left empty for servers that do not send
+  it.
+
+- **An href is requested exactly as the server wrote it, percent-escapes included (#81).** aiohttp re-quotes a URL given as a string, which decoded escapes such as `%3B` and `%3A` in a server's href to `;` and `:` before the request was sent. A server that reads `;` as the start of a path parameter then stripped the rest of the segment and answered 404 for a resource it had listed itself, while Live Traffic showed the href as written. Every request now sends the href's escapes unchanged, and only characters that cannot appear in a URI at all, or a `%` that does not start an escape, are encoded.
 
 ## [0.16.1] - 2026-10-23
 
