@@ -30,6 +30,7 @@ dependencies = [
     "pydantic>=2.6",
     "xsdata-pydantic>=24.0",
     "lxml>=5.0",
+    "yarl>=1.9",
 ]
 
 [project.urls]

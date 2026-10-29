@@ -652,3 +652,69 @@ async def test_location_under_prefixed_base_url(aiohttp_server, location, href, 
         assert loc == href
         await client.post_bytes(loc, b"<MirrorMeterReading/>")
     assert hits == [reached]
+
+
+_ENCODED_HREF = "/derp/a1%3Battr%3Apkw/derc?s=0&l=50"
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c, href, base: c.get(href, Time),
+        lambda c, href, base: c.get_with_body(href, Time),
+        lambda c, href, base: c.post(href, make_time()),
+        lambda c, href, base: c.post_bytes(href, b"<Time/>"),
+        lambda c, href, base: c.put(href, make_time()),
+        lambda c, href, base: c.put_bytes(href, b"<Time/>"),
+        lambda c, href, base: c.delete(href),
+        lambda c, href, base: c.get_raw(f"{base}{href}"),
+        lambda c, href, base: c.request_raw("PUT", f"{base}{href}", "{}"),
+    ],
+    ids=[
+        "get",
+        "get_with_body",
+        "post",
+        "post_bytes",
+        "put",
+        "put_bytes",
+        "delete",
+        "get_raw",
+        "request_raw",
+    ],
+)
+async def test_href_percent_encoding_reaches_the_wire(aiohttp_server, call):
+    """An href is requested exactly as the server wrote it. Decoding %3B to
+    ";" turns part of a path segment into a path parameter, which a server
+    may strip and then answer 404 for a resource it listed itself."""
+    seen: list[str] = []
+    xml = to_xml(make_time())
+
+    async def handler(request):
+        seen.append(request.raw_path)
+        if request.method == "GET":
+            return web.Response(body=xml, content_type="application/sep+xml")
+        return web.Response(status=204)
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        await call(client, _ENCODED_HREF, base_url)
+    assert seen == [_ENCODED_HREF]
+
+
+async def test_href_with_unencoded_space_is_still_sent_as_a_valid_uri(aiohttp_server):
+    seen: list[str] = []
+
+    async def handler(request):
+        seen.append(request.raw_path)
+        return web.Response(status=204)
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    async with Sep2Client(base_url) as client:
+        await client.delete("/a b/c")
+    assert seen == ["/a%20b/c"]

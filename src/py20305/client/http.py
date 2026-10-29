@@ -12,9 +12,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, TypeVar
-from urllib.parse import SplitResult, urljoin, urlparse, urlsplit
+from urllib.parse import SplitResult, quote, urljoin, urlparse, urlsplit
 
 import aiohttp
+from yarl import URL
 
 from py20305.client.comm_loss_simulation import (
     CommLossSimulation,
@@ -80,6 +81,30 @@ _DEFAULT_TIMEOUT = aiohttp.ClientTimeout(sock_connect=5, sock_read=15)
 # passthrough: the value reaches aiohttp's request line, and the debugger this
 # backs is aimed at a live utility server.
 _RAW_PROXY_METHODS = frozenset({"GET", "POST", "PUT", "DELETE"})
+
+
+# RFC 3986 reserved characters plus "%", which quote() must leave alone so the
+# escapes already in an href survive.
+_URI_SAFE = "!#$%&'()*+,/:;=?@[]~"
+
+
+def _wire_url(url: str) -> URL:
+    """Return ``url`` as the URL to send, keeping its percent-escapes as written.
+
+    aiohttp given a string re-quotes it, decoding escapes such as ``%3B`` and
+    ``%3A`` to ``;`` and ``:``. That changes the href: a server that reads
+    ``;`` as the start of a path parameter strips the rest of the segment and
+    answers 404 for a resource it listed itself. Only characters that may not
+    appear in a URI at all are encoded here.
+    """
+    try:
+        wire = URL(quote(url, safe=_URI_SAFE), encoded=True)
+        # An encoded URL parses its authority lazily; parse it now so a bad
+        # port surfaces here as InvalidURL, not later as a bare ValueError.
+        wire.explicit_port  # noqa: B018
+        return wire
+    except ValueError as exc:
+        raise aiohttp.InvalidURL(url, str(exc)) from exc
 
 
 def _port(url: SplitResult) -> int | None:
@@ -914,7 +939,7 @@ class Sep2Client:
         session = self._get_session()
         logger.debug("GET %s", url)
         try:
-            async with session.get(url, ssl=self._ssl, allow_redirects=False) as resp:
+            async with session.get(_wire_url(url), ssl=self._ssl, allow_redirects=False) as resp:
                 logger.debug("GET %s -> %s", url, resp.status)
                 body = await resp.text()
                 headers = dict(resp.headers.items())
@@ -999,7 +1024,7 @@ class Sep2Client:
         try:
             async with session.request(
                 verb,
-                url,
+                _wire_url(url),
                 data=data,
                 headers=headers_out,
                 ssl=self._ssl,
@@ -1041,7 +1066,9 @@ class Sep2Client:
             url = f"{self._base_url}{path}"
             logger.debug("GET %s", url)
             try:
-                async with session.get(url, ssl=self._ssl, allow_redirects=False) as resp:
+                async with session.get(
+                    _wire_url(url), ssl=self._ssl, allow_redirects=False
+                ) as resp:
                     logger.debug("GET %s -> %s", url, resp.status)
                     self._check_redirect_or_rate_limit(resp, "GET", path)
                     if resp.status == 204:
@@ -1137,7 +1164,9 @@ class Sep2Client:
             url = f"{self._base_url}{path}"
             logger.debug("GET %s", url)
             try:
-                async with session.get(url, ssl=self._ssl, allow_redirects=False) as resp:
+                async with session.get(
+                    _wire_url(url), ssl=self._ssl, allow_redirects=False
+                ) as resp:
                     logger.debug("GET %s -> %s", url, resp.status)
                     self._check_redirect_or_rate_limit(resp, "GET", path)
                     if resp.status == 204:
@@ -1290,7 +1319,7 @@ class Sep2Client:
 
             logger.debug("POST %s", url)
             try:
-                async with session.post(url, data=body, ssl=self._ssl) as resp:
+                async with session.post(_wire_url(url), data=body, ssl=self._ssl) as resp:
                     logger.debug("POST %s -> %s", url, resp.status)
                     await self._check_and_record_write("POST", path, resp, (200, 201, 204))
                     return self._location_href(resp, path)
@@ -1318,7 +1347,7 @@ class Sep2Client:
 
             logger.debug("POST %s", url)
             try:
-                async with session.post(url, data=body, ssl=self._ssl) as resp:
+                async with session.post(_wire_url(url), data=body, ssl=self._ssl) as resp:
                     logger.debug("POST %s -> %s", url, resp.status)
                     await self._check_and_record_write("POST", path, resp, (200, 201, 204))
                     return self._location_href(resp, path)
@@ -1346,7 +1375,7 @@ class Sep2Client:
 
             logger.debug("PUT %s", url)
             try:
-                async with session.put(url, data=body, ssl=self._ssl) as resp:
+                async with session.put(_wire_url(url), data=body, ssl=self._ssl) as resp:
                     logger.debug("PUT %s -> %s", url, resp.status)
                     await self._check_and_record_write("PUT", path, resp, (200, 204))
                     return int(resp.status)
@@ -1376,7 +1405,7 @@ class Sep2Client:
 
             logger.debug("PUT %s", url)
             try:
-                async with session.put(url, data=body, ssl=self._ssl) as resp:
+                async with session.put(_wire_url(url), data=body, ssl=self._ssl) as resp:
                     logger.debug("PUT %s -> %s", url, resp.status)
                     await self._check_and_record_write("PUT", path, resp, (200, 204))
                     return int(resp.status)
@@ -1397,7 +1426,7 @@ class Sep2Client:
             url = f"{self._base_url}{path}"
             logger.debug("DELETE %s", url)
             try:
-                async with session.delete(url, ssl=self._ssl) as resp:
+                async with session.delete(_wire_url(url), ssl=self._ssl) as resp:
                     logger.debug("DELETE %s -> %s", url, resp.status)
                     await self._check_and_record_write("DELETE", path, resp, (200, 204))
                     return int(resp.status)
