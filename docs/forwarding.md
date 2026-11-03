@@ -28,6 +28,13 @@ Optional fields are omitted rather than emitted as null, and consumers are
 expected to match on a key being present. That is what makes adding a field a
 compatible change.
 
+`client_id` is the LFDI of the device the exchange belongs to. A request under
+an EndDevice or one of its FunctionSetAssignments carries that device's LFDI. A
+MirrorUsagePoint registration, and every readings POST to the location the
+server gave it, carry the LFDI its `deviceLFDI` names when that device is one
+the client registered with `update_device_lfdi_prefixes`. Anything else carries
+the LFDI of the client's own certificate.
+
 ## Southbound device traffic
 
 By default the forwarder carries only the client's *northbound* 2030.5

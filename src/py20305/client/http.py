@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import SplitResult, quote, urljoin, urlparse, urlsplit, urlunsplit
 
 import aiohttp
+from lxml import etree
 from yarl import URL
 
 from py20305.client.comm_loss_simulation import (
@@ -114,6 +115,25 @@ def _wire_url(url: str) -> URL:
         raise aiohttp.InvalidURL(url) from exc
     rest = _STRAY_PERCENT.sub("%25", urlunsplit(("", "", parts.path, parts.query, "")))
     return URL(f"{origin}{quote(rest, safe=_URI_SAFE)}", encoded=True)
+
+
+_SEP_NS = "urn:ieee:std:2030.5:ns"
+_SAFE_PARSER = etree.XMLParser(resolve_entities=False, no_network=True)
+
+
+def _mirror_usage_point_lfdi(body: bytes) -> str | None:
+    """Return the lowercase ``deviceLFDI`` of a MirrorUsagePoint body.
+
+    Returns "" for a MirrorUsagePoint without one, and None for a body that is
+    not a MirrorUsagePoint.
+    """
+    try:
+        root = etree.fromstring(body, parser=_SAFE_PARSER)
+    except etree.XMLSyntaxError:
+        return None
+    if root.tag != f"{{{_SEP_NS}}}MirrorUsagePoint":
+        return None
+    return (root.findtext(f"{{{_SEP_NS}}}deviceLFDI") or "").strip().lower()
 
 
 def _port(url: SplitResult) -> int | None:
@@ -279,6 +299,10 @@ class Sep2Client:
         # Populated after discovery so each request can be attributed to
         # the correct device instead of using the client's cert LFDI.
         self._device_lfdi_by_prefix: dict[str, str] = {}
+        # MirrorUsagePoint location (e.g. "/mup/3") -> the LFDI its deviceLFDI
+        # names. Learned from each MirrorUsagePoint POST, since the server
+        # chooses the location; kept apart so rediscovery does not clear it.
+        self._device_lfdi_by_mup: dict[str, str] = {}
 
         self._connection_observer = connection_observer
 
@@ -363,12 +387,22 @@ class Sep2Client:
         """Resolve a request URI to a device LFDI using prefix matching.
 
         Returns the LFDI of the device whose EndDevice or FSA path is a
-        prefix of the given URI, or None if no match.
+        prefix of the given URI, or of the device a MirrorUsagePoint at a
+        prefix of the URI was registered for while that device is still
+        registered, or None if no match.
         """
         for prefix, lfdi in self._device_lfdi_by_prefix.items():
             if uri.startswith(prefix + "/") or uri == prefix:
                 return lfdi
+        known = set(self._device_lfdi_by_prefix.values())
+        for prefix, lfdi in self._device_lfdi_by_mup.items():
+            if (uri.startswith(prefix + "/") or uri == prefix) and lfdi in known:
+                return lfdi
         return None
+
+    def _registered_device(self, lfdi: str | None) -> str | None:
+        """Return ``lfdi`` when it names a device registered for attribution, else None."""
+        return lfdi if lfdi and lfdi in set(self._device_lfdi_by_prefix.values()) else None
 
     def set_schema_validator(self, schema_dir: str) -> None:
         """Initialize the XSD schema validator for message validation.
@@ -1358,19 +1392,33 @@ class Sep2Client:
         Use this when custom XML serialization is needed (e.g., legacy compatibility).
         """
 
+        # A MirrorUsagePoint is POSTed to the list, which names no device, so
+        # it is attributed by the deviceLFDI it carries, and so is the
+        # location the server gives it, where its readings are POSTed.
+        # IEEE 2030.5-2023 §10.11: deviceLFDI is the LFDI of the device whose
+        # readings the MirrorUsagePoint mirrors.
+        mup_lfdi = _mirror_usage_point_lfdi(body)
+        mirrored = self._registered_device(mup_lfdi)
+
         async def _do_post() -> str | None:
             session = self._get_session()
             url = f"{self._base_url}{path}"
 
             # Forward request (upstream) - raw bytes
-            self._forward_upstream(body, "RawXML", "POST", path, raw_xml=body)
+            self._forward_upstream(body, "RawXML", "POST", path, raw_xml=body, lfdi=mirrored)
 
             logger.debug("POST %s", url)
             try:
                 async with session.post(_wire_url(url), data=body, ssl=self._ssl) as resp:
                     logger.debug("POST %s -> %s", url, resp.status)
                     await self._check_and_record_write("POST", path, resp, (200, 201, 204))
-                    return self._location_href(resp, path)
+                    location = self._location_href(resp, path)
+                    if location is not None and mup_lfdi is not None:
+                        if mirrored is not None:
+                            self._device_lfdi_by_mup[location] = mirrored
+                        else:
+                            self._device_lfdi_by_mup.pop(location, None)
+                    return location
             except ssl.SSLError:
                 raise
             except aiohttp.InvalidURL as exc:
@@ -1536,8 +1584,9 @@ class Sep2Client:
         http_method: str,
         uri: str,
         raw_xml: bytes | None = None,
+        lfdi: str | None = None,
     ) -> None:
-        """Forward an upstream (request) message."""
+        """Forward an upstream (request) message, under ``lfdi`` when given."""
         from py20305.forwarders import MessageDirection
 
         if self._traffic_recorder is not None:
@@ -1551,6 +1600,7 @@ class Sep2Client:
             http_method=http_method,
             uri=uri,
             raw_xml=raw_xml,
+            metadata={"lfdi": lfdi} if lfdi is not None else None,
         )
 
     def _forward_downstream(
