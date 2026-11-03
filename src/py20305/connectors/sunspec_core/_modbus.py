@@ -30,13 +30,6 @@ from py20305.connectors.sunspec_core._meter import (
     PowerSignCalibrator,
     read_meter,
 )
-from py20305.connectors.sunspec_core._status import (
-    alarm_status,
-    connect_status,
-    gen_connect_status,
-    inverter_status,
-    operational_mode_status,
-)
 
 #: Method-return alias matching the connector contract (an optional dict).
 ConnectorPayload = dict[str, Any] | None
@@ -905,7 +898,6 @@ class SunSpecModbusConnector:
             ("WUndExtRtg", "value", model.WUndExtRtg.value, model.W_SF.value),
             ("WUndExtRtgPF", "displacement", model.WUndExtRtgPF.value, model.PF_SF.value),
             ("VAMaxRtg", "value", model.VAMaxRtg.value, model.VA_SF.value),
-            ("AMaxRtg", "value", model.AMaxRtg.value, model.A_SF.value),
             ("VarMaxInjRtg", "value", model.VarMaxInjRtg.value, model.Var_SF.value),
             ("VarMaxAbsRtg", "value", model.VarMaxAbsRtg.value, model.Var_SF.value),
             ("WChaRteMaxRtg", "value", model.WChaRteMaxRtg.value, model.W_SF.value),
@@ -935,30 +927,19 @@ class SunSpecModbusConnector:
             return {}
 
         now = int(time.time())
-        # Model 701 encodes each state differently from IEEE 2030.5, so every
-        # point is converted (see _status). connectStatus is the 2030.5-2023
-        # bitmap and genConnectStatus the 2030.5-2018 one; the DERStatus
-        # builder sends the one the server's edition defines.
-        inv_st = _cvalue_or_none(model, "InvSt")
-        conn_st = _cvalue_or_none(model, "ConnSt")
         result: dict[str, Any] = {
+            "connectStatus": {"dateTime": now, "value": model.ConnSt.cvalue},
+            "inverterStatus": {"dateTime": now, "value": model.InvSt.cvalue},
             "manufacturerStatus": {"dateTime": now, "value": "NoErr"},
-            "alarmStatus": alarm_status(_cvalue_or_none(model, "Alrm")),
+            "operationalModeStatus": {"dateTime": now, "value": model.St.cvalue},
+            "alarmStatus": model.Alrm.cvalue,
             "readingTime": now,
         }
-        # Omit a field whose point is unimplemented or holds an undefined
-        # value, rather than send a code the server would take as fact.
-        # localControlModeStatus, storageModeStatus and storConnectStatus have
-        # no model 701 point.
-        values = {
-            "connectStatus": connect_status(conn_st, inv_st),
-            "genConnectStatus": gen_connect_status(conn_st, inv_st),
-            "inverterStatus": inverter_status(inv_st),
-            "operationalModeStatus": operational_mode_status(_cvalue_or_none(model, "St")),
-        }
-        for key, value in values.items():
-            if value is not None:
-                result[key] = {"dateTime": now, "value": value}
+        # Only include optional fields when the connector has a real value
+        # (emitting value=0 for unknown fields causes the server to reject
+        # the DERStatus XML with 400).
+        # localControlModeStatus, storageModeStatus, storConnectStatus are
+        # not available from SunSpec model 701.
         return result
 
     def _fetch_configuration_sync(self) -> dict[str, Any]:

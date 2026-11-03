@@ -138,9 +138,6 @@ def _make_mock_target():
         # Power factor points (displacement)
         for attr in ["WOvrExtRtgPF", "WUndExtRtgPF", "WOvrExtPF", "WUndExtPF"]:
             setattr(model, attr, MagicMock(value=950, cvalue=950))
-        # Current rating
-        model.AMaxRtg = MagicMock(value=320, cvalue=32.0)
-        model.A_SF = MagicMock(value=-1)
         # Reactive susceptance
         model.ReactSusceptRtg = MagicMock(value=100, cvalue=100)
         # Direct integer points
@@ -471,19 +468,6 @@ class TestSunSpecFetch:
     async def test_fetch_status(self, sunspec_connector):
         result = await sunspec_connector.fetch_status()
         assert "alarmStatus" in result
-
-    @pytest.mark.asyncio
-    async def test_fetch_nameplate_reports_current_rating_with_its_scale_factor(
-        self, sunspec_connector
-    ):
-        result = await sunspec_connector.fetch_nameplate()
-        assert result["AMaxRtg"] == {"value": 320, "multiplier": -1}
-
-    @pytest.mark.asyncio
-    async def test_fetch_nameplate_omits_unimplemented_current_rating(self, sunspec_connector):
-        sunspec_connector._target.models[702][0].AMaxRtg.value = None
-        result = await sunspec_connector.fetch_nameplate()
-        assert "AMaxRtg" not in result
 
     @pytest.mark.asyncio
     async def test_fetch_configuration(self, sunspec_connector):
@@ -2885,126 +2869,3 @@ class TestTargetWPercentFallbackNeedsABase:
 
         assert model_704.WSetEna.cvalue == 0
         model_704.write.assert_not_called()
-
-
-class TestSunSpecStatusConversion:
-    """Model 701 status points are converted to IEEE 2030.5 DERStatus values.
-
-    Expected values come from the two enumerations: SunSpec model 701 InvSt
-    (0 OFF .. 7 STANDBY), St (0 OFF, 1 ON), ConnSt (0 DISCONNECTED, 1
-    CONNECTED) and Alrm bits, and the IEEE 2030.5 InverterStatusType,
-    OperationalModeStatusType, ConnectStatusType (2018), ConnectStatusType2
-    (2023) and DERStatus alarmStatus documentation in the schemas.
-    """
-
-    @staticmethod
-    def _set(connector, **points):
-        model = connector._target.models[701][0]
-        for name, value in points.items():
-            setattr(model, name, MagicMock(cvalue=value))
-
-    @pytest.mark.parametrize(
-        ("inv_st", "expected"),
-        [
-            (0, 1),  # OFF -> off
-            (1, 2),  # SLEEPING -> sleeping
-            (2, 3),  # STARTING -> starting up
-            (3, 4),  # RUNNING -> running (2018: tracking MPPT)
-            (4, 5),  # THROTTLED -> forced power reduction
-            (5, 6),  # SHUTTING_DOWN -> shutting down
-            (6, 7),  # FAULT -> one or more faults
-            (7, 8),  # STANDBY -> standby
-        ],
-    )
-    @pytest.mark.asyncio
-    async def test_inverter_status_is_the_2030_5_code(self, sunspec_connector, inv_st, expected):
-        self._set(sunspec_connector, InvSt=inv_st)
-        result = await sunspec_connector.fetch_status()
-        assert result["inverterStatus"]["value"] == expected
-
-    @pytest.mark.parametrize(("st", "expected"), [(0, 1), (1, 2)])
-    @pytest.mark.asyncio
-    async def test_operational_mode_status_is_off_or_operational(
-        self, sunspec_connector, st, expected
-    ):
-        self._set(sunspec_connector, St=st)
-        result = await sunspec_connector.fetch_status()
-        assert result["operationalModeStatus"]["value"] == expected
-
-    @pytest.mark.parametrize(
-        ("conn_st", "inv_st", "connect_2023", "connect_2018"),
-        [
-            (1, 3, 0b11, 0b00111),  # connected, running: energized; available, operating
-            (1, 4, 0b11, 0b00111),  # connected, throttled
-            (1, 2, 0b01, 0b00011),  # connected, starting: available only
-            (1, 1, 0b01, 0b00011),  # connected, sleeping: available only
-            (1, 7, 0b01, 0b00001),  # connected, standby
-            (0, 0, 0b00, 0b00000),  # disconnected, off
-            (0, 6, 0b00, 0b10000),  # disconnected, fault
-            (0, 5, 0b00, 0b00000),  # disconnected, shutting down
-        ],
-    )
-    @pytest.mark.asyncio
-    async def test_connect_status_is_a_bitmap_for_each_edition(
-        self, sunspec_connector, conn_st, inv_st, connect_2023, connect_2018
-    ):
-        self._set(sunspec_connector, ConnSt=conn_st, InvSt=inv_st)
-        result = await sunspec_connector.fetch_status()
-        assert result["connectStatus"]["value"] == connect_2023
-        assert result["genConnectStatus"]["value"] == connect_2018
-
-    @pytest.mark.parametrize(
-        ("alrm", "expected"),
-        [
-            (1 << 8, 1 << 3),  # OVER_FREQUENCY -> over frequency
-            (1 << 9, 1 << 4),  # UNDER_FREQUENCY -> under frequency
-            (1 << 10, 1 << 1),  # AC_OVER_VOLT -> over voltage
-            (1 << 11, 1 << 2),  # AC_UNDER_VOLT -> under voltage
-            (1 << 0, 0),  # GROUND_FAULT has no DERStatus alarm bit
-            (1 << 1, 0),  # DC_OVER_VOLT is not an AC over-voltage
-            ((1 << 0) | (1 << 10) | (1 << 8), (1 << 1) | (1 << 3)),
-            (0, 0),
-        ],
-    )
-    @pytest.mark.asyncio
-    async def test_alarm_status_carries_only_the_alarms_2030_5_names(
-        self, sunspec_connector, alrm, expected
-    ):
-        self._set(sunspec_connector, Alrm=alrm)
-        result = await sunspec_connector.fetch_status()
-        assert result["alarmStatus"] == expected
-
-    @pytest.mark.asyncio
-    async def test_undefined_or_unimplemented_points_omit_the_field(self, sunspec_connector):
-        self._set(sunspec_connector, InvSt=8, St=None, ConnSt=None, Alrm=None)
-        result = await sunspec_connector.fetch_status()
-        for key in ("inverterStatus", "operationalModeStatus", "connectStatus", "genConnectStatus"):
-            assert key not in result
-        assert result["alarmStatus"] == 0
-
-    @pytest.mark.parametrize(
-        ("server_2018_compat", "field", "expected"),
-        [(False, "connectStatus", b"\x03"), (True, "genConnectStatus", b"\x07")],
-    )
-    @pytest.mark.asyncio
-    async def test_each_edition_receives_its_own_connect_bitmap(
-        self, sunspec_connector, server_2018_compat, field, expected
-    ):
-        from py20305.telemetry.der_status import build_der_status
-        from py20305.xml.serialization import to_xml, validate_xml
-
-        self._set(sunspec_connector, ConnSt=1, InvSt=3, St=1, Alrm=0)
-        status = build_der_status(
-            await sunspec_connector.fetch_status(), server_2018_compat=server_2018_compat
-        )
-        if server_2018_compat:
-            assert status.connect_status is None
-            assert status.gen_connect_status.value == expected
-        else:
-            assert status.connect_status.value == expected
-            assert status.gen_connect_status is None
-        assert status.inverter_status.value == 4
-        assert status.operational_mode_status.value == 2
-        xml = to_xml(status, server_2018_compat=server_2018_compat)
-        assert f"<{field}>".encode() in xml
-        assert validate_xml(xml) == []

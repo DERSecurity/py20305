@@ -13,10 +13,10 @@ Read points (fetch_monitoring, fetch_status):
   PF              Power factor
   VA              Apparent power (VA)
   A               Current (A)
-  ConnSt          Connection status (to the connectStatus and genConnectStatus bitmaps)
-  InvSt           Inverter status (InvSt + 1 is the IEEE 2030.5 inverterStatus)
-  St              Operating state (OFF to operationalModeStatus 1, ON to 2)
-  Alrm            Alarm status (only the bits IEEE 2030.5 alarmStatus also names)
+  ConnSt          Connection status
+  InvSt           Inverter status
+  St              Operating state
+  Alrm            Alarm status
 
 
 MODEL 702 — DER Nameplate / Capability / Configuration
@@ -26,7 +26,6 @@ Read points (fetch_nameplate, fetch_configuration):
   Scale factors:
     W_SF            Watts scale factor
     VA_SF           Volt-amps scale factor
-    A_SF            Current scale factor
     Var_SF          Var scale factor
     PF_SF           Power factor scale factor
     V_SF            Voltage scale factor
@@ -39,7 +38,6 @@ Read points (fetch_nameplate, fetch_configuration):
     WUndExtRtg      Under-excited max active power rating (W)
     WUndExtRtgPF    Under-excited rating power factor
     VAMaxRtg        Max apparent power rating (VA)
-    AMaxRtg         Max continuous AC current rating (A)
     VarMaxInjRtg    Max reactive power injection rating (Var)
     VarMaxAbsRtg    Max reactive power absorption rating (Var)
     WChaRteMaxRtg   Max charge rate rating (W)

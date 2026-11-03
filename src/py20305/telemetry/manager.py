@@ -485,7 +485,7 @@ class TelemetryManager:
         if not state.mup_posted:
             await self._post_mup(state, monitoring, overrides)
         else:
-            if self._registration_grew(state, monitoring):
+            if self._registration_grew(state, monitoring, overrides):
                 # A reading first supplied after the MUP was posted needs its
                 # ReadingType registered before readings for it are posted
                 # (Rule h.2); without it the server answers 400 (Rule h.3).
@@ -610,7 +610,7 @@ class TelemetryManager:
             self._reading_profile,
             state.registered_slots,
             self._power_direction,
-            state.role,
+            overrides,
         )
         mup = create_mup(
             state.lfdi,
@@ -722,17 +722,19 @@ class TelemetryManager:
             )
 
     def _registration_grew(
-        self, state: DeviceTelemetryState, monitoring_data: dict[str, Any]
+        self,
+        state: DeviceTelemetryState,
+        monitoring_data: dict[str, Any],
+        overrides: dict[str, ReadingOverride] | None = None,
     ) -> bool:
         """Whether the posted MUP no longer describes this cycle's readings.
 
         Under SIGNED_LOAD_CONVENTION: true when the cycle supplies a reading
         the MUP did not register, or reports a different ACType, which changes
         the totals' phase code. Under DEFAULT: true only when the cycle would
-        post under a slot the MUP did not register, which happens when ACType
-        first appears after registration (the per-line block and the phased
-        system voltage and current slots derive from it) or an energy total
-        first appears. A slot that is merely absent this cycle does not count.
+        post under a slot the MUP did not register, for example a per-line
+        block, an energy total or a phased system voltage first reported after
+        registration. A slot that is only absent this cycle does not count.
         """
         ac_type = ac_type_of(monitoring_data)
         slots = registration_slots(
@@ -740,7 +742,7 @@ class TelemetryManager:
             self._reading_profile,
             state.registered_slots,
             self._power_direction,
-            state.role,
+            overrides,
         )
         if (slots, ac_type) == state.rejected_registration:
             return False
@@ -755,12 +757,13 @@ class TelemetryManager:
 
         Under SIGNED_LOAD_CONVENTION the totals' phase code and the per-line
         block both derive from ACType, so a cycle that omits it must not
-        re-POST the MUP as if the device had none. Under DEFAULT the slots of
-        the system voltage and current derive from it, so a cycle that omits
-        it must not post them under slots the MUP did not register, which the
-        server answers with 400 (IEEE 2030.5-2023 §10.11.3 Rule h.3).
+        re-POST the MUP as if the device had none.
         """
-        if state.registered_ac_type is None or ac_type_of(monitoring_data) is not None:
+        if (
+            self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION
+            or state.registered_ac_type is None
+            or ac_type_of(monitoring_data) is not None
+        ):
             return monitoring_data
         return {**monitoring_data, "ACType": state.registered_ac_type}
 

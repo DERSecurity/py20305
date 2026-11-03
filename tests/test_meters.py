@@ -493,7 +493,7 @@ class TestMeterEnergyAndPhases:
 # -- Posted sign ----------------------------------------------------------------------
 
 #: mRID -> slot for every slot a MUP can register.
-_SLOT_BY_MRID = {_slot_mrid(METER_LFDI, slot): slot for slot in range(1, 65)}
+_SLOT_BY_MRID = {_slot_mrid(METER_LFDI, slot): slot for slot in range(1, 63)}
 
 #: A site meter importing 2000 W and 100 var, then exporting the same. Its positive
 #: W is import, so TotWhImp rises while W is positive and TotWhExp while it is

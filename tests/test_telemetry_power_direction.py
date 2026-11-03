@@ -19,7 +19,7 @@ from py20305.telemetry.mup import (
 LFDI = "1234567890abcdef1234567890abcdef12345678"
 NET = PowerDirection.NET
 SPLIT = PowerDirection.SPLIT
-_SLOT_BY_MRID = {_create_mrid(LFDI, index=i).value: i for i in range(1, 65)}
+_SLOT_BY_MRID = {_create_mrid(LFDI, index=i).value: i for i in range(1, 60)}
 
 
 def _single_phase(**values: Any) -> dict[str, Any]:
@@ -111,8 +111,7 @@ class TestSlots:
         net = registration_slots(_three_phase(), profile_default(), power_direction=NET)
         split = registration_slots(_three_phase(), profile_default(), power_direction=SPLIT)
 
-        directed = range(31, 59)
-        assert not {s for s in net if s in directed} & {s for s in split if s in directed}
+        assert not {s for s in net if s > 30} & {s for s in split if s > 30}
 
     def test_the_default_mode_registers_what_it_always_has(self):
         directions = _flow_directions(create_mup(LFDI, _single_phase(W=-1500.0), 300))

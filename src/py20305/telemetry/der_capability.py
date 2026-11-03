@@ -39,7 +39,8 @@ def build_der_capability(
 
     Args:
         nameplate: Dict from connector.fetch_nameplate() with keys like
-            WMaxRtg, VAMaxRtg, AMaxRtg, VarMaxInjRtg, CtrlModes, etc.
+            WMaxRtg, VAMaxRtg, VarMaxInjRtg, CtrlModes, etc., and
+            ``rtgMaxA`` (IEEE 2030.5 maximum continuous AC current, amperes RMS).
         der_type: IEEE 2030.5 DER type code (default 83 = combined PV+storage).
         csip_aus_mode: When True, attach the CSIP-AUS ``doeModesSupported``
             extension (required by CSIP-AUS servers); plain 2030.5 servers omit
@@ -89,7 +90,7 @@ def build_der_capability(
         modes_supported=modes_supported,
         other_element=other_element,
         rtg_abnormal_category=abn_op_cat if isinstance(abn_op_cat, int) else None,
-        rtg_max_a=to_current_rms(nameplate.get("AMaxRtg")),
+        rtg_max_a=to_current_rms(nameplate.get("rtgMaxA")),
         rtg_max_ah=to_amp_hour(nameplate.get("AhMaxRtg")),
         rtg_max_charge_rate_va=to_apparent_power(nameplate.get("VAChaRteMaxRtg")),
         rtg_max_charge_rate_w=to_active_power(nameplate.get("WChaRteMaxRtg")),

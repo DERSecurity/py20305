@@ -207,7 +207,7 @@ class TestDerCapabilityXml:
         assert errors == [], f"Schema validation errors: {errors}"
 
     def test_current_rating_is_sent_as_rtg_max_a(self) -> None:
-        model = build_der_capability({"WMaxRtg": 1000, "AMaxRtg": {"value": 320, "multiplier": -1}})
+        model = build_der_capability({"WMaxRtg": 1000, "rtgMaxA": {"value": 320, "multiplier": -1}})
         assert model.rtg_max_a.value == 320
         assert model.rtg_max_a.multiplier.value == -1
         xml = to_xml(model)

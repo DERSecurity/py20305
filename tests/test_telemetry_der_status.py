@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from xml.etree.ElementTree import fromstring
 
+import pytest
+
 from py20305.models.sep.sep import (
     ConnectStatusType,
     ConnectStatusType2,
@@ -312,3 +314,73 @@ def test_connector_timestamps_win_over_default_time():
     assert model.reading_time.value == 555
     assert model.connect_status is not None
     assert model.connect_status.date_time.value == 556
+
+
+class TestIeee2030_5Values:
+    """Values outside their IEEE 2030.5 type are left out, not sent.
+
+    Ranges from the IEEE 2030.5 schemas: InverterStatusType 0 to 10,
+    OperationalModeStatusType 0 to 3, LocalControlModeStatusType 0 to 1,
+    StorageModeStatusType 0 to 2, stateOfChargeStatus 0 to 10000;
+    ConnectStatusType2 bits 0 to 1, ConnectStatusType bits 0 to 4, alarmStatus
+    bits 0 to 10.
+    """
+
+    @staticmethod
+    def _stamped(value: int) -> dict[str, int]:
+        return {"dateTime": 100, "value": value}
+
+    @pytest.mark.parametrize(
+        ("field", "attr", "highest"),
+        [
+            ("inverterStatus", "inverter_status", 10),
+            ("operationalModeStatus", "operational_mode_status", 3),
+            ("localControlModeStatus", "local_control_mode_status", 1),
+            ("storageModeStatus", "storage_mode_status", 2),
+        ],
+    )
+    def test_enumerations_accept_their_range_and_leave_out_the_rest(
+        self, field: str, attr: str, highest: int
+    ) -> None:
+        for value in (0, highest):
+            model = build_der_status({"readingTime": 0, field: self._stamped(value)})
+            assert getattr(model, attr).value == value
+        for value in (highest + 1, -1):
+            model = build_der_status({"readingTime": 0, field: self._stamped(value)})
+            assert getattr(model, attr) is None
+
+    def test_state_of_charge_is_hundredths_of_a_percent(self) -> None:
+        model = build_der_status({"readingTime": 0, "stateOfChargeStatus": self._stamped(10000)})
+        assert model.state_of_charge_status.value.value == 10000
+        model = build_der_status({"readingTime": 0, "stateOfChargeStatus": self._stamped(10001)})
+        assert model.state_of_charge_status is None
+
+    def test_connect_bitmaps_with_reserved_bits_are_left_out(self) -> None:
+        model = build_der_status({"readingTime": 0, "connectStatus": self._stamped(0b100)})
+        assert model.connect_status is None
+        model = build_der_status(
+            {"readingTime": 0, "genConnectStatus": self._stamped(0b100000)},
+            server_2018_compat=True,
+        )
+        assert model.gen_connect_status is None
+        model = build_der_status(
+            {"readingTime": 0, "genConnectStatus": self._stamped(0b10111)},
+            server_2018_compat=True,
+        )
+        assert model.gen_connect_status.value == bytes([0b10111])
+
+    def test_alarm_status_with_reserved_bits_is_left_out(self) -> None:
+        model = build_der_status({"readingTime": 0, "alarmStatus": 1 << 11})
+        assert model.alarm_status is None
+        model = build_der_status({"readingTime": 0, "alarmStatus": (1 << 10) | 1})
+        assert model.alarm_status == ((1 << 10) | 1).to_bytes(4, "big")
+
+    def test_a_bitmap_carried_to_the_other_edition_keeps_only_connected(self) -> None:
+        # 2018 available (bit 1) is not 2023 energized (bit 1); bits 2 to 4
+        # do not exist in 2023.
+        model = build_der_status({"readingTime": 0, "genConnectStatus": self._stamped(0b00111)})
+        assert model.connect_status.value == b"\x01"
+        model = build_der_status(
+            {"readingTime": 0, "connectStatus": self._stamped(0b11)}, server_2018_compat=True
+        )
+        assert model.gen_connect_status.value == b"\x01"

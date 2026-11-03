@@ -14,7 +14,6 @@ from py20305.telemetry.mup import (
     ROLE_FLAGS_DER,
     SERVICE_CATEGORY_ELECTRICITY,
     STATUS_ON,
-    DeviceRole,
     _create_mrid,
     compute_sfdi,
     create_meter_reading_list,
@@ -473,11 +472,11 @@ class TestMridStability:
         assert upper_mrids == lower_mrids
 
     def test_system_mrids_unchanged_when_per_line_added(self, sample_monitoring_data):
-        """The MUP mRID and the system power, frequency and power factor
-        mRIDs stay byte-identical when per-line readings are appended, so a
-        server that stored the legacy 7-reading layout keeps matching them.
-        The system voltage and current move to new mRIDs because their
-        ReadingType gains a phase code (IEEE 2030.5-2023 §10.11.3 Rule n)."""
+        """The first eight mRIDs (MUP + the seven system readings) must
+        be byte-identical regardless of whether per-line readings get
+        appended. This is the compatibility pin: a server that has
+        already stored MeterReadings under the legacy 7-reading layout
+        must keep matching them after the upgrade."""
         three_phase = _per_line_monitoring(ac_type=2, lines=3, base=sample_monitoring_data)
         legacy = create_mup(SAMPLE_LFDI, sample_monitoring_data, post_rate=300)
         widened = create_mup(SAMPLE_LFDI, three_phase, post_rate=300)
@@ -485,13 +484,7 @@ class TestMridStability:
         assert legacy.m_rid.value == widened.m_rid.value
         legacy_mrids = [m.m_rid.value for m in legacy.mirror_meter_reading]
         widened_mrids = [m.m_rid.value for m in widened.mirror_meter_reading[: len(legacy_mrids)]]
-        # Slots 1, 2, 3, 5 and 6 keep their place; slots 4 and 7 do not.
-        unchanged = [0, 1, 2, 4, 5]
-        assert [legacy_mrids[i] for i in unchanged] == [widened_mrids[i] for i in unchanged]
-        assert widened_mrids[3] == _create_mrid(SAMPLE_LFDI, index=63).value
-        assert widened_mrids[6] == _create_mrid(SAMPLE_LFDI, index=64).value
-        assert legacy_mrids[3] not in widened_mrids
-        assert legacy_mrids[6] not in widened_mrids
+        assert legacy_mrids == widened_mrids
 
 
 class TestPerLineReadings:
@@ -529,10 +522,10 @@ class TestPerLineReadings:
             "Real Power",
             "Reactive Power",
             "Frequency",
-            "Voltage (line to line)",
+            "Voltage",
             "Power Factor",
             "Apparent Power",
-            "Current (total)",
+            "Current",
         ]
         assert descriptions[7:13] == [
             "Real Power L1",
@@ -660,9 +653,9 @@ class TestPerLineReadings:
 
         # The L1-N voltage specifically: PhaseCode 129 per IEEE 2030.5.
         assert by_desc["Voltage L1"].reading_type.phase.value == 129
-        # ...and it must be a real reading, distinct from the system voltage
-        # (LLV aggregate), which carries the three-phase line-to-line code ABC.
-        assert by_desc["Voltage (line to line)"].reading_type.phase.value == 224
+        # ...and it must be a real reading, distinct from the untagged
+        # system voltage (LLV aggregate), which carries no phase at all.
+        assert by_desc["Voltage"].reading_type.phase is None
 
     def test_l1_readings_carry_values(self, sample_monitoring_data):
         """L1 values must actually reach the readings POST, not just the MUP
@@ -837,78 +830,54 @@ class TestReadingOverrides:
         assert [m.description for m in mrl.mirror_meter_reading] == ["Real Power"]
 
 
-class TestSystemVoltageAndCurrentPhase:
-    """The DEFAULT profile tags the system voltage and current with a phase code.
+class TestPhasedSystemReadings:
+    """A system voltage or current given a phase code is registered under its own mRID.
 
-    Expected codes are the IEEE 2030.5 PhaseCode values: 132 AB and 224 ABC
-    carry no neutral bit (line to line); 128 is phase A.
+    IEEE 2030.5-2023 §10.11.3 Rule n forbids modifying a MirrorMeterReading's
+    ReadingType once created, and slots 4 and 7 were registered without a
+    phase. Codes are IEEE 2030.5 PhaseCode values: 224 ABC, 132 AB.
     """
 
-    @pytest.mark.parametrize(
-        ("ac_type", "voltage_phase", "current_phase"),
-        [(0, 132, 128), (1, 132, 132), (2, 224, 224)],
-    )
-    def test_phase_codes_follow_the_wiring(
-        self, sample_monitoring_data, ac_type, voltage_phase, current_phase
-    ):
-        data = {**sample_monitoring_data, "ACType": ac_type}
-        mup = create_mup(SAMPLE_LFDI, data, post_rate=300)
-        by_mrid = {m.m_rid.value: m.reading_type for m in mup.mirror_meter_reading}
+    @staticmethod
+    def _types(mup) -> dict[bytes, object]:
+        return {m.m_rid.value: m.reading_type for m in mup.mirror_meter_reading}
 
-        voltage = by_mrid[_create_mrid(SAMPLE_LFDI, index=63).value]
-        current = by_mrid[_create_mrid(SAMPLE_LFDI, index=64).value]
-        assert (voltage.uom.value, voltage.phase.value) == (29, voltage_phase)
-        assert (current.uom.value, current.phase.value) == (5, current_phase)
-        # The unphased slots are not registered beside them.
-        assert _create_mrid(SAMPLE_LFDI, index=4).value not in by_mrid
-        assert _create_mrid(SAMPLE_LFDI, index=7).value not in by_mrid
+    def test_phased_voltage_and_current_take_slots_63_and_64(self, sample_monitoring_data):
+        overrides = {"V": ReadingOverride(phase=224), "A": ReadingOverride(phase=132)}
+        types = self._types(create_mup(SAMPLE_LFDI, sample_monitoring_data, 300, overrides))
 
-    def test_phase_code_of_system_voltage_is_not_line_to_neutral(self, sample_monitoring_data):
-        data = _per_line_monitoring(ac_type=2, lines=3, base=sample_monitoring_data)
-        mup = create_mup(SAMPLE_LFDI, data, post_rate=300)
-        codes = sorted(
-            m.reading_type.phase.value
-            for m in mup.mirror_meter_reading
-            if m.reading_type.uom.value == 29
+        voltage = types[_create_mrid(SAMPLE_LFDI, index=63).value]
+        current = types[_create_mrid(SAMPLE_LFDI, index=64).value]
+        assert (voltage.uom.value, voltage.phase.value) == (29, 224)
+        assert (current.uom.value, current.phase.value) == (5, 132)
+        assert _create_mrid(SAMPLE_LFDI, index=4).value not in types
+        assert _create_mrid(SAMPLE_LFDI, index=7).value not in types
+
+    def test_unphased_readings_keep_slots_4_and_7(self, sample_monitoring_data):
+        overrides = {"V": ReadingOverride(phase=0), "A": ReadingOverride(multiplier=-2)}
+        types = self._types(create_mup(SAMPLE_LFDI, sample_monitoring_data, 300, overrides))
+
+        assert _create_mrid(SAMPLE_LFDI, index=4).value in types
+        assert _create_mrid(SAMPLE_LFDI, index=7).value in types
+        assert _create_mrid(SAMPLE_LFDI, index=63).value not in types
+        assert _create_mrid(SAMPLE_LFDI, index=64).value not in types
+
+    def test_readings_post_under_the_phased_slot(self, sample_monitoring_data):
+        overrides = {"V": ReadingOverride(phase=224)}
+        readings = create_meter_reading_list(
+            SAMPLE_LFDI, sample_monitoring_data, timestamp=0, overrides=overrides
         )
-        # Per-line voltages are line to neutral (neutral bit set); the system
-        # voltage is not.
-        assert codes == [33, 65, 129, 224]
-
-    def test_without_ac_type_the_slots_and_reading_types_are_unchanged(
-        self, sample_monitoring_data
-    ):
-        mup = create_mup(SAMPLE_LFDI, sample_monitoring_data, post_rate=300)
-        by_mrid = {m.m_rid.value: m.reading_type for m in mup.mirror_meter_reading}
-
-        assert by_mrid[_create_mrid(SAMPLE_LFDI, index=4).value].phase is None
-        assert by_mrid[_create_mrid(SAMPLE_LFDI, index=7).value].phase is None
-        assert _create_mrid(SAMPLE_LFDI, index=63).value not in by_mrid
-
-    def test_readings_post_under_the_phased_slots(self, sample_monitoring_data):
-        data = {**sample_monitoring_data, "ACType": 2}
-        readings = create_meter_reading_list(SAMPLE_LFDI, data, timestamp=0)
         mrids = {m.m_rid.value for m in readings.mirror_meter_reading}
 
         assert _create_mrid(SAMPLE_LFDI, index=63).value in mrids
-        assert _create_mrid(SAMPLE_LFDI, index=64).value in mrids
         assert _create_mrid(SAMPLE_LFDI, index=4).value not in mrids
 
-    def test_a_meter_keeps_its_voltage_unphased_and_phases_its_current(
-        self, sample_monitoring_data
-    ):
-        data = {**sample_monitoring_data, "ACType": 2}
-        mup = create_mup(SAMPLE_LFDI, data, post_rate=300, role=DeviceRole.SITE_METER)
-        by_mrid = {m.m_rid.value: m.reading_type for m in mup.mirror_meter_reading}
+    def test_registration_slots_follow_the_override(self, sample_monitoring_data):
+        from py20305.telemetry.mup import ReadingProfile, registration_slots
 
-        assert by_mrid[_create_mrid(SAMPLE_LFDI, index=4).value].phase is None
-        assert _create_mrid(SAMPLE_LFDI, index=63).value not in by_mrid
-        assert by_mrid[_create_mrid(SAMPLE_LFDI, index=64).value].phase.value == 224
-
-    def test_connector_override_wins_over_the_derived_phase(self, sample_monitoring_data):
-        data = {**sample_monitoring_data, "ACType": 2}
-        mup = create_mup(
-            SAMPLE_LFDI, data, post_rate=300, overrides={"V": ReadingOverride(phase=129)}
+        slots = registration_slots(
+            sample_monitoring_data,
+            ReadingProfile.DEFAULT,
+            overrides={"A": ReadingOverride(phase=128)},
         )
-        by_mrid = {m.m_rid.value: m.reading_type for m in mup.mirror_meter_reading}
-        assert by_mrid[_create_mrid(SAMPLE_LFDI, index=63).value].phase.value == 129
+        assert 64 in slots and 7 not in slots and 4 in slots

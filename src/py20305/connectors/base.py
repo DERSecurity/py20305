@@ -186,8 +186,9 @@ class BaseConnector:
             "WUndExtRtg": None,
             "WUndExtRtgPF": None,
             "VAMaxRtg": None,
-            # Maximum continuous AC current (rtgMaxA), in amperes RMS.
-            "AMaxRtg": None,
+            # IEEE 2030.5 DERCapability rtgMaxA: maximum continuous AC
+            # current in amperes RMS, as a number or {value, multiplier}.
+            "rtgMaxA": None,
             "VarMaxInjRtg": None,
             "VarMaxAbsRtg": None,
             "WChaRteMaxRtg": None,
