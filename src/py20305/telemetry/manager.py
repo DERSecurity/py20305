@@ -489,6 +489,8 @@ class TelemetryManager:
                 # A reading first supplied after the MUP was posted needs its
                 # ReadingType registered before readings for it are posted
                 # (Rule h.2); without it the server answers 400 (Rule h.3).
+                # A refused re-POST leaves the new slots unregistered, and the
+                # readings POST below holds them back.
                 await self._post_mup(state, monitoring, overrides)
             # Post cadence, not acquisition cadence -- see
             # create_meter_reading_list. The planner may read sooner (a tighter
@@ -724,13 +726,14 @@ class TelemetryManager:
     ) -> bool:
         """Whether the posted MUP no longer describes this cycle's readings.
 
-        True when the cycle supplies a reading the MUP did not register, or
-        reports a different ACType, which changes the totals' phase code. Only
-        SIGNED_LOAD_CONVENTION registers readings as they appear. DEFAULT
-        registers its set once, as it always has.
+        Under SIGNED_LOAD_CONVENTION: true when the cycle supplies a reading
+        the MUP did not register, or reports a different ACType, which changes
+        the totals' phase code. Under DEFAULT: true only when the cycle would
+        post under a slot the MUP did not register, which happens when ACType
+        first appears after registration (the per-line block and the phased
+        system voltage and current slots derive from it) or an energy total
+        first appears. A slot that is merely absent this cycle does not count.
         """
-        if self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION:
-            return False
         ac_type = ac_type_of(monitoring_data)
         slots = registration_slots(
             monitoring_data,
@@ -741,6 +744,8 @@ class TelemetryManager:
         )
         if (slots, ac_type) == state.rejected_registration:
             return False
+        if self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION:
+            return not slots <= state.registered_slots
         return ac_type != state.registered_ac_type or slots != state.registered_slots
 
     def _with_registered_ac_type(

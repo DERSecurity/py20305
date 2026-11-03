@@ -1114,9 +1114,10 @@ def create_meter_reading_list(
     its duration is 0 whatever the dataQualifier, and its value is scaled from the
     effective multiplier (see ``_signed_load_value``). ``role`` must be the
     device's role: it decides whether W and var are negated (see
-    :class:`ReadingProfile`). ``registered``, when given, limits it to slots the
-    MUP has registered, so a reading whose registration has not succeeded yet is
-    held back rather than met with Rule h.3.
+    :class:`ReadingProfile`). ``registered``, when given, limits the readings
+    under either profile to slots the MUP has registered, so a reading whose
+    registration has not succeeded yet is held back rather than met with Rule
+    h.3.
 
     ``power_direction`` must be the one the MUP was created with; it chooses
     the W and var readings posted and how each carries its sign.
@@ -1137,7 +1138,7 @@ def create_meter_reading_list(
     for mrid_index, spec in specs:
         if monitoring_data.get(spec.key) is None:
             continue
-        if signed_load and registered is not None and mrid_index not in registered:
+        if registered is not None and mrid_index not in registered:
             continue
         mmr_mrid = _create_mrid(lfdi_norm, index=mrid_index)
         override = overrides.get(spec.key) if overrides else None
