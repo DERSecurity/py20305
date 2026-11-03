@@ -1994,6 +1994,41 @@ class TestSignedLoadFailedRepost:
         await manager.shutdown()
 
 
+class TestDefaultProfileAcType:
+    """Under DEFAULT the phased system voltage and current slots follow the registered ACType."""
+
+    async def test_cycle_without_ac_type_posts_under_the_registered_slots(
+        self, manager, mock_client, mock_connector
+    ):
+        from py20305.models.sep import MirrorMeterReadingList
+        from py20305.telemetry.mup import _create_mrid
+        from py20305.xml.serialization import from_xml
+
+        base = {**mock_connector.fetch_monitoring.return_value, "ACType": 2}
+        mock_connector.fetch_monitoring.return_value = base
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        mock_connector.fetch_monitoring.return_value = {
+            k: v for k, v in base.items() if k != "ACType"
+        }
+        mock_client.post_bytes.reset_mock()
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        bodies = [
+            c.args[1] for c in mock_client.post_bytes.call_args_list if c.args[0] != MUP_LIST_HREF
+        ]
+        assert bodies, "no readings were posted"
+        posted = from_xml(bodies[-1], MirrorMeterReadingList)
+        mrids = {m.m_rid.value for m in posted.mirror_meter_reading}
+        lfdi = SAMPLE_LFDI.lower()
+        assert _create_mrid(lfdi, index=63).value in mrids
+        assert _create_mrid(lfdi, index=4).value not in mrids
+        assert not [c for c in mock_client.post_bytes.call_args_list if c.args[0] == MUP_LIST_HREF]
+
+        await manager.shutdown()
+
+
 class TestSignedLoadAcType:
     """The totals' phase code must not follow a cycle that lacks ACType."""
 

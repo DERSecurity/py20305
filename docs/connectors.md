@@ -50,6 +50,25 @@ leaves `W` and `Var` out of the monitoring until it knows. The energy totals
 are reported as `WhFwd` and `WhRev`, forward and reverse in the role's frame.
 A connector of your own for a meter reports the same keys in the same frame.
 
+### Status and ratings
+
+Model 701 encodes the inverter's state differently from IEEE 2030.5, so the
+connector converts each status point before it reaches DERStatus:
+
+| Model 701 | DERStatus field | Conversion |
+|---|---|---|
+| `InvSt` 0 OFF .. 7 STANDBY | `inverterStatus` | `InvSt` + 1: off 1, sleeping 2, starting 3, running 4, throttled 5, shutting down 6, fault 7, standby 8 |
+| `St` 0 OFF, 1 ON | `operationalModeStatus` | Off 1, operational mode 2 |
+| `ConnSt` 0 DISCONNECTED, 1 CONNECTED | `connectStatus` (2030.5-2023 bitmap) | Bit 0 connected; bit 1 energized while running or throttled |
+| `ConnSt` and `InvSt` | `genConnectStatus` (2030.5-2018 bitmap) | Bit 0 connected; bit 1 available while sleeping, starting, running or throttled; bit 2 operating while running or throttled; bit 4 fault while in fault |
+| `Alrm` | `alarmStatus` | AC over-voltage to bit 1, AC under-voltage to bit 2, over-frequency to bit 3, under-frequency to bit 4; alarms with no DERStatus bit are not sent |
+
+A field whose point is unimplemented, or holds a value the model does not
+define, is left out of DERStatus rather than sent as a code.
+
+The nameplate includes `AMaxRtg` from model 702, with `A_SF` as its
+multiplier, so DERCapability carries `rtgMaxA`.
+
 ### CSIP-AUS operating envelope limits
 
 Of the four CSIP-AUS limits, the SunSpec connector enforces the generation
@@ -136,11 +155,33 @@ the readings rather than posted as zero.
 
 | Keys | Quantity |
 |---|---|
-| `W`, `Var`, `VA`, `A`, `PF`, `Hz`, `V` | System totals; `V` is the line-to-line average |
+| `W`, `Var`, `VA`, `A`, `PF`, `Hz`, `V` | System totals; `V` is the line-to-line average and `A` the total current |
 | `ACType` | SunSpec model 701 enum: 0 single-phase, 1 split-phase, 2 three-phase |
 | `WL1`..`AL3` (`W`, `Var`, `V`, `PF`, `VA`, `A` per line) | Per-line values; `VL1`..`VL3` are line-to-neutral |
 | `VL1L2`, `VL2L3`, `VL3L1` | Phase-to-phase voltage; posted only with `ACType` 1 (`VL1L2`) or 2 (all three) |
 | `WHAvail` | State of Energy, in Wh |
+
+With `ACType`, the default reading profile tags a DER's system voltage with
+the line-to-line phase code for the wiring (132 AB for single-phase and
+split-phase, 224 ABC for three-phase) and the system current with the wiring's
+phase code (128 A, 132 AB or 224 ABC), so a server can tell them from the
+per-line values, whose voltages are line to neutral (129, 65, 33). A meter's
+system voltage keeps no phase code, because a SunSpec meter reports the
+line-to-neutral average where it has one, and IEEE 2030.5 has no code for that. IEEE 2030.5
+does not let a reading's ReadingType change once created, so these two readings
+are posted under their own mRIDs. Without `ACType` they carry no phase code. A
+connector whose `V` is not the line-to-line average sets the right code with
+`reading_overrides()`.
+
+`fetch_status` returns IEEE 2030.5 codes, not the device's own:
+`inverterStatus`, `operationalModeStatus` and the other status values use the
+DERStatus enumerations. `connectStatus` is the 2030.5-2023 ConnectStatusType2
+bitmap (bit 0 connected, bit 1 energized). `genConnectStatus` is the
+2030.5-2018 ConnectStatusType bitmap (bit 0 connected, 1 available, 2
+operating, 3 test, 4 fault). A server on 2018 receives `genConnectStatus` and
+a 2023 server `connectStatus`; when a connector supplies only one, both
+editions receive it. `fetch_nameplate` reports `AMaxRtg`, the maximum
+continuous AC current, as DERCapability `rtgMaxA`.
 
 Signs are a requirement on every connector, referenced to the DER as in
 SunSpec model 701: `W` is positive for generation and negative for absorption,

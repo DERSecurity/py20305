@@ -206,6 +206,23 @@ class TestDerCapabilityXml:
         errors = validate_xml(xml)
         assert errors == [], f"Schema validation errors: {errors}"
 
+    def test_current_rating_is_sent_as_rtg_max_a(self) -> None:
+        model = build_der_capability({"WMaxRtg": 1000, "AMaxRtg": {"value": 320, "multiplier": -1}})
+        assert model.rtg_max_a.value == 320
+        assert model.rtg_max_a.multiplier.value == -1
+        xml = to_xml(model)
+        root = fromstring(xml.decode("utf-8"))
+        rating = root.find(f"{{{NS}}}rtgMaxA")
+        assert rating is not None
+        assert rating.findtext(f"{{{NS}}}multiplier") == "-1"
+        assert rating.findtext(f"{{{NS}}}value") == "320"
+        assert validate_xml(xml) == []
+
+    def test_current_rating_omitted_when_absent(self) -> None:
+        model = build_der_capability({"WMaxRtg": 1000})
+        assert model.rtg_max_a is None
+        assert b"rtgMaxA" not in to_xml(model)
+
     def test_xml_modes_before_ratings(self) -> None:
         """modesSupported should appear before rtg* elements in schema order."""
         model = build_der_capability({"WMaxRtg": 1000, "CtrlModes": 1})

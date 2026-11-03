@@ -16,6 +16,7 @@ from py20305.models.sep.sep import (
     ActivePower,
     AmpereHour,
     ApparentPower,
+    CurrentRms,
     PowerFactor,
     PowerOfTenMultiplierType,
     ReactivePower,
@@ -180,6 +181,14 @@ def to_amp_hour(value: Any) -> AmpereHour | None:
     if sf is None:
         return None
     return AmpereHour(multiplier=_multiplier(sf["multiplier"]), value=sf["value"])
+
+
+def to_current_rms(value: Any) -> CurrentRms | None:
+    """Convert a connector value to a ``CurrentRms`` model, or *None*."""
+    sf = get_sf(value)
+    if sf is None:
+        return None
+    return CurrentRms(multiplier=_multiplier(sf["multiplier"]), value=sf["value"])
 
 
 def to_reactive_power(value: Any) -> ReactivePower | None:

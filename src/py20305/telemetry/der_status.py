@@ -38,8 +38,12 @@ def build_der_status(
             - readingTime: int (epoch seconds, defaults to now)
             - alarmStatus: int (32-bit bitmap, optional; 0 omitted unless
               ``always_send_alarm_status`` is set)
-            - connectStatus: {dateTime, value} (preferred, ConnectStatusType2)
-            - genConnectStatus: {dateTime, value} (deprecated fallback)
+            - connectStatus: {dateTime, value} (ConnectStatusType2 bitmap,
+              IEEE 2030.5-2023; sent to a 2023 server, and to a 2018 server
+              when genConnectStatus is absent)
+            - genConnectStatus: {dateTime, value} (ConnectStatusType bitmap,
+              IEEE 2030.5-2018; sent to a 2018 server, and to a 2023 server
+              when connectStatus is absent)
             - inverterStatus: {dateTime, value} (optional)
             - localControlModeStatus: {dateTime, value} (optional)
             - manufacturerStatus: {dateTime, value: str} (optional)
@@ -76,17 +80,20 @@ def build_der_status(
 
     connect_data = status_data.get("connectStatus")
     gen_connect_data = status_data.get("genConnectStatus")
-    # Resolve the best available connect data for either field
-    best_connect = connect_data or gen_connect_data
 
     if server_2018_compat:
         # IEEE 2030.5-2018: only genConnectStatus/storConnectStatus exist;
-        # connectStatus (ConnectStatusType2) must not be emitted.
+        # connectStatus (ConnectStatusType2) must not be emitted. The two
+        # bitmaps define different bits above bit 0, so the 2018 bitmap is
+        # used when the connector supplies one, and connectStatus otherwise.
         return Derstatus(
             reading_time=TimeType(value=reading_time),
             alarm_status=alarm_bytes,
             connect_status=None,
-            gen_connect_status=_to_connect_status(best_connect, now_default),
+            gen_connect_status=_to_connect_status(
+                gen_connect_data if _has_value(gen_connect_data) else connect_data,
+                now_default,
+            ),
             inverter_status=_to_inverter_status(status_data.get("inverterStatus"), now_default),
             local_control_mode_status=_to_local_control_mode(
                 status_data.get("localControlModeStatus"), now_default
@@ -112,9 +119,11 @@ def build_der_status(
     return Derstatus(
         reading_time=TimeType(value=reading_time),
         alarm_status=alarm_bytes,
-        connect_status=_to_connect_status2(best_connect, now_default),
+        connect_status=_to_connect_status2(
+            connect_data if _has_value(connect_data) else gen_connect_data, now_default
+        ),
         gen_connect_status=(
-            _to_connect_status(gen_connect_data, now_default) if connect_data is None else None
+            None if _has_value(connect_data) else _to_connect_status(gen_connect_data, now_default)
         ),
         inverter_status=_to_inverter_status(status_data.get("inverterStatus"), now_default),
         local_control_mode_status=_to_local_control_mode(
@@ -132,6 +141,11 @@ def build_der_status(
         storage_mode_status=_to_storage_mode(status_data.get("storageModeStatus"), now_default),
         stor_connect_status=_to_connect_status(status_data.get("storConnectStatus"), now_default),
     )
+
+
+def _has_value(data: dict[str, Any] | None) -> bool:
+    """Return True when a ``{dateTime, value}`` entry carries a value."""
+    return isinstance(data, dict) and data.get("value") is not None
 
 
 def _dt(data: dict[str, Any], default_time: int) -> TimeType:

@@ -19,6 +19,9 @@ MeterReading's ReadingType once it is created:
   (``PowerDirection.SPLIT``).
 - 61 and 62: energy delivered in the forward and the reverse direction
   (``WhFwd``, ``WhRev``), DEFAULT profile only.
+- 63 and 64: system voltage and system current with a phase code, in place of
+  slots 4 and 7 when the device reports ``ACType``, DEFAULT profile only. Slot
+  63 is a DER's only: a meter's voltage is not always the line-to-line average.
 """
 
 from __future__ import annotations
@@ -236,13 +239,10 @@ READING_TYPE_SPECS: tuple[ReadingTypeSpec, ...] = (
         kind=37,
         uom=29,
         multiplier=-1,
-        # No phase tag. SunSpec reads model 701 LLV (line-to-line average),
-        # not LNV, so the historical phase=129 (Phase A-N) value was wrong
-        # regardless of ACType -- a line-to-line measurement was being
-        # advertised as if it were phase-A-to-neutral. The IEEE 2030.5
-        # PhaseCode enum treats an absent attribute as 0 ("Not Applicable,
-        # default if not specified"), which honestly describes an
-        # aggregate-across-conductors measurement.
+        # The line-to-line average (SunSpec model 701 LLV), with no phase code
+        # at this slot. Under the DEFAULT profile a DER that reports ACType
+        # posts it at slot 63 with its line-to-line phase code instead (see
+        # _phased_totals).
         scale_func=scale_v,
     ),
     ReadingTypeSpec(
@@ -495,14 +495,22 @@ _ENERGY_SPECS: tuple[tuple[int, ReadingTypeSpec], ...] = tuple(
 
 
 def _default_specs_for(
-    monitoring_data: dict[str, Any], power_direction: PowerDirection
+    monitoring_data: dict[str, Any], power_direction: PowerDirection, role: DeviceRole
 ) -> list[tuple[int, ReadingTypeSpec]]:
     """Return ``(mrid_index, spec)`` for a DEFAULT-profile device.
 
     The system and per-line readings with W and var as ``power_direction``
-    posts them, then each energy total the device supplies.
+    posts them, then each energy total the device supplies. A device that
+    reports ``ACType`` posts its system current at slot 64 with the wiring's
+    phase code (128 A, 132 AB or 224 ABC) in place of slot 7, and a DER its
+    system voltage at slot 63 with the line-to-line phase code for its wiring
+    (132 AB, or 224 ABC on a three-phase device) in place of slot 4.
     """
-    specs = _directed_specs(_all_specs_for(monitoring_data), power_direction)
+    specs = _phased_totals(
+        _directed_specs(_all_specs_for(monitoring_data), power_direction),
+        ac_type_of(monitoring_data),
+        role,
+    )
     specs += [
         (slot, spec) for slot, spec in _ENERGY_SPECS if monitoring_data.get(spec.key) is not None
     ]
@@ -550,6 +558,51 @@ _AC_TYPE_LINE_TO_LINE_COUNT: dict[int, int] = {0: 0, 1: 1, 2: 3}
 # S1-S2 code, and per-line readings already tag split-phase L2 as phase B, so
 # split-phase totals are AB.
 _AC_TYPE_TOTAL_PHASE: dict[int, int] = {0: 128, 1: 132, 2: 224}
+#: Phase code of the system voltage, the line-to-line average, by SunSpec
+#: ACType. A line-to-line code has no neutral bit, which tells it apart from
+#: the line-to-neutral codes on the per-line voltages (129, 65, 33). A
+#: single-phase line-to-line voltage is measured across L1 and L2, so AB.
+_AC_TYPE_LINE_TO_LINE_PHASE: dict[int, int] = {0: 132, 1: 132, 2: 224}
+
+#: DEFAULT-profile system voltage and current: the slot each is registered at
+#: without ACType, the slot that replaces it once the device reports ACType,
+#: the phase code by ACType, and the description. IEEE 2030.5-2023 §10.11.3
+#: Rule n forbids changing a MirrorMeterReading's ReadingType once created, so
+#: adding a phase code takes a new mRID rather than changing the ReadingType a
+#: server already holds for slots 4 and 7.
+_SYSTEM_VOLTAGE_SLOT = 4
+_PHASED_TOTALS: dict[int, tuple[int, dict[int, int], str]] = {
+    _SYSTEM_VOLTAGE_SLOT: (63, _AC_TYPE_LINE_TO_LINE_PHASE, "Voltage (line to line)"),
+    7: (64, _AC_TYPE_TOTAL_PHASE, "Current (total)"),
+}
+
+
+def _phased_totals(
+    specs: list[tuple[int, ReadingTypeSpec]], ac_type: int | None, role: DeviceRole
+) -> list[tuple[int, ReadingTypeSpec]]:
+    """Move the system voltage and current to their phased slots when ACType is known.
+
+    Without ACType the wiring is unknown, so slots 4 and 7 keep no phase code.
+    A meter's voltage stays at slot 4: a SunSpec meter reports the
+    line-to-neutral average where it has one, and IEEE 2030.5 has no phase
+    code for a line-to-neutral average across phases.
+    """
+    if ac_type is None:
+        return specs
+    out: list[tuple[int, ReadingTypeSpec]] = []
+    for index, spec in specs:
+        if index == _SYSTEM_VOLTAGE_SLOT and role is not DeviceRole.DER:
+            out.append((index, spec))
+            continue
+        phased = _PHASED_TOTALS.get(index)
+        phase = phased[1].get(ac_type) if phased is not None else None
+        if phased is None or phase is None:
+            out.append((index, spec))
+        else:
+            out.append((phased[0], replace(spec, phase=phase, description=phased[2])))
+    return out
+
+
 #: Every slot a SIGNED_LOAD_CONVENTION MUP can register, so a re-POST can
 #: rebuild any slot registered earlier whatever this cycle's data says.
 _SPEC_BY_SLOT: dict[int, ReadingTypeSpec] = {
@@ -632,6 +685,7 @@ def registration_slots(
     profile: ReadingProfile,
     registered: frozenset[int] = frozenset(),
     power_direction: PowerDirection = PowerDirection.DEFAULT,
+    role: DeviceRole = DeviceRole.DER,
 ) -> frozenset[int]:
     """The mRID slots a MUP built now would register.
 
@@ -642,7 +696,7 @@ def registration_slots(
     if profile is ReadingProfile.SIGNED_LOAD_CONVENTION:
         specs = _signed_load_specs_for(monitoring_data, registered)
     else:
-        specs = _default_specs_for(monitoring_data, power_direction)
+        specs = _default_specs_for(monitoring_data, power_direction, role)
     return frozenset(index for index, _ in specs)
 
 
@@ -711,7 +765,7 @@ def _all_specs_for(monitoring_data: dict[str, Any]) -> list[tuple[int, ReadingTy
     L1 is NOT folded into the system readings on a multi-phase device: the
     system readings are aggregates, not phase-A values. ``W``/``Var``/``VA``/
     ``A`` are totals across phases, and ``V`` is SunSpec 701 ``LLV`` -- a
-    line-to-line *average* carrying no PhaseCode. A consumer keying on
+    line-to-line *average*, never PhaseCode 129. A consumer keying on
     PhaseCode 129 (Phase AN, i.e. L1-N voltage) therefore never sees an L1
     reading unless it is emitted explicitly.
     """
@@ -969,7 +1023,7 @@ def create_mup(
     specs = (
         _signed_load_specs_for(monitoring_data, registered)
         if signed_load
-        else _default_specs_for(monitoring_data, power_direction)
+        else _default_specs_for(monitoring_data, power_direction, role)
     )
     meter_readings: list[MirrorMeterReading1] = []
     for mrid_index, spec in specs:
@@ -1076,7 +1130,7 @@ def create_meter_reading_list(
     specs = (
         _signed_load_specs_for(monitoring_data, frozenset())
         if signed_load
-        else _default_specs_for(monitoring_data, power_direction)
+        else _default_specs_for(monitoring_data, power_direction, role)
     )
     posted: dict[str, int] = {}
     meter_readings: list[MirrorMeterReading1] = []

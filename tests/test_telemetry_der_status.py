@@ -94,6 +94,37 @@ class TestBuildDerStatus:
         assert isinstance(model.connect_status, ConnectStatusType2)
         assert model.connect_status.value == b"\x01"
 
+    def test_2018_server_receives_the_2018_bitmap_when_both_are_supplied(self) -> None:
+        """ConnectStatusType (2018) and ConnectStatusType2 (2023) define
+        different bits above bit 0, so each edition gets its own bitmap."""
+        data = {
+            "readingTime": 0,
+            "connectStatus": {"dateTime": 100, "value": 0b11},
+            "genConnectStatus": {"dateTime": 100, "value": 0b10111},
+        }
+        model = build_der_status(data, server_2018_compat=True)
+        assert model.connect_status is None
+        assert model.gen_connect_status.value == bytes([0b10111])
+
+    def test_2023_server_receives_the_2023_bitmap_when_both_are_supplied(self) -> None:
+        data = {
+            "readingTime": 0,
+            "connectStatus": {"dateTime": 100, "value": 0b11},
+            "genConnectStatus": {"dateTime": 100, "value": 0b10111},
+        }
+        model = build_der_status(data)
+        assert model.connect_status.value == bytes([0b11])
+        assert model.gen_connect_status is None
+
+    def test_2018_server_falls_back_to_connect_status(self) -> None:
+        data = {
+            "readingTime": 0,
+            "connectStatus": {"dateTime": 100, "value": 1},
+            "genConnectStatus": {"dateTime": None, "value": None},
+        }
+        model = build_der_status(data, server_2018_compat=True)
+        assert model.gen_connect_status.value == b"\x01"
+
     def test_inverter_status(self) -> None:
         model = build_der_status(
             {"readingTime": 0, "inverterStatus": {"dateTime": 200, "value": 3}}

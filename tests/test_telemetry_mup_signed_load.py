@@ -336,7 +336,9 @@ class TestOptionalReadings:
         assert grown == registered | {8}
 
     def test_existing_mrids_are_kept_across_profiles(self) -> None:
-        default = registration_slots(_three_phase(), ReadingProfile.DEFAULT)
+        # The DEFAULT profile posts a device's phased system voltage and
+        # current at slots 63 and 64; this profile posts them at 4 and 7.
+        default = registration_slots(_three_phase(), ReadingProfile.DEFAULT) - {63, 64}
 
         assert default <= registration_slots(_three_phase(WHAvail=1), SIGNED)
 

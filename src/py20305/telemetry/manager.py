@@ -604,7 +604,11 @@ class TelemetryManager:
         posting rate. We read back the created MUP to honour the server's rate.
         """
         slots = registration_slots(
-            monitoring_data, self._reading_profile, state.registered_slots, self._power_direction
+            monitoring_data,
+            self._reading_profile,
+            state.registered_slots,
+            self._power_direction,
+            state.role,
         )
         mup = create_mup(
             state.lfdi,
@@ -729,7 +733,11 @@ class TelemetryManager:
             return False
         ac_type = ac_type_of(monitoring_data)
         slots = registration_slots(
-            monitoring_data, self._reading_profile, state.registered_slots, self._power_direction
+            monitoring_data,
+            self._reading_profile,
+            state.registered_slots,
+            self._power_direction,
+            state.role,
         )
         if (slots, ac_type) == state.rejected_registration:
             return False
@@ -742,13 +750,12 @@ class TelemetryManager:
 
         Under SIGNED_LOAD_CONVENTION the totals' phase code and the per-line
         block both derive from ACType, so a cycle that omits it must not
-        re-POST the MUP as if the device had none.
+        re-POST the MUP as if the device had none. Under DEFAULT the slots of
+        the system voltage and current derive from it, so a cycle that omits
+        it must not post them under slots the MUP did not register, which the
+        server answers with 400 (IEEE 2030.5-2023 §10.11.3 Rule h.3).
         """
-        if (
-            self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION
-            or state.registered_ac_type is None
-            or ac_type_of(monitoring_data) is not None
-        ):
+        if state.registered_ac_type is None or ac_type_of(monitoring_data) is not None:
             return monitoring_data
         return {**monitoring_data, "ACType": state.registered_ac_type}
 

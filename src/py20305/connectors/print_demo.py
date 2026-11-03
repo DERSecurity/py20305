@@ -144,10 +144,12 @@ class PrintDemoConnector(BaseConnector):
         return {
             "alarmStatus": 1,
             "connectStatus": {"dateTime": now, "value": 1},
-            "inverterStatus": {"dateTime": now, "value": 3},
+            # IEEE 2030.5 InverterStatusType 4: running.
+            "inverterStatus": {"dateTime": now, "value": 4},
             "localControlModeStatus": None,
             "manufacturerStatus": {"dateTime": now, "value": "1000"},
-            "operationalModeStatus": {"dateTime": now, "value": 1},
+            # OperationalModeStatusType 2: operational mode.
+            "operationalModeStatus": {"dateTime": now, "value": 2},
             "readingTime": now,
             "stateOfChargeStatus": {"dateTime": now, "value": 0},
             "storageModeStatus": None,
