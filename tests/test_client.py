@@ -859,3 +859,17 @@ async def test_readings_stop_carrying_a_device_lfdi_once_the_device_is_gone(aioh
         await client.post_bytes(location, b"<MirrorMeterReadingList/>")
 
     assert forwarder.frames[-1].metadata.get("lfdi") is None
+
+
+async def test_mirrored_device_is_matched_without_regard_to_case(aiohttp_server):
+    """LFDIs are hex: a device registered in upper case is still matched."""
+    base_url = await _mirror_app(aiohttp_server)
+    forwarder = _RecordingForwarder()
+
+    async with Sep2Client(base_url) as client:
+        client.forwarder = forwarder
+        client.update_device_lfdi_prefixes({"/edev/2": _DEVICE.upper()})
+        location = await client.post_bytes("/mup", _mirror_usage_point(_DEVICE))
+        await client.post_bytes(location, b"<MirrorMeterReadingList/>")
+
+    assert [f.metadata.get("lfdi") for f in forwarder.frames] == [_DEVICE.upper()] * 2

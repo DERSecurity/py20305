@@ -113,10 +113,12 @@ def build_der_status(
 
     alarm = status_data.get("alarmStatus")
     alarm_int = alarm if isinstance(alarm, int) and not isinstance(alarm, bool) else None
-    if alarm_int is not None and not _fits_bitmap("alarmStatus", alarm_int, ALARM_STATUS_BITS):
-        alarm_int = None
     alarm_bytes: bytes | None = None
-    if alarm_int is not None and alarm_int != 0:
+    if alarm_int is not None and not _fits_bitmap("alarmStatus", alarm_int, ALARM_STATUS_BITS):
+        # Left out entirely: an explicit zero would clear the server's alarms
+        # on the strength of a value that was rejected.
+        pass
+    elif alarm_int is not None and alarm_int != 0:
         alarm_bytes = alarm_int.to_bytes(4, "big")
     elif always_send_alarm_status:
         # Emit an explicit all-zero bitmap rather than omitting the (optional)

@@ -372,6 +372,11 @@ class TestIeee2030_5Values:
     def test_alarm_status_with_reserved_bits_is_left_out(self) -> None:
         model = build_der_status({"readingTime": 0, "alarmStatus": 1 << 11})
         assert model.alarm_status is None
+        # A rejected bitmap must not become an explicit clear.
+        model = build_der_status(
+            {"readingTime": 0, "alarmStatus": (1 << 11) | 1}, always_send_alarm_status=True
+        )
+        assert model.alarm_status is None
         model = build_der_status({"readingTime": 0, "alarmStatus": (1 << 10) | 1})
         assert model.alarm_status == ((1 << 10) | 1).to_bytes(4, "big")
 

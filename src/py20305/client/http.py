@@ -394,15 +394,24 @@ class Sep2Client:
         for prefix, lfdi in self._device_lfdi_by_prefix.items():
             if uri.startswith(prefix + "/") or uri == prefix:
                 return lfdi
-        known = set(self._device_lfdi_by_prefix.values())
         for prefix, lfdi in self._device_lfdi_by_mup.items():
-            if (uri.startswith(prefix + "/") or uri == prefix) and lfdi in known:
-                return lfdi
+            if uri.startswith(prefix + "/") or uri == prefix:
+                return self._registered_device(lfdi)
         return None
 
     def _registered_device(self, lfdi: str | None) -> str | None:
-        """Return ``lfdi`` when it names a device registered for attribution, else None."""
-        return lfdi if lfdi and lfdi in set(self._device_lfdi_by_prefix.values()) else None
+        """Return the registered spelling of ``lfdi`` when it names a registered device.
+
+        LFDIs are hex, so they are compared without regard to case. Returns
+        None for an LFDI that names no device registered for attribution.
+        """
+        if not lfdi:
+            return None
+        wanted = lfdi.lower()
+        for registered in self._device_lfdi_by_prefix.values():
+            if registered.lower() == wanted:
+                return registered
+        return None
 
     def set_schema_validator(self, schema_dir: str) -> None:
         """Initialize the XSD schema validator for message validation.

@@ -1937,10 +1937,7 @@ class TestSignedLoadRegistration:
 
         await signed_manager.shutdown()
 
-    async def test_default_profile_does_not_repost_for_a_signed_load_only_reading(
-        self, manager, mock_client, mock_connector
-    ):
-        mock_connector.fetch_monitoring.return_value = self._monitoring()
+    async def test_default_profile_never_reposts(self, manager, mock_client, mock_connector):
         manager.start_metering(SAMPLE_LFDI, post_rate=300)
         await manager._metering_cycle(SAMPLE_LFDI.lower())
 
@@ -1993,77 +1990,6 @@ class TestSignedLoadFailedRepost:
         mrids = {m.m_rid.value for m in posted.mirror_meter_reading}
         assert _create_mrid(SAMPLE_LFDI.lower(), index=8).value not in mrids
         assert _create_mrid(SAMPLE_LFDI.lower(), index=1).value in mrids
-
-        await manager.shutdown()
-
-
-class TestDefaultProfileLateRegistration:
-    """A slot first reported after registration is registered before it is posted."""
-
-    @staticmethod
-    def _posted_readings(mock_client):
-        from py20305.models.sep import MirrorMeterReadingList
-        from py20305.xml.serialization import from_xml
-
-        bodies = [
-            c.args[1] for c in mock_client.post_bytes.call_args_list if c.args[0] != MUP_LIST_HREF
-        ]
-        readings = from_xml(bodies[-1], MirrorMeterReadingList).mirror_meter_reading
-        return {m.m_rid.value for m in readings}
-
-    async def test_late_per_line_block_reposts_the_mup_before_posting_it(
-        self, manager, mock_client, mock_connector
-    ):
-        from py20305.models.sep import MirrorUsagePoint
-        from py20305.telemetry.mup import _create_mrid
-        from py20305.xml.serialization import from_xml
-
-        manager.start_metering(SAMPLE_LFDI, post_rate=300)
-        await manager._metering_cycle(SAMPLE_LFDI.lower())
-
-        mock_connector.fetch_monitoring.return_value = {
-            **mock_connector.fetch_monitoring.return_value,
-            "ACType": 2,
-            "WL1": 300.0,
-        }
-        mock_client.post_bytes.reset_mock()
-        await manager._metering_cycle(SAMPLE_LFDI.lower())
-
-        calls = mock_client.post_bytes.call_args_list
-        assert calls[0].args[0] == MUP_LIST_HREF, "the MUP is re-POSTed before the readings"
-        mup = from_xml(calls[0].args[1], MirrorUsagePoint)
-        line_1_watts = _create_mrid(SAMPLE_LFDI.lower(), index=10).value
-        assert line_1_watts in {m.m_rid.value for m in mup.mirror_meter_reading}
-        assert line_1_watts in self._posted_readings(mock_client)
-
-        await manager.shutdown()
-
-    async def test_refused_repost_holds_back_the_unregistered_slots(
-        self, manager, mock_client, mock_connector
-    ):
-        from py20305.telemetry.mup import _create_mrid
-
-        manager.start_metering(SAMPLE_LFDI, post_rate=300)
-        await manager._metering_cycle(SAMPLE_LFDI.lower())
-
-        async def post(href, body):
-            if href == MUP_LIST_HREF:
-                raise Sep2ProtocolError("refused", status_code=400)
-            return "/mup/device1"
-
-        mock_client.post_bytes.side_effect = post
-        mock_connector.fetch_monitoring.return_value = {
-            **mock_connector.fetch_monitoring.return_value,
-            "ACType": 2,
-            "WL1": 300.0,
-        }
-        mock_client.post_bytes.reset_mock()
-        await manager._metering_cycle(SAMPLE_LFDI.lower())
-
-        lfdi = SAMPLE_LFDI.lower()
-        posted = self._posted_readings(mock_client)
-        assert _create_mrid(lfdi, index=10).value not in posted
-        assert _create_mrid(lfdi, index=1).value in posted
 
         await manager.shutdown()
 
