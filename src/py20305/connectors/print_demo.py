@@ -75,8 +75,8 @@ class PrintDemoConnector(BaseConnector):
             "Hz": ReadingOverride(quality_flags=0x10),
             # CSIP-AUS requires a phase code on voltage -- NOT_APPLICABLE (0) is
             # rejected. Tag the single-phase system voltage as A-N (129). (The
-            # default leaves it unset for SunSpec-701 line-to-line-average
-            # devices; a real per-phase source would set this per line.)
+            # default leaves the system voltage unphased; a real per-phase
+            # source would set this per line.)
             "V": ReadingOverride(phase=129),
         }
 

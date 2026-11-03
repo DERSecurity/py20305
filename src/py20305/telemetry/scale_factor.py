@@ -124,7 +124,7 @@ def _convert_dict_sf(
         return None
 
     # PowerOfTenMultiplierType is xs:byte (-128..127).  Values outside
-    # this range indicate garbage data (e.g. misaligned SunSpec registers).
+    # this range indicate garbage data (e.g. misaligned device registers).
     if mult < -128 or mult > 127:
         logger.warning("Multiplier %d out of range (-128..127), omitting field", mult)
         return None

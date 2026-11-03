@@ -89,9 +89,9 @@ read that came back empty produces none either, because an empty envelope is
 indistinguishable from a device genuinely reporting all zeroes.
 
 These envelopes are the same `ProtocolMessage` shape, published to the same
-topic, with `protocol` set to `modbus` — so a collector needs no new
-subscription and no new parser, and a consumer tells the two halves apart by
-that field. Set `topic_suffix` to route them somewhere else instead:
+topic, with `protocol` set to what the device connector speaks — so a collector
+needs no new subscription and no new parser, and a consumer tells the two
+halves apart by that field. Set `topic_suffix` to route them somewhere else instead:
 
 ```yaml
 forwarders:
@@ -102,17 +102,19 @@ forwarders:
     topic_suffix: out/device
 ```
 
-The `protocol` field carries what the connector speaks, not an assumption:
-`modbus` for a SunSpec device, and `generic` for a connector that reaches no
-wire, such as the hardware-free demo. Recording those as Modbus would put a
-false claim on the channel and mislead a consumer filtering by protocol.
+The `protocol` field carries what the connector declares it speaks
+(`BaseConnector.telemetry_protocol`), not an assumption: `modbus` for a
+connector that declares Modbus, and `generic` for one that declares nothing or
+reaches no wire, such as the hardware-free demo. Recording the demo as Modbus
+would put a false claim on the channel and mislead a consumer filtering by
+protocol.
 
 If the broker is unreachable when the client starts, the forwarder starts
 anyway and keeps trying to connect in the background, as it does after losing
 the connection later. See [When the broker connection drops](#when-the-broker-connection-drops).
 
-A device is identified by its address where the connector exposes one:
-`host:port` for Modbus TCP, and for a serial device the line itself
+A device is identified by its address where the connector exposes one, such as
+`host:port` for a TCP device, and for a serial device the line itself
 (`rtu:/dev/ttyUSB0`) rather than a fabricated IP.
 
 ## The client's own connection outcomes
@@ -192,7 +194,7 @@ link the connection belongs to:
 | Label | Link |
 |---|---|
 | `role:northbound` | The IEEE 2030.5 client's connection to the utility server |
-| `role:southbound` | A connection to a DER device (SunSpec Modbus, DNP3, OCPP and others) |
+| `role:southbound` | A connection to a DER device (Modbus, DNP3, OCPP and others) |
 | `role:management` | An inbound connection to the host's management console or API |
 | `role:server` | An inbound connection to one of the host's own protocol listeners, such as the notification listener |
 | `role:telemetry` | The connection to the broker that carries this telemetry |

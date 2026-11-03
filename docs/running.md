@@ -4,7 +4,7 @@ Two ways to use this package. Embedding it in your own application is covered
 in the [quickstart](quickstart.md); this page covers running it as a service.
 
 ```bash
-pip install "py20305[cli,sunspec]"
+pip install "py20305[cli]"
 py20305 --config client.yaml
 ```
 
@@ -24,11 +24,16 @@ tls:
   ca_cert: certs/ca.pem
 
 devices:
-  - type: sunspec
+  - type: custom
     lfdi: "0000000000000000000000000000000000000000"
-    host: 192.168.1.50
-    port: 502
+    class_path: myproject.connectors.MyInverter
+    init_kwargs:
+      host: 192.168.1.50
 ```
+
+A device's connector is your own `BaseConnector` subclass, named by
+`class_path`; `print_demo` needs no hardware (see
+[Connecting devices](connectors.md)).
 
 Paths are relative to the configuration file, not the working directory —
 systemd will not start the process where you wrote it.
@@ -48,7 +53,7 @@ caused it:
 
 ```
 error: invalid configuration in client.yaml:
-  devices.0.sunspec.lfdi: Value error, lfdi must be 40 hex characters (length is 8, must be 40)
+  devices.0.custom.lfdi: Value error, lfdi must be 40 hex characters (length is 8, must be 40)
 ```
 
 ## What it does on start
@@ -127,12 +132,12 @@ configured like any other device, with a `role`:
 
 ```yaml
 devices:
-  - type: sunspec
+  - type: custom
     lfdi: "0000000000000000000000000000000000000000"
-    host: 192.168.1.50
-  - type: sunspec
+    class_path: myproject.connectors.MyInverter
+  - type: custom
     lfdi: "2222222222222222222222222222222222222222"
-    host: 192.168.1.60
+    class_path: myproject.connectors.MyMeter
     role: site_meter
 ```
 
@@ -172,26 +177,12 @@ so it must differ from every other device's, but the meter needs no certificate.
 A site meter under the site's EndDevice therefore shares that EndDevice's LFDI
 with the site's DER without sharing an mRID with it.
 
-A meter's readings are real power, reactive power, frequency, current, average
-voltage, the power factor's magnitude, apparent power, the per-phase values its
-model has, and two energy totals in Wh, each a Summation (accumulationBehaviour
+A meter's connector reports its readings in its role's frame (the table above).
+Besides the quantities any device reports, it may report two energy totals in Wh, each a Summation (accumulationBehaviour
 9): energy in the forward direction (flowDirection 1) and in the reverse
 direction (19). For a site meter forward is energy imported. For a DER meter it
 is the DER's output, which such a meter counts as exported. The energy totals are posted under the `default` reading
 profile only; `signed_load_convention` does not define them.
-
-The SunSpec meter models do not say which sign of real power is import, and
-meters differ. `power_sign` sets it for a SunSpec meter:
-
-| `power_sign` | What the client does |
-|---|---|
-| `auto` (default) | Learns the sign from which energy total, imported or exported, rises while real power is not zero. Real and reactive power are not posted until two readings agree; the client logs once at INFO when it has learned the sign. |
-| `import_positive` | Positive W from the meter is import. |
-| `export_positive` | Positive W from the meter is export. |
-
-The client keeps comparing the totals with the sign in use, and logs a WARNING
-once if they contradict it on three readings in a row. Reactive power is
-oriented like real power. `power_sign` is refused on a DER.
 
 A site meter's power changes direction during the day, so `power_direction:
 net` or `split` keeps that direction on the server, where `default` fixes it
@@ -332,7 +323,7 @@ configuration stops rather than restarting forever.
 
 The shipped unit adds the sandboxing a client needs none of the privileges
 around -- read-only filesystem, no devices, no new privileges. Those assume a
-device reached over Modbus TCP; one on a serial port needs its tty granted
+device reached over the network; one on a serial port needs its tty granted
 back, and the unit says how.
 
 This package deliberately does not supervise itself. Retrying the *connection*

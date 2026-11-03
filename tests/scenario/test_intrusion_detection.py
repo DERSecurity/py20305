@@ -9,12 +9,13 @@ over one MQTT connection:
   Network Activity events on the connection-events topic. This is the stream
   a passive capture cannot produce: a TLS failure or a refused connection is
   known only to the client, inside the session.
-- **Downstream** -- the SunSpec/Modbus reads and writes the client performs
-  against the DER, as ``protocol: modbus`` envelopes.
+- **Downstream** -- the reads and writes the client's device connector
+  performs against the DER, as envelopes in the connector's protocol (here a
+  recording connector that declares ``modbus``).
 
 The unit suites drive each emitter against recording stubs; none of them ever
 framed an MQTT packet. These tests run the real client against a scriptable
-2030.5 server, a served Modbus register image and a real MQTT broker socket,
+2030.5 server, a recording device connector and a real MQTT broker socket,
 and assert on the bytes that reached the broker -- so a regression anywhere
 between the request path and the wire fails here, not at a deployment.
 """
@@ -30,7 +31,8 @@ import pytest
 
 from py20305.client import CsipClient, Sep2Error, TlsConfig
 from py20305.client.retry import RetryPolicy
-from py20305.connectors.config import SunSpecDeviceConfig
+from py20305.connectors.base import BaseConnector
+from py20305.connectors.config import CustomDeviceConfig
 from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
 from py20305.connectors.dispatcher import ConnectorDispatcher
 from py20305.connectors.registry import ConnectorConfigRegistry
@@ -45,7 +47,6 @@ from py20305.forwarders import (
     MQTTForwarderConfig,
 )
 from py20305.security import compute_lfdi
-from tests.scenario.modbus_server import SunSpecModbusServer, build_der_image
 from tests.scenario.mqtt_broker import ScenarioMqttBroker
 from tests.scenario.support import ScenarioServer, free_port, make_certs
 
@@ -68,6 +69,20 @@ RAW_TOPIC = f"{TOPIC_BASE}/{PROTOCOL_MESSAGE_TOPIC_SUFFIX}"
 EVENTS_TOPIC = f"{TOPIC_BASE}/out/connection-events"
 
 
+class RecordingInverter(BaseConnector):
+    """A device connector that records each control it is given.
+
+    It declares the Modbus protocol, so its exchanges reach the broker as
+    ``protocol: modbus`` envelopes the way a real inverter connector's would.
+    """
+
+    telemetry_protocol = "modbus"
+    writes: list[dict] = []
+
+    async def update_p_lim(self, params: dict) -> None:
+        RecordingInverter.writes.append(params)
+
+
 def payloads_on(broker: ScenarioMqttBroker, topic: str) -> list[dict]:
     """JSON-decode every message the broker received on ``topic``."""
     return [json.loads(m.payload) for m in broker.messages_on(topic)]
@@ -77,15 +92,15 @@ async def build_stack(
     tmp_path,
     *,
     coalesce_window_seconds: float = 0.0,
-    with_modbus: bool = False,
+    with_device: bool = False,
     server_port: int | None = None,
 ) -> SimpleNamespace:
     """Assemble the client the way the runner does, over real sockets.
 
     One MQTT broker double, one forwarder manager carrying all three
     channels, one 2030.5 scenario server (unless ``server_port`` points the
-    client somewhere nothing listens), and optionally a served Modbus image
-    behind the dispatcher.
+    client somewhere nothing listens), and optionally a recording device
+    connector behind the dispatcher.
     """
     broker = ScenarioMqttBroker(free_port())
     await broker.start()
@@ -116,20 +131,14 @@ async def build_stack(
         csip.seed_standard_tree(client_lfdi)
         server_port = csip.port
 
-    modbus: SunSpecModbusServer | None = None
     dispatcher = None
-    if with_modbus:
-        modbus = SunSpecModbusServer(build_der_image(), free_port())
-        await modbus.start()
+    if with_device:
+        RecordingInverter.writes = []
         registry = ConnectorConfigRegistry(
             [
-                SunSpecDeviceConfig(
-                    type="sunspec",
+                CustomDeviceConfig(
                     lfdi=client_lfdi,
-                    host="127.0.0.1",
-                    port=modbus.port,
-                    timeout=2,
-                    scan_retries=1,
+                    class_path=f"{__name__}.RecordingInverter",
                 )
             ]
         )
@@ -165,8 +174,6 @@ async def build_stack(
     async def close() -> None:
         await client.shutdown()
         await manager.stop()  # drains the publish queue before returning
-        if modbus is not None:
-            await modbus.close()
         if csip is not None:
             await csip.close()
         await broker.close()
@@ -179,7 +186,6 @@ async def build_stack(
         certs=certs,
         base_url=base_url,
         csip=csip,
-        modbus=modbus,
         close=close,
     )
 
@@ -348,28 +354,28 @@ async def test_session_tracking_coalesces_successes_within_the_window(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Downstream: the southbound Modbus channel
+# Downstream: the southbound device channel
 # ---------------------------------------------------------------------------
 
 
-async def test_downstream_channel_reports_the_modbus_write(tmp_path):
-    """A 2030.5 control that reaches the inverter is reported as Modbus telemetry.
+async def test_downstream_channel_reports_the_device_write(tmp_path):
+    """A 2030.5 control that reaches the inverter is reported as device telemetry.
 
     The full loop: the utility publishes a control, the client dispatches it,
-    the connector writes registers over a real Modbus socket -- and the same
-    write arrives at the broker as a ``protocol: modbus`` envelope, so the
-    monitoring platform sees the command that actually reached the equipment,
-    not just the one that arrived over 2030.5.
+    the connector applies it to the device -- and the same write arrives at
+    the broker as an envelope in the connector's protocol, so the monitoring
+    platform sees the command that actually reached the equipment, not just
+    the one that arrived over 2030.5.
     """
-    stack = await build_stack(tmp_path, with_modbus=True)
+    stack = await build_stack(tmp_path, with_device=True)
     try:
         await stack.client.connect()
         await stack.client.poll_now()
 
         deadline = asyncio.get_event_loop().time() + 20
-        while not stack.modbus.writes:
+        while not RecordingInverter.writes:
             if asyncio.get_event_loop().time() > deadline:
-                raise AssertionError("the control never reached the Modbus server")
+                raise AssertionError("the control never reached the device")
             await asyncio.sleep(0.1)
 
         await drain(stack)
@@ -397,19 +403,19 @@ async def test_all_three_channels_flow_over_one_broker_connection(tmp_path):
 
     One client, one broker, one poll cycle with a control in it. The
     monitoring platform's three consumers each find their stream: 2030.5
-    envelopes and Modbus envelopes split by ``protocol`` on the raw topic,
+    envelopes and device envelopes split by ``protocol`` on the raw topic,
     OCSF events alone on theirs -- and neither topic contains the other's
     payload shape.
     """
-    stack = await build_stack(tmp_path, coalesce_window_seconds=0.0, with_modbus=True)
+    stack = await build_stack(tmp_path, coalesce_window_seconds=0.0, with_device=True)
     try:
         await stack.client.connect()
         await stack.client.poll_now()
 
         deadline = asyncio.get_event_loop().time() + 20
-        while not stack.modbus.writes:
+        while not RecordingInverter.writes:
             if asyncio.get_event_loop().time() > deadline:
-                raise AssertionError("the control never reached the Modbus server")
+                raise AssertionError("the control never reached the device")
             await asyncio.sleep(0.1)
 
         await drain(stack)

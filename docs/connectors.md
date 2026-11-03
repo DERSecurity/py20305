@@ -4,98 +4,10 @@ A **connector** is the thing that turns an IEEE 2030.5 control into whatever
 your device actually speaks. The client resolves a device's LFDI to its
 connector, then calls methods on it.
 
-## SunSpec Modbus
-
-The connector that ships with the package. It speaks the SunSpec 700-series
-models over three transports:
-
-```python
-from py20305.connectors.config import SunSpecDeviceConfig
-
-# Modbus TCP
-SunSpecDeviceConfig(lfdi=LFDI, host="192.168.1.50", port=502, unit_id=1)
-
-# Modbus RTU over serial
-SunSpecDeviceConfig(lfdi=LFDI, transport="rtu", serial_port="/dev/ttyUSB0", baudrate=9600)
-
-# Modbus TCP wrapped in TLS
-SunSpecDeviceConfig(
-    lfdi=LFDI, transport="tcp+tls", host="192.168.1.50", port=802,
-    ca_path="certs/ca.pem", cert_path="certs/client.pem", key_path="certs/client.key",
-)
-```
-
-Install it with the `sunspec` extra.
-
-### Meters
-
-A device with `role: site_meter` or `role: der_meter` (see
-[Meters](running.md#meters)) is read through a SunSpec meter model instead of
-the 700-series models. The connector reads the first of these the device
-exposes: 201 to 204 (single-phase, split-phase, wye and delta, with scale
-factors), 211 to 214 (the same in floating point), then 220 (the secure AC
-meter). A device configured as a meter that exposes none of them fails at scan
-with a message naming the models it does expose.
-
-A device left as a DER that exposes a meter model and no 700-series model is
-not changed to a meter. The connector logs a WARNING once suggesting
-`site_meter` or `der_meter`, and the scan fails as it does for any device
-without model 702.
-
-The connector reports a meter's real and reactive power in its role's frame:
-import positive for a site meter, the DER's output positive for a DER meter.
-The meter models do not say which sign of `W` is import, so the connector
-learns it from `TotWhImp` and `TotWhExp`, or takes it from `power_sign`, and
-leaves `W` and `Var` out of the monitoring until it knows. The energy totals
-are reported as `WhFwd` and `WhRev`, forward and reverse in the role's frame.
-A connector of your own for a meter reports the same keys in the same frame.
-
-### CSIP-AUS operating envelope limits
-
-Of the four CSIP-AUS limits, the SunSpec connector enforces the generation
-limit, `opModGenLimW`, and the load limit, `opModLoadLimW`.
-
-The generation limit is converted to a percent of the device's `WMax` (model
-702, or `WMaxRtg` where `WMax` is not implemented) and written to `WMaxLimPct`
-in model 704. When `opModMaxLimW` is active too, the more restrictive of the
-two is written. The device must implement `WMaxLimPct`; one that does not
-answers the control as not supported.
-
-The load limit is the maximum charge rate of a storage device, written in watts
-to `WChaRteMax` in model 702. When `opModMaxLimWAbsorb` is active too, the lower
-of the two is written. A limit above the device's `WChaRteMaxRtg` does not bind
-and is written as the rating. The device must declare charge-rate limiting
-(`WChaRteMax` implemented and a non-zero `WChaRteMaxRtg`); one that does not
-answers the control as not supported.
-
-`WChaRteMax` is a setting with no enable, so a limit is ended by writing a
-value. Clearing one limit while the other is active writes the other's value.
-When no charge limit remains, the connector writes `WChaRteMaxRtg`, the value
-for no limit, so a 0 W limit does not leave a battery unable to charge after
-its event. It does so on every clear, including one for a limit it has no
-record of, so a clear after a connector restart still releases the battery. A
-DefaultDERControl that carries a charge limit then sets its own value as usual.
-A device that does not declare charge-rate limiting is never written to. The
-discharge-rate setting written by `opModMaxLimWInject` is not released yet.
-
-`doeModesSupported` and `doeModesEnabled` name only the limits the device can
-take:
-
-| Value | Device |
-|---|---|
-| `0C` | Implements `WMaxLimPct` and declares charge-rate limiting, as a storage inverter does |
-| `04` | Implements `WMaxLimPct` only, as a PV inverter does |
-| `08` | Declares charge-rate limiting but does not implement `WMaxLimPct` |
-| `00` | Neither: no CSIP-AUS limit can be applied |
-
-The connector treats a limit as applying to the one inverter it controls.
-Where a single EndDevice stands for several inverters, each connector is handed
-the full value; dividing a shared limit between them is up to whatever
-dispatches the control, not this connector.
-
-The export and import limits (`opModExpLimW`, `opModImpLimW`) constrain power
-at the site's connection point, which an inverter cannot measure. The connector
-leaves both out of `doeModesSupported` and does not apply them.
+The package ships one connector, the print connector, and the interface for
+your own. A connector for a device protocol, Modbus, DNP3 or anything else,
+belongs to the application that drives the device: it converts the device's
+own points to the IEEE 2030.5 values described below.
 
 ## The print connector
 

@@ -14,7 +14,5 @@ Talking to the device underneath.
 
 ::: py20305.connectors.control_errors
 
-::: py20305.connectors.translation
-
 ::: py20305.commands
 

@@ -26,7 +26,7 @@ repeated here.
 - Python 3.11, 3.12 and 3.13, on Linux, Windows and macOS.
 - The base install is the protocol client: `aiohttp`, `cryptography`, `pydantic` 2,
   `xsdata-pydantic` and `lxml`. Everything else is an extra: `api` (FastAPI and uvicorn),
-  `cli` (PyYAML), `sunspec` (pysunspec2 and pyserial) and `mqtt` (aiomqtt).
+  `cli` (PyYAML) and `mqtt` (aiomqtt).
 - Build: `setuptools`. Tests: `pytest` with `pytest-asyncio` in auto mode, `pytest-aiohttp`
   and `pytest-timeout`. Lint: `ruff`, line length 100. Types: `mypy` with
   `disallow_untyped_defs`. Documentation: MkDocs 1.x with Material and mkdocstrings.
@@ -141,7 +141,6 @@ In this order:
 5. **The SunSpec CSIP conformance test procedures**, for what a certification test checks
    and how.
 6. **The RFCs the standard builds on**: TLS, HTTP, X.509 certificates, DNS-SD and mDNS.
-7. **The SunSpec Modbus information models**, for the SunSpec connector only.
 
 Other implementations are witnesses, not authorities. The end-to-end suite runs against an
 independently written CSIP-AUS server, the recorded run in `docs/conformance/` shows how
@@ -265,7 +264,7 @@ Related rules:
   certificates are mounted. It runs unprivileged. CI checks both.
 - **It runs on Linux, Windows and macOS.** Use `pathlib`, name the encoding of every text
   file, and do not assume a path separator, a line ending or a signal.
-- **Only the SunSpec Modbus connector ships in the tree.** A connector for one device
+- **No device-protocol connector ships in the tree.** A connector for one device
   belongs in the project that owns the device. See the connector guide.
 - **Follow the pattern that is already there.** Read a neighboring module before adding a
   new shape.

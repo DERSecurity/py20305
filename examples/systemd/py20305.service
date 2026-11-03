@@ -37,7 +37,8 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 
-# A SunSpec device on a serial port needs its tty, which PrivateDevices hides.
+# A connector that reaches its device on a serial port needs the tty, which
+# PrivateDevices hides.
 # Reach one by removing PrivateDevices above and naming the port:
 #   DeviceAllow=/dev/ttyUSB0 rw
 # DeviceAllow lifts systemd's own device policy and nothing else. The port
@@ -45,7 +46,7 @@ SystemCallFilter=@system-service
 # 0660 -- so the service account needs that group as well:
 #   SupplementaryGroups=dialout
 # Check the group on the actual port: `stat -c '%G' /dev/ttyUSB0`. A device
-# reached over Modbus TCP needs none of these lines.
+# reached over the network needs none of these lines.
 
 # Creates and owns /var/log/py20305, the only writable path this unit gets.
 # Needed only when the configuration sets logging.file; logs go to the journal

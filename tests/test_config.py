@@ -160,32 +160,6 @@ class TestPathResolution:
         data = {**MINIMAL, "tls": {**MINIMAL["tls"], "client_cert": str(absolute)}}
         assert load_config(_write(tmp_path, data)).tls.client_cert == absolute
 
-    def test_a_devices_own_tls_paths_resolve_too(self, tmp_path: Path) -> None:
-        """A SunSpec device over TLS carries certificate paths of its own.
-
-        They go straight to an SSL context, so resolving only the server's
-        would make the same relative path mean two different things depending
-        on which section of the file it appeared in.
-        """
-        data = {
-            **MINIMAL,
-            "devices": [
-                {
-                    "type": "sunspec",
-                    "lfdi": "a" * 40,
-                    "transport": "tcp+tls",
-                    "host": "10.0.0.5",
-                    "ca_path": "device/ca.pem",
-                    "cert_path": "device/client.pem",
-                    "key_path": "device/client.key",
-                }
-            ],
-        }
-        device = load_config(_write(tmp_path, data)).devices[0]
-        assert Path(device.ca_path) == (tmp_path / "device/ca.pem").resolve()
-        assert Path(device.cert_path) == (tmp_path / "device/client.pem").resolve()
-        assert Path(device.key_path) == (tmp_path / "device/client.key").resolve()
-
     def test_a_relative_log_file_resolves_too(self, tmp_path: Path) -> None:
         data = {**MINIMAL, "logging": {"level": "INFO", "file": "logs/client.log"}}
         config = load_config(_write(tmp_path, data))

@@ -196,8 +196,8 @@ class DerResourceManager:
     async def _resolve_connector_async(self, lfdi: str) -> BaseConnector:
         """Resolve connector via the injected resolver.
 
-        First-touch construction of a SunSpec connector runs a synchronous
-        Modbus scan; an async resolver offloads that to a worker thread.
+        First-touch construction of a connector may run a synchronous device
+        scan; an async resolver offloads that to a worker thread.
         Cache hits return without yielding the loop, so this stays cheap
         on every cycle after the first per-device call.
 

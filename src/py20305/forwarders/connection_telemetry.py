@@ -90,7 +90,7 @@ class ConnectionRole(StrEnum):
 
     #: The IEEE 2030.5 client's link to the utility server.
     NORTHBOUND = "northbound"
-    #: A connection to a DER device (SunSpec Modbus, DNP3, OCPP and others).
+    #: A connection to a DER device (Modbus, DNP3, OCPP and others).
     SOUTHBOUND = "southbound"
     #: An inbound connection to the host's own management console or API.
     MANAGEMENT = "management"

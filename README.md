@@ -45,13 +45,13 @@ pip install py20305
 ```
 
 The base install is the protocol client. Extras add what you may not need:
-`sunspec` for Modbus devices, `api` for the HTTP management API, `mqtt` for
-traffic forwarding, or `all`.
+`cli` for the configuration-file runner, `api` for the HTTP management API,
+`mqtt` for traffic forwarding, or `all`.
 
 ## Running it as a service
 
 ```bash
-pip install "py20305[cli,sunspec]"
+pip install "py20305[cli]"
 py20305 --config client.yaml --check   # validate, print your LFDI
 py20305 --config client.yaml           # run
 ```
@@ -99,7 +99,8 @@ That drives the print connector, which needs no hardware — it logs the control
 it would have applied. So you can exercise the whole discovery, event and
 telemetry path against a real server before an inverter is wired up.
 
-Swap in `SunSpecDeviceConfig` when you have one. Full walkthrough in the
+Swap in your own connector, a `BaseConnector` subclass for your device's
+protocol, when you have one. Full walkthrough in the
 [quickstart](https://dersecurity.github.io/py20305/quickstart/).
 
 ## What's in it
@@ -111,7 +112,7 @@ Swap in `SunSpecDeviceConfig` when you have one. Full walkthrough in the
 | **Event engine** | DERControl five-state machine, supersession across programs, randomized start and duration, `Response` acknowledgments |
 | **Pricing** | IEEE 2030.5 Pricing function set, off by default: discovers the tariff tree and relays each active interval's price to connectors as it changes; relay-only, so the client does not act on price, the connector decides |
 | **Telemetry** | DERStatus, DERCapability, DERSettings, DERAvailability, metered readings as MirrorUsagePoints, started and rediscovered for you by the runner; site and DER meters mirrored with their own roleFlags |
-| **Connectors** | SunSpec Modbus over TCP, RTU and TLS, for inverters and meters; a no-hardware print connector; your own by subclass or factory |
+| **Connectors** | The interface your device connector implements, a dispatcher and registry that drive it, and a no-hardware print connector |
 | **Subscriptions** | Subscribe/notify as an alternative to polling, with a notification listener |
 | **Runner** | A CLI, config file, connection retry and signal-handled shutdown |
 | **Management API** | Optional HTTP API for observing and nudging a running client |
@@ -154,7 +155,7 @@ DER Security, and this repository is its IEEE 2030.5 half:
 | Project | Role |
 |---|---|
 | [PySunSpec2](https://github.com/sunspec/pysunspec2) | SunSpec Modbus reference library, used in more than 80% of inverter-based products shipped globally |
-| **py20305** (this repository) | IEEE 2030.5 client stack with CSIP and CSIP-AUS support, and a SunSpec Modbus bridge |
+| **py20305** (this repository) | IEEE 2030.5 client stack with CSIP and CSIP-AUS support; the application's connector bridges it to the device |
 | Satori Scout | Phone app that finds DER on a network: a SunSpec Modbus sweep of the local subnet, and IEEE 2030.5 discovery over mDNS. A reference implementation rather than an open-source component |
 
 Project website: <https://open-satori.org>

@@ -863,7 +863,7 @@ class ConnectorDispatcher:
         """Surface a write refused because its origin does not command the device.
 
         Reported rather than raised: a 2030.5 server posting events to a device
-        that SunSpec commands is a configuration statement being honored, not a
+        another interface commands is a configuration statement being honored, not a
         fault, and raising would turn every such event into an error the event
         engine has to interpret. Silence is the wrong answer too -- an operator
         seeing a posted control never arrive needs this row to know why.
@@ -896,10 +896,9 @@ class ConnectorDispatcher:
         one of them is anybody's mistake:
 
         ``BY_DESIGN``
-            The connector inherits the base no-op. ``ConnectorSunSpec`` does this
-            for 29 of the 40 modes and says so in its docstring -- the base
-            defaults exist precisely to cover modes SunSpec has no register for.
-            Expected, and not something an operator can act on.
+            The connector inherits the base no-op, as a connector does for every
+            mode its device has no way to carry out -- the base defaults exist
+            for exactly that. Expected, and not something an operator can act on.
 
         ``OFFER_MISSING``
             No implementation resolves at all. For a plugin-backed connector,

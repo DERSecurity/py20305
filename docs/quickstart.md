@@ -14,7 +14,6 @@ you may not need:
 
 | Extra | Adds | For |
 |---|---|---|
-| `sunspec` | `pysunspec2`, `pyserial` | Talking to a SunSpec Modbus device |
 | `api` | `fastapi`, `uvicorn` | The HTTP management API |
 | `mqtt` | `aiomqtt` | Forwarding captured traffic to a monitoring system |
 | `all` | all of the above | |
@@ -108,18 +107,22 @@ events until cancelled. `shutdown()` drains in-flight work.
 
 ## Point it at real hardware
 
-Swap the device configuration. Everything else is unchanged:
+Swap the device configuration for your own connector, a `BaseConnector`
+subclass that speaks your device's protocol. Everything else is unchanged:
 
 ```python
-from py20305.connectors.config import SunSpecDeviceConfig
+from py20305.connectors.config import CustomDeviceConfig
 
 registry = ConnectorConfigRegistry([
-    SunSpecDeviceConfig(lfdi=lfdi, host="192.168.1.50", port=502, unit_id=1),
+    CustomDeviceConfig(
+        lfdi=lfdi,
+        class_path="myproject.connectors.MyInverter",
+        init_kwargs={"host": "192.168.1.50"},
+    ),
 ])
 ```
 
-See [Connecting devices](connectors.md) for serial, TLS-wrapped Modbus, and
-writing a connector of your own.
+See [Connecting devices](connectors.md) for writing the connector.
 
 ## Next steps
 

@@ -20,7 +20,7 @@ with the distribution's Python packages:
 ```bash
 sudo install -d -o py20305 -g py20305 /opt/py20305
 sudo -u py20305 python3 -m venv /opt/py20305/venv
-sudo -u py20305 /opt/py20305/venv/bin/pip install "py20305[cli,sunspec]"
+sudo -u py20305 /opt/py20305/venv/bin/pip install "py20305[cli]"
 ```
 
 Put the configuration and certificates where the unit expects them. Paths
