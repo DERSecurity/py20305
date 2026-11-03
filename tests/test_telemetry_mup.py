@@ -854,7 +854,8 @@ class TestPhasedSystemReadings:
         assert _create_mrid(SAMPLE_LFDI, index=7).value not in types
 
     def test_unphased_readings_keep_slots_4_and_7(self, sample_monitoring_data):
-        overrides = {"V": ReadingOverride(phase=0), "A": ReadingOverride(multiplier=-2)}
+        # Phase 0 is "not applicable"; a negative phase is ignored as invalid.
+        overrides = {"V": ReadingOverride(phase=0), "A": ReadingOverride(phase=-1)}
         types = self._types(create_mup(SAMPLE_LFDI, sample_monitoring_data, 300, overrides))
 
         assert _create_mrid(SAMPLE_LFDI, index=4).value in types

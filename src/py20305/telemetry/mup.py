@@ -508,9 +508,13 @@ _SYSTEM_SLOT_KEYS: dict[int, str] = {4: "V", 7: "A"}
 
 
 def _has_phase(override: ReadingOverride | None) -> bool:
-    """Return True when an override sets a phase other than 0 (not applicable)."""
+    """Return True when an override sets a phase that applies, one above 0.
+
+    0 is "not applicable", and a negative phase is ignored by
+    :func:`_effective_spec`, so neither moves the reading off its slot.
+    """
     phase = getattr(override, "phase", None) if override is not None else None
-    return isinstance(phase, int) and not isinstance(phase, bool) and phase != 0
+    return isinstance(phase, int) and not isinstance(phase, bool) and phase > 0
 
 
 def _phased_totals(
