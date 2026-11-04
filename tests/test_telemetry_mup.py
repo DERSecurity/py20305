@@ -207,6 +207,10 @@ class TestValidation:
             Reading(uom=38, value=1.0, multiplier=12),
             Reading(uom=38, value=1.0, quality_flags=0x1_0000),
             Reading(uom=38, value=1.0, phase=True),
+            Reading(uom=38, value=1.0, phase=256),
+            Reading(uom=256, value=1.0),
+            Reading(uom=38, value=1.0, data_qualifier=300),
+            Reading(uom=72, value=1.0, flow_direction=256),
             "W",
         ],
     )

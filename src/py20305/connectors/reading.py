@@ -155,12 +155,18 @@ def reading_key(reading: Reading) -> str:
     )
 
 
+def _is_uint8(code: object) -> bool:
+    """Return True for an int in 0..255, the range of a UInt8 ReadingType code."""
+    return isinstance(code, int) and not isinstance(code, bool) and 0 <= code <= 0xFF
+
+
 def is_valid_reading(reading: object) -> bool:
     """Return True when ``reading`` is a :class:`Reading` the library can post.
 
-    The codes must be non-negative ints, the multiplier in -9..9, the quality
-    flags 16 bits, and the value a finite number. A bool is not accepted where
-    an int or a number is expected.
+    The ReadingType codes must be ints in 0..255 (each is a UInt8 in the IEEE
+    2030.5 schema), the multiplier in -9..9, the quality flags 16 bits, and the
+    value a finite number. A bool is not accepted where an int or a number is
+    expected.
     """
     if not isinstance(reading, Reading):
         return False
@@ -171,10 +177,9 @@ def is_valid_reading(reading: object) -> bool:
         reading.data_qualifier,
         reading.accumulation_behaviour,
     )
-    if any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in codes):
+    if not all(_is_uint8(c) for c in codes):
         return False
-    flow = reading.flow_direction
-    if flow is not None and (isinstance(flow, bool) or not isinstance(flow, int) or flow < 0):
+    if reading.flow_direction is not None and not _is_uint8(reading.flow_direction):
         return False
     mult = reading.multiplier
     if mult is not None and (isinstance(mult, bool) or not isinstance(mult, int)):

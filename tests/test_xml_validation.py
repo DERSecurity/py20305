@@ -33,7 +33,8 @@ TYPE = "<type>4</type>"
 def _capability(*children: str, csipaus: str = CSIPAUS) -> bytes:
     """A DERCapability body with ``children`` in the order given."""
     return (
-        f'<DERCapability xmlns="{SEP}" xmlns:csipaus="{csipaus}">' + "".join(children)
+        f'<DERCapability xmlns="{SEP}" xmlns:csipaus="{csipaus}">'
+        + "".join(children)
         + "</DERCapability>"
     ).encode()
 
@@ -117,6 +118,17 @@ def test_ieee_2030_5_elements_inside_an_extension_are_checked_with_it(
 
     assert (errors == []) is valid
     assert all(error.startswith("opModExpLimW: ") for error in errors)
+
+
+def test_stray_text_after_an_extension_is_an_error_not_a_parse_failure() -> None:
+    errors = validate_xml(_capability(MODES, RATING, _doe() + "stray", TYPE))
+
+    assert errors
+    assert not any("parse error" in error for error in errors)
+
+
+def test_whitespace_after_an_extension_is_valid() -> None:
+    assert validate_xml(_capability(MODES, RATING, _doe() + "\n  ", TYPE)) == []
 
 
 def test_an_explicit_schema_path_validates_against_that_schema_alone() -> None:

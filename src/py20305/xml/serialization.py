@@ -240,8 +240,28 @@ def _set_aside_extensions(doc: etree._Element) -> list[etree._Element]:
     for element in found:
         parent = element.getparent()
         if parent is not None:
+            _keep_tail(element)
             parent.remove(element)
     return found
+
+
+def _keep_tail(element: etree._Element) -> None:
+    """Move an element's tail text to where it stays in the document once removed.
+
+    The tail is text of the parent, so the IEEE 2030.5 layer must still see it:
+    stray text beside an extension is an error of the body around it.
+    """
+    tail = element.tail
+    if not tail:
+        return
+    element.tail = None
+    previous = element.getprevious()
+    if previous is not None:
+        previous.tail = (previous.tail or "") + tail
+    else:
+        parent = element.getparent()
+        if parent is not None:
+            parent.text = (parent.text or "") + tail
 
 
 def _extension_errors(element: etree._Element, schema_dir: Path | None) -> list[str]:
@@ -252,7 +272,9 @@ def _extension_errors(element: etree._Element, schema_dir: Path | None) -> list[
     if known is None:
         return [f"{name}: no schema is known for namespace {namespace!r}"]
     file_name, declared = known
-    standalone = etree.fromstring(etree.tostring(element), parser=_SAFE_PARSER)
+    # Without its tail: text after the element belongs to its parent, and
+    # would make the standalone copy unparseable.
+    standalone = etree.fromstring(etree.tostring(element, with_tail=False), parser=_SAFE_PARSER)
     if declared != namespace:
         for node in standalone.iter():
             if isinstance(node.tag, str) and _namespace_of(node) == namespace:
