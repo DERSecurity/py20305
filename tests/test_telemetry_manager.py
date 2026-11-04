@@ -1666,29 +1666,25 @@ class TestRunsWithoutAStore:
 
 
 class _RecordingForwarder:
-    """Stands in for the forwarder manager, keeping what was queued."""
+    """Keeps every device record the emitter reports."""
 
     def __init__(self):
         self.events = []
 
-    def queue_event(self, event):
-        self.events.append(event)
+    def __call__(self, record):
+        self.events.append(record)
 
 
 def _make_telemetry():
-    """A live DeviceTelemetryEmitter backed by a recording forwarder."""
+    """A live DeviceTelemetryEmitter reporting to a recording observer."""
     from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
-    from py20305.forwarders.config import DeviceTelemetryConfig
 
     fw = _RecordingForwarder()
-    emitter = DeviceTelemetryEmitter(fw, DeviceTelemetryConfig(enabled=True), client_id="site-a")
-    return emitter, fw
+    return DeviceTelemetryEmitter(fw), fw
 
 
-def _points_of(event):
-    import json
-
-    return json.loads(event.payload["payload"]["data"])["points"]
+def _points_of(record):
+    return dict(record.values)
 
 
 class TestManagerReadsAreReported:
@@ -1717,7 +1713,7 @@ class TestManagerReadsAreReported:
         await manager._metering_cycle(SAMPLE_LFDI.lower())
 
         assert len(fw.events) == 1
-        assert fw.events[0].payload["direction"] == "upstream"
+        assert fw.events[0].operation == "read"
         assert "alarmStatus" in _points_of(fw.events[0])
 
         await manager.shutdown()

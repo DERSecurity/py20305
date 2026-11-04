@@ -109,12 +109,12 @@ write to it.
 
 ### Events
 
-Each lifecycle record the [control audit trail](forwarding.md#the-control-audit-trail)
-builds is kept here, whether or not the audit trail is published. The first
+Each lifecycle record the [control audit trail](observers.md#the-control-audit-trail)
+builds is kept here, whether or not an audit observer is attached. The first
 record of each event also carries the control itself: its description, its
 program's description, its interval and its `DERControlBase` settings, so a
 report can say "export limit 50%" after the server has stopped serving the
-control. Published audit records do not change.
+control. The records an audit observer receives do not carry it.
 
 Every DERControlResponse is kept per device with its status code, and a POST
 that failed is kept with its error.

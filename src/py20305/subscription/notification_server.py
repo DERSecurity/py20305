@@ -9,22 +9,38 @@ from __future__ import annotations
 import asyncio
 import logging
 import ssl
+import time
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Literal
 
 from aiohttp import web
 from lxml import etree
 
+from py20305.client.connector import SocketPair, socket_pair_of
+from py20305.client.exchange import bounded, endpoint, root_element, validate
 from py20305.client.tls import build_cipher_string
-from py20305.forwarders.connection_telemetry import SERVICE_IEEE2030_5, ConnectionRole
-from py20305.forwarders.ocsf import ConnectionDirectionId, Endpoint, NetworkActivityId
 from py20305.models.sep.sep import Notification
+from py20305.observers import (
+    NO_OBSERVERS,
+    AnomalyCode,
+    ConnectionDirection,
+    ConnectionEvent,
+    ConnectionOutcome,
+    ConnectionRole,
+    ConnectionTransport,
+    ExchangeDirection,
+    ExchangeRecord,
+    ObserverGuard,
+    Observers,
+    ProtocolAnomaly,
+    redact_headers,
+)
 from py20305.xml.serialization import from_xml
 
 if TYPE_CHECKING:
     from py20305.client.tls import TlsConfig
     from py20305.client.traffic_recorder import TrafficRecorder
-    from py20305.forwarders.connection_telemetry import LinkObserver
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +99,10 @@ class NotificationServer:
         # Set while an operator-triggered comms-loss simulation is running:
         # notifications are still accepted on the wire but are not acted on.
         self._suspended = False
-        #: Receives one connection event per notification request, with the
-        #: ``server`` role. ``None`` reports nothing.
-        self.connection_observer: LinkObserver | None = None
+        #: Receives one exchange record and one connection event per
+        #: notification request, and an anomaly for each one refused or dropped.
+        self.observers: Observers = NO_OBSERVERS
+        self._observer_guard = ObserverGuard("notification observer")
 
     @property
     def on_notification(self) -> NotificationCallback | None:
@@ -251,50 +268,125 @@ class NotificationServer:
             ctx.verify_mode = ssl.CERT_OPTIONAL
         return ctx
 
-    def _report_request(self, request: web.Request, *, rejected: str | None = None) -> None:
+    def _connection_event(
+        self, request: web.Request, pair: SocketPair, refused: str | None
+    ) -> None:
         """Report one inbound notification request to the connection observer.
 
         Reported per request: aiohttp accepts the connection before any
         application code runs, so a request is the first point this listener
         can observe. A TLS handshake that fails never reaches it.
         """
-        observer = self.connection_observer
+        observer = self.observers.connection
         if observer is None:
             return
-        try:
-            transport = request.transport
-            peer = transport.get_extra_info("peername") if transport else None
-            local = transport.get_extra_info("sockname") if transport else None
-            src = Endpoint(ip=str(peer[0]), port=int(peer[1])) if peer else None
-            dst = (
-                Endpoint(ip=str(local[0]), port=int(local[1]))
-                if local
-                else Endpoint(ip=self._host, port=self._port)
-            )
-            if rejected is None:
-                observer.record_connection(
-                    role=ConnectionRole.SERVER,
-                    service=SERVICE_IEEE2030_5,
-                    direction=ConnectionDirectionId.INBOUND,
-                    src=src,
-                    dst=dst,
-                )
-            else:
-                observer.record_connection_failure(
-                    role=ConnectionRole.SERVER,
-                    service=SERVICE_IEEE2030_5,
-                    direction=ConnectionDirectionId.INBOUND,
-                    reason=rejected,
-                    activity_id=NetworkActivityId.OPEN,
-                    status_code="401",
-                    src=src,
-                    dst=dst,
-                )
-        except Exception:
-            logger.debug("Could not report the notification connection", exc_info=True)
+        local = endpoint(pair.local)
+        self._observer_guard.deliver(
+            observer,
+            ConnectionEvent(
+                role=ConnectionRole.LISTENER,
+                direction=ConnectionDirection.INBOUND,
+                outcome=ConnectionOutcome.ACCEPTED
+                if refused is None
+                else ConnectionOutcome.REFUSED,
+                transport=ConnectionTransport.TLS if request.secure else ConnectionTransport.TCP,
+                remote=endpoint(pair.remote),
+                local=local,
+                reason=refused or "",
+                status=401 if refused is not None else None,
+                tls_version=pair.tls_version,
+                tls_cipher=pair.tls_cipher,
+                peer_cert_sha256=pair.peer_cert_sha256,
+            ),
+        )
 
-    async def _handle_notify(self, request: web.Request) -> web.Response:
-        """Handle POST /notify from the IEEE 2030.5 server."""
+    def _anomaly(self, pair: SocketPair, exchange_id: str, code: AnomalyCode, message: str) -> None:
+        """Report a notification refused or dropped to the anomaly observer."""
+        observer = self.observers.anomaly
+        if observer is None:
+            return
+        self._observer_guard.deliver(
+            observer,
+            ProtocolAnomaly.of(
+                code,
+                bounded(message),
+                exchange_id=exchange_id,
+                method="POST",
+                path="/notify",
+                peer=endpoint(pair.remote),
+            ),
+        )
+
+    def _exchange(
+        self,
+        request: web.Request,
+        pair: SocketPair,
+        exchange: _Notification,
+        response: web.StreamResponse,
+    ) -> None:
+        """Report one notification request and the response sent back to it."""
+        observers = self.observers
+        if observers.exchange is None:
+            return
+        received_at = time.time()
+        received_monotonic = time.monotonic()
+        response_body = getattr(response, "body", None)
+        response_bytes = (
+            bytes(response_body) if isinstance(response_body, (bytes, bytearray)) else None
+        )
+        request_headers = tuple(request.headers.items())
+        response_headers = tuple(response.headers.items())
+        request_valid, request_error = validate(exchange.body, request_headers, observers)
+        capture = observers.capture_bodies
+        self._observer_guard.deliver(
+            observers.exchange,
+            ExchangeRecord(
+                exchange_id=exchange.exchange_id,
+                direction=ExchangeDirection.NOTIFICATION,
+                method=request.method,
+                url=str(request.url),
+                path=request.path_qs,
+                request_headers=redact_headers(request_headers, observers.redacted_headers),
+                request_body=exchange.body if capture else None,
+                status=response.status,
+                response_headers=redact_headers(response_headers, observers.redacted_headers),
+                response_body=response_bytes if capture else None,
+                sent_at=exchange.started_at,
+                received_at=received_at,
+                sent_monotonic=exchange.started_monotonic,
+                received_monotonic=received_monotonic,
+                duration=received_monotonic - exchange.started_monotonic,
+                local=endpoint(pair.local),
+                remote=endpoint(pair.remote),
+                tls_version=pair.tls_version,
+                tls_cipher=pair.tls_cipher,
+                server_cert_sha256=pair.peer_cert_sha256,
+                resource_type=root_element(exchange.body),
+                request_valid=request_valid,
+                request_validation_error=request_error,
+            ),
+        )
+
+    async def _handle_notify(self, request: web.Request) -> web.StreamResponse:
+        """Handle POST /notify, and report it to the observers."""
+        exchange = _Notification()
+        if not self.observers.any:
+            return await self._handle_notification(request, exchange)
+        pair = socket_pair_of(request.transport) if request.transport else SocketPair(None, None)
+        response = await self._handle_notification(request, exchange)
+        try:
+            self._connection_event(request, pair, exchange.refused)
+            if exchange.anomaly is not None:
+                self._anomaly(pair, exchange.exchange_id, *exchange.anomaly)
+            self._exchange(request, pair, exchange, response)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.debug("Could not report a notification request", exc_info=True)
+        return response
+
+    async def _handle_notification(
+        self, request: web.Request, exchange: _Notification
+    ) -> web.Response:
+        """Handle POST /notify from the IEEE 2030.5 server, noting what happened in ``exchange``."""
         # Client-cert mode check (warn/enforce). With CERT_OPTIONAL the
         # TLS layer accepts handshakes without a client cert, so the
         # "no cert presented" decision lives here at the app layer.
@@ -317,7 +409,11 @@ class NotificationServer:
                         dedup_key=f"notif_mtls_reject:{remote}",
                         details={"remote": remote},
                     )
-                    self._report_request(request, rejected="No client certificate presented")
+                    exchange.refused = "No client certificate presented"
+                    exchange.anomaly = (
+                        AnomalyCode.REJECTED_NOTIFICATION,
+                        f"Notification from {remote} refused: no client certificate",
+                    )
                     return web.Response(status=401, text="client certificate required")
                 # warn mode: log and accept
                 report(
@@ -333,12 +429,16 @@ class NotificationServer:
                     details={"remote": remote},
                 )
 
-        self._report_request(request)
         try:
             body = await request.read()
-        except Exception:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("Failed to read notification request body")
+            exchange.anomaly = (
+                AnomalyCode.UNREADABLE_NOTIFICATION,
+                f"Notification body could not be read: {exc}",
+            )
             return web.Response(status=400, text="Bad Request")
+        exchange.body = body
 
         remote = request.remote or "<unknown>"
         if self._traffic_recorder is not None:
@@ -358,6 +458,10 @@ class NotificationServer:
                 details={"remote": remote, "error": str(exc)},
                 exc_info=True,
             )
+            exchange.anomaly = (
+                AnomalyCode.REJECTED_NOTIFICATION,
+                f"Notification from {remote} is not a valid Notification: {exc}",
+            )
             return web.Response(status=400, text="Invalid notification XML")
 
         if not validate_notification(notification, body):
@@ -367,6 +471,10 @@ class NotificationServer:
                 source="notification",
                 dedup_key=f"notif_parse:{remote}",
                 details={"remote": remote, "reason": "xsi:type mismatch"},
+            )
+            exchange.anomaly = (
+                AnomalyCode.REJECTED_NOTIFICATION,
+                f"Notification from {remote} failed the xsi:type check",
             )
             return web.Response(status=400, text="xsi:type mismatch")
 
@@ -381,6 +489,11 @@ class NotificationServer:
             logger.info(
                 "Notification for %s dropped: comms-loss simulation active",
                 notification.subscribed_resource or "<unknown>",
+            )
+            exchange.anomaly = (
+                AnomalyCode.DROPPED_NOTIFICATION,
+                f"Notification for {notification.subscribed_resource or '<unknown>'} dropped "
+                "while a loss-of-communications simulation runs",
             )
             return web.Response(status=201, text="Created")
 
@@ -431,6 +544,20 @@ class NotificationServer:
                 },
                 exc_info=True,
             )
+
+
+class _Notification:
+    """What happened to one notification request, for the observers."""
+
+    def __init__(self) -> None:
+        self.exchange_id = uuid.uuid4().hex
+        self.started_at = time.time()
+        self.started_monotonic = time.monotonic()
+        self.body: bytes | None = None
+        #: Why the listener refused the request, for the connection event.
+        self.refused: str | None = None
+        #: The anomaly to report, as (code, message).
+        self.anomaly: tuple[AnomalyCode, str] | None = None
 
 
 def parse_notification(body: bytes) -> Notification:

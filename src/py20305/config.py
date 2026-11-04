@@ -29,7 +29,6 @@ from pydantic import (
 
 from py20305.client.dnssd.wire import DEFAULT_SERVICE, validate_service, validate_subtype
 from py20305.connectors.config import DeviceConfig
-from py20305.forwarders.config import ForwarderConfig
 from py20305.history.config import HistoryConfig
 
 #: Suffixes understood by :func:`load_config`.
@@ -472,14 +471,6 @@ class ClientConfig(_Strict):
     subscription: SubscriptionConfig = Field(default_factory=SubscriptionConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     advertise: AdvertiseConfig = Field(default_factory=AdvertiseConfig)
-    forwarders: ForwarderConfig | None = Field(
-        default=None,
-        description=(
-            "Publish captured traffic to a monitoring system. Omitted, the client "
-            "forwards nothing and never loads the transport."
-        ),
-    )
-
     history: HistoryConfig = Field(
         default_factory=HistoryConfig,
         description=(
@@ -504,6 +495,18 @@ class ClientConfig(_Strict):
             "does not already have one. Registering when it does would create a duplicate."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _forwarders_section_was_removed(cls, data: Any) -> Any:
+        """Name the removed ``forwarders`` section rather than report an unknown key."""
+        if isinstance(data, dict) and "forwarders" in data:
+            raise ValueError(
+                "the forwarders section was removed: the client no longer publishes "
+                "traffic itself. An embedding application attaches observers "
+                "(py20305.observers) and publishes the records it receives"
+            )
+        return data
 
     @field_validator("registration_pins")
     @classmethod
@@ -571,42 +574,13 @@ class ClientConfig(_Strict):
         # which section it appeared in.
         devices = [self._resolve_device_paths(device, base) for device in self.devices]
 
-        # The forwarder's paths are paths in the same file, read the same way,
-        # so they resolve the same way: its schema directory, and the broker
-        # credentials, which go straight to an SSL context exactly as a
-        # device's do.
-        forwarders = self._resolve_forwarder_paths(self.forwarders, base)
-
         return self.model_copy(
             update={
                 "tls": tls,
                 "logging": logging_config,
                 "devices": devices,
-                "forwarders": forwarders,
             }
         )
-
-    @staticmethod
-    def _resolve_forwarder_paths(forwarders: Any, base: Path) -> Any:
-        """Resolve the forwarder's schema directory and broker credentials."""
-        if forwarders is None:
-            return None
-
-        updates: dict[str, Any] = {}
-        if forwarders.schema_dir is not None and not forwarders.schema_dir.is_absolute():
-            updates["schema_dir"] = (base / forwarders.schema_dir).resolve()
-
-        mqtt = forwarders.mqtt
-        if mqtt is not None:
-            mqtt_updates = {
-                field: (base / value).resolve()
-                for field in ("cert_path", "key_path", "ca_path")
-                if (value := getattr(mqtt, field, None)) is not None and not value.is_absolute()
-            }
-            if mqtt_updates:
-                updates["mqtt"] = mqtt.model_copy(update=mqtt_updates)
-
-        return forwarders.model_copy(update=updates) if updates else forwarders
 
     @staticmethod
     def _resolve_device_paths(device: Any, base: Path) -> Any:

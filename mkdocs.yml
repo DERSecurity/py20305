@@ -67,7 +67,7 @@ nav:
       - Finding servers: discovery.md
       - Connecting devices: connectors.md
       - Management API: api.md
-      - Forwarding traffic: forwarding.md
+      - Observers: observers.md
       - Operations history: history.md
       - Running in a container: docker.md
       - Testing: testing.md
@@ -77,4 +77,4 @@ nav:
       - Events: reference/events.md
       - Telemetry: reference/telemetry.md
       - Connectors: reference/connectors.md
-      - Forwarders: reference/forwarders.md
+      - Observers: reference/observers.md

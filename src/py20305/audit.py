@@ -3,25 +3,19 @@
 A utility program asks of a control client what it did with each control it
 was sent: when an event was scheduled, when it went active and on which
 devices, how it ended, and when the client stopped acting on the server
-because the server went quiet. The protocol exchanges themselves are already
-forwarded, but they record what the server *said*, not what this client
-*decided*. These records are the decisions.
+because the server went quiet. The exchange records say what the server
+*said*, not what this client *decided*. These records are the decisions.
 
-Each record is a flat JSON document published on its own topic, so a search
-index stores every field as a field and an audit query hits one small index.
+Each record is a flat document. It is kept in the operations history when one
+is attached, and handed to the audit observer as an
+:class:`~py20305.observers.AuditRecord` when one is attached. Either, both or
+neither may be attached.
 
-Delivery is best-effort, as for every stream on this transport. What this
-module adds is the ability to tell a complete trail from an incomplete one:
-every record carries ``boot_id`` and ``seq``, one counter per client shared
-with that client's device-write records, so a gap in ``seq`` marks a lost
-record and a new ``boot_id`` marks a restart.
+Every record carries ``boot_id`` and ``seq``, one counter per client, so a gap
+in ``seq`` marks a lost record and a new ``boot_id`` marks a restart.
 
 Nothing here may raise into event processing. A trail that can stop a control
 from being applied is worse than no trail.
-
-The same records can also be kept locally, in the operations history. That is
-independent of publishing: a client with no forwarder can keep a history, and
-a client that publishes need not keep one.
 """
 
 from __future__ import annotations
@@ -31,13 +25,12 @@ import logging
 import re
 import uuid
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
-from py20305.forwarders.base import EventFrame
+from py20305.observers import AuditObserver, AuditRecord, ObserverGuard
 
 if TYPE_CHECKING:
-    from py20305.forwarders.config import AuditConfig
-    from py20305.forwarders.manager import ForwarderManager
     from py20305.history.events import EventHistory
 
 logger = logging.getLogger(__name__)
@@ -72,16 +65,14 @@ def _lfdi(value: str) -> str:
 class AuditSequence:
     """One client's audit counter: a random ``boot_id`` and a rising ``seq``.
 
-    Shared by that client's device-write and lifecycle records, so a single gap
-    check covers both streams. One per client rather than per process: two
-    clients interleaving on one counter would each show a gap at every other
-    record, which reads as loss.
+    One per client rather than per process: two clients interleaving on one
+    counter would each show a gap at every other record, which reads as loss.
     """
 
     def __init__(self) -> None:
         self.boot_id = uuid.uuid4().hex
-        # next() on itertools.count is atomic under the GIL, so a write
-        # recorded from a worker thread cannot reuse a number.
+        # next() on itertools.count is atomic under the GIL, so a record
+        # made from a worker thread cannot reuse a number.
         self._counter = itertools.count(1)
 
     def stamp(self) -> dict[str, Any]:
@@ -90,42 +81,41 @@ class AuditSequence:
 
 
 class AuditEmitter:
-    """Publishes lifecycle and loss-of-communications records.
+    """Builds lifecycle and loss-of-communications records, and hands them on.
 
-    Built unconfigured and disabled, then pointed at the transport and the
-    operator's configuration once both exist -- the same two-step wiring the
-    device telemetry emitter uses, for the same reason: the forwarder is
-    built after the client.
+    Disabled until an operations history or an audit observer is attached.
     """
 
     def __init__(
         self,
-        forwarder: ForwarderManager | None = None,
-        config: AuditConfig | None = None,
+        observer: AuditObserver | None = None,
         *,
         client_id: str | None = None,
         sequence: AuditSequence | None = None,
     ) -> None:
-        from py20305.forwarders.config import AuditConfig
-
-        self._forwarder = forwarder
-        self._config = config if config is not None else AuditConfig()
+        self._observer = observer
+        self._guard = ObserverGuard("audit observer")
         self._client_id = client_id or ""
         self._sequence = sequence if sequence is not None else AuditSequence()
         self._history: EventHistory | None = None
-        #: Records that failed to build or queue, by kind. A trail that
+        #: Records that failed to build or store, by kind. A trail that
         #: stopped working must not look like a client with nothing to report.
         self.emit_failures: dict[str, int] = {}
 
     @property
     def enabled(self) -> bool:
-        """Whether records go anywhere: published, kept in the history, or both."""
-        return self.publishing or self._history is not None
+        """Whether records go anywhere: to the observer, the history, or both."""
+        return self._observer is not None or self._history is not None
 
     @property
-    def publishing(self) -> bool:
-        """Whether records will actually be published."""
-        return self._config.enabled and self._forwarder is not None
+    def observing(self) -> bool:
+        """Whether an audit observer is attached."""
+        return self._observer is not None
+
+    @property
+    def observer_failures(self) -> int:
+        """How many times the audit observer raised."""
+        return self._guard.failures
 
     @property
     def keeps_history(self) -> bool:
@@ -133,24 +123,21 @@ class AuditEmitter:
         return self._history is not None
 
     def attach_history(self, history: EventHistory | None) -> None:
-        """Keep every record in ``history`` as well, whether or not it is published."""
+        """Keep every record in ``history`` as well, whether or not it is observed."""
         self._history = history
+
+    def attach_observer(self, observer: AuditObserver | None) -> None:
+        """Hand every record to ``observer``, or stop with None."""
+        self._observer = observer
 
     @property
     def sequence(self) -> AuditSequence:
-        """This client's counter. Hand it to the client's device telemetry
-        emitter so device writes number in the same stream."""
+        """This client's counter."""
         return self._sequence
 
-    def attach_forwarder(self, forwarder: ForwarderManager | None) -> None:
-        """Point the emitter at the transport once one exists."""
-        self._forwarder = forwarder
-
-    def configure(self, config: AuditConfig, *, client_id: str | None = None) -> None:
-        """Apply operator configuration after construction."""
-        self._config = config
-        if client_id is not None:
-            self._client_id = client_id
+    def set_client_id(self, client_id: str) -> None:
+        """Name the client in every record, usually by its certificate's LFDI."""
+        self._client_id = client_id
 
     def event_transition(
         self,
@@ -324,10 +311,10 @@ class AuditEmitter:
         record.update(self._sequence.stamp())
         if self._history is not None and not self._history.record(record, control=control):
             self._failed(f"{record['kind']} history")
-        if self.publishing:
-            assert self._forwarder is not None  # guarded by `publishing`
-            self._forwarder.queue_event(
-                EventFrame(payload=record, topic_suffix=self._config.topic_suffix, kind="audit")
+        if self._observer is not None:
+            self._guard.deliver(
+                self._observer,
+                AuditRecord(kind=str(record["kind"]), data=MappingProxyType(dict(record))),
             )
 
     def _failed(self, kind: str) -> None:

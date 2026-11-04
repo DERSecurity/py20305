@@ -15,7 +15,6 @@ you may not need:
 | Extra | Adds | For |
 |---|---|---|
 | `api` | `fastapi`, `uvicorn` | The HTTP management API |
-| `mqtt` | `aiomqtt` | Forwarding captured traffic to a monitoring system |
 | `all` | all of the above | |
 
 ```bash
@@ -128,4 +127,4 @@ See [Connecting devices](connectors.md) for writing the connector.
 
 - [Connecting devices](connectors.md) — connectors, and how to write one
 - [Management API](api.md) — observing a running client over HTTP
-- [Forwarding traffic](forwarding.md) — publishing exchanges to a monitor
+- [Observers](observers.md) — records of exchanges, connections and anomalies

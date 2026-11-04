@@ -126,7 +126,9 @@ class DerResourceManager:
         """
         values = await getattr(connector, method)()
         if self._telemetry is not None and isinstance(values, dict):
-            self._telemetry.record_read(lfdi, values, connector=connector, lfdi=lfdi)
+            self._telemetry.record_read(
+                lfdi, values, connector=connector, lfdi=lfdi, resource=method.removeprefix("fetch_")
+            )
         return values  # type: ignore[no-any-return]
 
     def start_device(

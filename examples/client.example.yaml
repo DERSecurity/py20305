@@ -155,9 +155,6 @@ connection:
 # so this is safe to leave on across restarts.
 # register_on_start: true
 
-# Publish captured traffic to a monitoring system. Omit the whole section and
-# the client forwards nothing and never opens a broker connection.
-#
 # Subscribe to server resources instead of relying on polling alone. The
 # listener binds notification_host:notification_port; notification_external_host
 # is the address the SERVER delivers to, and is required -- it becomes each
@@ -170,8 +167,7 @@ connection:
 
 # Read each configured device on a schedule and report it upstream: readings
 # mirrored as MirrorUsagePoints, and DERCapability, DERSettings, DERStatus and
-# DERAvailability PUT for the device. Also what makes southbound read telemetry
-# observable -- nothing else drives a device read.
+# DERAvailability PUT for the device.
 #
 # On by default. The rates below are the defaults; the server's
 # EndDevice.postRate overrides post_rate_seconds when it specifies one.
@@ -195,39 +191,3 @@ connection:
 #     enabled: true
 #   site_intervals:
 #     enabled: true
-
-# forwarders:
-#   mqtt:
-#     endpoint: broker.example.com
-#     port: 8883
-#     topic_base: py20305
-#     # All three, or none for a plain broker. Relative paths resolve against
-#     # this file, the same as the client certificate above.
-#     ca_path: broker-ca.pem
-#     cert_path: broker.pem
-#     key_path: broker.key
-#     # A lost broker connection is retried in the background. The base delay
-#     # starts here and doubles after each failed attempt, up to the maximum.
-#     # It starts here again once a new connection publishes or stays up for
-#     # the maximum delay.
-#     reconnect_initial_delay_seconds: 1
-#     reconnect_max_delay_seconds: 60
-#     # True makes startup fail when the first connection fails, instead of
-#     # retrying in the background.
-#     require_initial_connection: false
-#   # The Modbus reads and writes between this client and its device, reported
-#   # in the same envelope as the 2030.5 traffic. Off unless asked for.
-#   device_telemetry:
-#     enabled: true
-#   # The client's own connection outcomes -- TLS failures, refusals, error
-#   # statuses -- as OCSF Network Activity events on their own topic
-#   # (out/connection-events under the topic base). The one record a passive
-#   # sensor cannot produce. Off unless asked for.
-#   connection_telemetry:
-#     enabled: true
-#     # Successes are collapsed into one record per window; failures never
-#     # are. Zero emits one record per success.
-#     coalesce_window_seconds: 60
-#     # Set false where every connection attempt must be logged as its own
-#     # record.
-#     coalesce_successes: true

@@ -17,11 +17,11 @@ RUN python -m build --wheel --outdir /dist
 FROM python:3.12-slim AS runtime
 
 # The extras a container deployment actually uses: `cli` for the configuration
-# file the entrypoint reads, `mqtt` to forward.
+# file the entrypoint reads.
 # `api` is left out -- it serves on a port, and a deployment that wants it can
 # build with a different extra set rather than have every image carry a web
 # framework it does not serve.
-ARG EXTRAS=cli,mqtt
+ARG EXTRAS=cli
 
 COPY --from=build /dist/*.whl /tmp/
 RUN pip install --no-cache-dir "$(echo /tmp/*.whl)[${EXTRAS}]" \

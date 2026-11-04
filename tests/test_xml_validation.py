@@ -129,30 +129,23 @@ def test_an_explicit_schema_path_validates_against_that_schema_alone() -> None:
     assert error is not None and "doeModesSupported" in error
 
 
-class _RecordingForwarder:
-    running = True
+async def test_a_captured_csipaus_exchange_is_marked_valid(aiohttp_server) -> None:
+    from py20305.observers import Observers
 
-    def __init__(self) -> None:
-        self.frames: list = []
-
-    def queue_message(self, frame) -> None:
-        self.frames.append(frame)
-
-
-async def test_a_forwarded_csipaus_exchange_is_marked_valid(aiohttp_server) -> None:
     async def accept(request: web.Request) -> web.Response:
         return web.Response(status=204)
 
     app = web.Application()
     app.router.add_put("/der/1/dercap", accept)
     server = await aiohttp_server(app)
-    forwarder = _RecordingForwarder()
+    records: list = []
 
-    async with Sep2Client(str(server.make_url("")).rstrip("/")) as client:
-        client.forwarder = forwarder
+    async with Sep2Client(
+        str(server.make_url("")).rstrip("/"), observers=Observers(exchange=records.append)
+    ) as client:
         client.set_schema_validator(str(SCHEMAS))
         await client.put_bytes(
             "/der/1/dercap", _capability(MODES, RATING, TYPE, _doe(), csipaus=CSIPAUS_13)
         )
 
-    assert [(f.is_valid, f.validation_error) for f in forwarder.frames] == [(True, None)]
+    assert [(r.request_valid, r.request_validation_error) for r in records] == [(True, None)]

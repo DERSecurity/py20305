@@ -391,29 +391,25 @@ class TestDerResourceManagerShutdown:
 
 
 class _RecordingForwarder:
-    """Stands in for the forwarder manager, keeping what was queued."""
+    """Keeps every device record the emitter reports."""
 
-    def __init__(self) -> None:
-        self.events: list[Any] = []
+    def __init__(self):
+        self.events = []
 
-    def queue_event(self, event: Any) -> None:
-        self.events.append(event)
+    def __call__(self, record):
+        self.events.append(record)
 
 
-def _make_telemetry() -> tuple[Any, _RecordingForwarder]:
-    """A live DeviceTelemetryEmitter backed by a recording forwarder."""
+def _make_telemetry():
+    """A live DeviceTelemetryEmitter reporting to a recording observer."""
     from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
-    from py20305.forwarders.config import DeviceTelemetryConfig
 
     fw = _RecordingForwarder()
-    emitter = DeviceTelemetryEmitter(fw, DeviceTelemetryConfig(enabled=True), client_id="site-a")
-    return emitter, fw
+    return DeviceTelemetryEmitter(fw), fw
 
 
-def _points_of(event: Any) -> dict[str, Any]:
-    import json
-
-    return json.loads(event.payload["payload"]["data"])["points"]
+def _points_of(record):
+    return dict(record.values)
 
 
 class TestReadsAreReported:
@@ -436,7 +432,7 @@ class TestReadsAreReported:
         await manager._capability_cycle("ab")
 
         assert len(fw.events) == 1
-        assert fw.events[0].payload["direction"] == "upstream"
+        assert fw.events[0].operation == "read"
         assert _points_of(fw.events[0]) == {"rtgMaxW": 15000}
 
     @pytest.mark.asyncio

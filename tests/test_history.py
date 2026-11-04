@@ -897,7 +897,7 @@ class TestRunnerClosesTheHistory:
         from tests.test_device_telemetry import LFDI_A, TestRunnerWiring
 
         client = MagicMock()
-        client.http.forwarder = None
+        client.http.observers = None
         client.connect = AsyncMock()
         client.run = AsyncMock(side_effect=lambda: asyncio.sleep(0))
         client.shutdown = AsyncMock()

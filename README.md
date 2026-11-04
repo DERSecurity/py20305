@@ -46,7 +46,7 @@ pip install py20305
 
 The base install is the protocol client. Extras add what you may not need:
 `cli` for the configuration-file runner, `api` for the HTTP management API,
-`mqtt` for traffic forwarding, or `all`.
+or `all`.
 
 ## Running it as a service
 
@@ -116,7 +116,7 @@ protocol, when you have one. Full walkthrough in the
 | **Subscriptions** | Subscribe/notify as an alternative to polling, with a notification listener |
 | **Runner** | A CLI, config file, connection retry and signal-handled shutdown |
 | **Management API** | Optional HTTP API for observing and nudging a running client |
-| **Forwarding** | Optional MQTT publication of every captured exchange |
+| **Observers** | Optional hooks that hand an embedding application a record of every HTTP exchange, connection event, protocol anomaly, device read and write, and audit record |
 
 ## Standards
 

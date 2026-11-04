@@ -16,6 +16,7 @@ from dataclasses import replace
 from functools import cache, partial
 from typing import Any
 
+from py20305.audit import AuditEmitter
 from py20305.client.http import Sep2Client
 from py20305.client.state import DerProgramState, DiscoveredState
 from py20305.client.timebase import ServerTimebase
@@ -37,7 +38,6 @@ from py20305.events.response import (
 from py20305.events.state_machine import EventRecord, EventState, EventStore
 from py20305.events.supersession import compared_mode_keys, compute_supersession
 from py20305.events.timers import EventTimerManager
-from py20305.forwarders.audit import AuditEmitter
 from py20305.history.events import EventHistory
 from py20305.json_form import (
     serialize_default_der_control,

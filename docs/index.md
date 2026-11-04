@@ -33,8 +33,9 @@ as the schedule moves through it. It does not act on the price itself: relaying
 is where the library stops and the connector's price handler begins.
 
 **Optionally, exposes itself.** An HTTP management API for observing and
-nudging a running client, and a forwarder that publishes every captured
-protocol exchange to a monitoring system over MQTT.
+nudging a running client, and observer hooks that hand an embedding
+application a record of every exchange, connection and anomaly, to log or
+pass to a monitoring system.
 
 ## Standards
 

@@ -54,11 +54,7 @@ api = [
 cli = [
     "pyyaml>=6.0",
 ]
-# Publishing captured protocol exchanges to a monitoring system over MQTT.
-mqtt = [
-    "aiomqtt>=2.0",
-]
-all = ["py20305[api,cli,mqtt]"]
+all = ["py20305[api,cli]"]
 # Building the documentation site. mkdocstrings reads the package's own
 # docstrings, so the docs build also proves the public API imports.
 docs = [

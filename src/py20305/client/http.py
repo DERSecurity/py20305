@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import re
 import ssl
 import time
-from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import replace
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -35,7 +36,7 @@ from py20305.client.errors import (
     Sep2RedirectError,
     Sep2TlsError,
 )
-from py20305.client.observer import ConnectionObserver
+from py20305.client.exchange import ExchangeScope, NullScope, endpoint
 from py20305.client.retry import RetryPolicy, with_retry
 from py20305.client.timebase import ServerTimebase
 from py20305.client.tls import (
@@ -44,6 +45,17 @@ from py20305.client.tls import (
     create_ssl_context,
     verify_ieee2030_5_chain,
 )
+from py20305.observers import (
+    NO_OBSERVERS,
+    ConnectionDirection,
+    ConnectionEvent,
+    ConnectionOutcome,
+    ConnectionRole,
+    ConnectionTransport,
+    ObserverGuard,
+    Observers,
+)
+from py20305.security.identity import compute_sfdi
 from py20305.xml.serialization import (
     APPLICATION_SEP_XML,
     NS_CSIPAUS,
@@ -72,7 +84,6 @@ def _parse_body(body: bytes, model_type: type[T], path: str) -> T:
 
 if TYPE_CHECKING:
     from py20305.client.traffic_recorder import TrafficRecorder
-    from py20305.forwarders import ForwarderManager, MessageDirection
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +147,17 @@ def _mirror_usage_point_lfdi(body: bytes) -> str | None:
     return (root.findtext(f"{{{_SEP_NS}}}deviceLFDI") or "").strip().lower()
 
 
+def _path_of(url: str) -> str:
+    """Return the path and query of a full URL, ``/`` when it has no path."""
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    return f"{path}?{parsed.query}" if parsed.query else path
+
+
+#: Statuses a raw proxy request accepts: it reports whatever the server answers.
+_ANY_STATUS = range(100, 600)
+
+
 def _port(url: SplitResult) -> int | None:
     return url.port or {"https": 443, "http": 80}.get(url.scheme)
 
@@ -189,8 +211,8 @@ class ResourceVersionCache:
 class Sep2Client:
     """Async client for IEEE 2030.5 REST API.
 
-    Optionally integrates with ForwarderManager to capture HTTP exchanges
-    for security auditing (e.g., a security monitoring system over MQTT).
+    Reports each HTTP exchange, connection event and protocol anomaly to the
+    observers attached with :attr:`observers` (see :mod:`py20305.observers`).
     """
 
     def __init__(
@@ -199,13 +221,12 @@ class Sep2Client:
         tls: TlsConfig | None = None,
         retry: RetryPolicy | None = None,
         timeout: aiohttp.ClientTimeout | None = None,
-        forwarder: ForwarderManager | None = None,
         traffic_recorder: TrafficRecorder | None = None,
         server_2018_compat: bool = False,
         always_send_alarm_status: bool = False,
         request_headers: dict[str, str] | None = None,
         timebase: ServerTimebase | None = None,
-        connection_observer: ConnectionObserver | None = None,
+        observers: Observers | None = None,
     ) -> None:
         """Initialize Sep2Client.
 
@@ -214,7 +235,6 @@ class Sep2Client:
             tls: TLS configuration for mTLS
             retry: Retry policy for transient failures
             timeout: HTTP timeout settings
-            forwarder: Optional ForwarderManager for message forwarding
             traffic_recorder: Optional TrafficRecorder for the Live Traffic view
             server_2018_compat: IEEE 2030.5-2018 compatibility mode
             always_send_alarm_status: Always emit <alarmStatus> in DERStatus PUTs
@@ -224,11 +244,10 @@ class Sep2Client:
             timebase: Shared server timebase; carried here so free functions
                 (discovery) and telemetry managers holding only this client can
                 observe/read server time. Defaults to a fresh identity instance.
-            connection_observer: Optional observer for this client's own
-                connection outcomes and established sockets — what a passive
-                capture beside the client cannot recover from inside TLS. May
-                also be attached after construction via the
-                ``connection_observer`` property. No observer, no reporting.
+            observers: The exchange, connection and anomaly observers, and
+                how exchanges are captured. May also be attached after
+                construction through the ``observers`` property. None reports
+                nothing.
         """
         self._base_url = base_url.rstrip("/")
         self._retry = retry or RetryPolicy()
@@ -240,7 +259,6 @@ class Sep2Client:
         # so repeated `_get_session()` calls return the same object: callers
         # (and tests) compare sessions by identity to detect a rebuild.
         self._gated_session: GatedSession | None = None
-        self._forwarder = forwarder
         self._traffic_recorder = traffic_recorder
         self._csip_aus_mode = False
         self._csipaus_namespace = NS_CSIPAUS
@@ -286,7 +304,7 @@ class Sep2Client:
 
         self._schema_path: Path | None = None  # XSD path, set via set_schema_validator()
 
-        # Parse server info for message forwarding
+        # The server's host and port, reported in observer records
         parsed = urlparse(self._base_url)
         self._server_host = parsed.hostname or ""
         self._server_port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -295,7 +313,7 @@ class Sep2Client:
         # *and* the LFDI request header (see _default_headers).
         self._client_lfdi: str | None = self._compute_client_lfdi(tls)
 
-        # URL prefix → device LFDI mapping for forwarded messages.
+        # URL prefix -> device LFDI, for attributing exchanges to devices.
         # Populated after discovery so each request can be attributed to
         # the correct device instead of using the client's cert LFDI.
         self._device_lfdi_by_prefix: dict[str, str] = {}
@@ -304,58 +322,120 @@ class Sep2Client:
         # chooses the location; kept apart so rediscovery does not clear it.
         self._device_lfdi_by_mup: dict[str, str] = {}
 
-        self._connection_observer = connection_observer
+        self._observers = observers if observers is not None else NO_OBSERVERS
+        self._observer_guard = ObserverGuard("exchange observer")
 
     @property
-    def connection_observer(self) -> ConnectionObserver | None:
-        """Return the attached connection observer, if any."""
-        return self._connection_observer
+    def observers(self) -> Observers:
+        """The attached observers. :data:`~py20305.observers.NO_OBSERVERS` reports nothing."""
+        return self._observers
 
-    @connection_observer.setter
-    def connection_observer(self, value: ConnectionObserver | None) -> None:
-        """Attach (or detach) the connection observer.
+    @observers.setter
+    def observers(self, value: Observers | None) -> None:
+        """Attach observers, or detach them all with None.
 
-        Settable after construction because an embedder typically reads the
-        configuration that decides on observation later than it builds the
-        client. The connector's socket callback binds late, so connections
-        established by an already-open session still reach a newly attached
-        observer.
-
-        The outgoing observer is flushed first: anything it has buffered --
-        an open success window, say -- would otherwise be unreachable when
-        ``close()`` later flushes only the current observer, and silently
-        losing recorded attempts is the one failure a connection log must
-        not have.
-
-        Replace observers between requests, not during them: a request in
-        flight pinned the observer it started with, so a mid-request swap can
-        attribute that request's completion to the flushed outgoing observer.
-        Observation is wired at assembly time, where this cannot arise.
+        The connector's socket callback reads this attribute when a connection
+        is made, so a connection made after the change is reported to the new
+        observers. An attempt in flight keeps the observers it started with.
         """
-        outgoing = self._connection_observer
-        if outgoing is not None and outgoing is not value:
-            outgoing.flush()
-        self._connection_observer = value
+        self._observers = value if value is not None else NO_OBSERVERS
+
+    @property
+    def observer_failures(self) -> int:
+        """How many times an attached observer raised."""
+        return self._observer_guard.failures
 
     def _dispatch_connect(self, pair: SocketPair) -> None:
-        """Forward an established socket to the observer, if one is attached.
+        """Report an established connection to the connection observer, if one is attached."""
+        observer = self._observers.connection
+        if observer is None:
+            return
+        self._observer_guard.deliver(
+            observer,
+            ConnectionEvent(
+                role=ConnectionRole.CLIENT,
+                direction=ConnectionDirection.OUTBOUND,
+                outcome=ConnectionOutcome.CONNECTED,
+                transport=(
+                    ConnectionTransport.TLS
+                    if isinstance(self._ssl, ssl.SSLContext)
+                    else ConnectionTransport.TCP
+                ),
+                remote=endpoint(pair.remote),
+                local=endpoint(pair.local),
+                server_host=self._server_host,
+                tls_version=pair.tls_version,
+                tls_cipher=pair.tls_cipher,
+                peer_cert_sha256=pair.peer_cert_sha256,
+            ),
+        )
 
-        Bound once into the connector at session creation; indirection rather
-        than the observer's own method so attaching or replacing the observer
-        mid-session takes effect without a session reset.
+    def _end_device_href(self, lfdi: str | None) -> str | None:
+        """Return the href registered for ``lfdi`` with :meth:`update_device_lfdi_prefixes`."""
+        if lfdi is None:
+            return None
+        wanted = lfdi.lower()
+        for prefix, registered in self._device_lfdi_by_prefix.items():
+            if registered.lower() == wanted:
+                return prefix
+        return None
+
+    def _exchange(
+        self,
+        method: str,
+        path: str,
+        url: str,
+        body: bytes | None,
+        *,
+        attempt: int = 1,
+        headers: dict[str, str] | None = None,
+        resource_hint: str | None = None,
+        expected: Iterable[int] = (),
+        device_lfdi: str | None = None,
+    ) -> ExchangeScope | NullScope:
+        """Open the scope that reports one attempt of a request to the observers.
+
+        Returns a scope that does nothing when no observer is attached.
+        ``device_lfdi`` attributes the exchange to a device when its path names
+        none, as for a MirrorUsagePoint POST.
         """
-        if self._connection_observer is not None:
-            self._connection_observer.on_connect(pair)
+        observers = self._observers
+        if not observers.any:
+            return NullScope()
+        lfdi = device_lfdi if device_lfdi is not None else self._resolve_device_lfdi(path)
+        request_headers = self._default_headers()
+        if headers:
+            request_headers.update(headers)
+        if observers.schema_dir is None and self._schema_path is not None:
+            observers = replace(observers, schema_dir=self._schema_path.parent)
+        return ExchangeScope(
+            observers=observers,
+            guard=self._observer_guard,
+            method=method,
+            url=url,
+            path=path,
+            request_headers=request_headers,
+            request_body=body,
+            attempt=attempt,
+            server_host=self._server_host,
+            server_port=self._server_port,
+            tls=isinstance(self._ssl, ssl.SSLContext),
+            client_lfdi=self._client_lfdi,
+            client_sfdi=self._client_sfdi(),
+            device_lfdi=lfdi,
+            end_device_href=self._end_device_href(lfdi),
+            resource_hint=resource_hint,
+            expected_statuses=expected,
+        )
 
-    @property
-    def forwarder(self) -> ForwarderManager | None:
-        """Return the forwarder manager."""
-        return self._forwarder
-
-    @forwarder.setter
-    def forwarder(self, value: ForwarderManager | None) -> None:
-        """Set the forwarder manager."""
-        self._forwarder = value
+    def _client_sfdi(self) -> int | None:
+        """Return the SFDI of this client's certificate, or None."""
+        if self._client_lfdi is None:
+            return None
+        try:
+            return compute_sfdi(self._client_lfdi)
+        except ValueError:
+            return None
 
     @property
     def traffic_recorder(self) -> TrafficRecorder | None:
@@ -370,7 +450,7 @@ class Sep2Client:
         """Update URL prefix → device LFDI mapping for message attribution.
 
         Called after discovery to map EndDevice and FSA path prefixes to
-        their device LFDIs. This allows _forward_message to attribute
+        their device LFDIs. This lets the exchange records attribute
         each request to the correct device.
 
         Args:
@@ -568,77 +648,6 @@ class Sep2Client:
             self._gated_session = GatedSession(self._session, self._comm_loss_simulation)
         return self._gated_session
 
-    def _forward_message(
-        self,
-        direction: MessageDirection,
-        message_type: str,
-        content: Any,
-        http_method: str,
-        uri: str,
-        status_code: int | None = None,
-        metadata: dict[str, Any] | None = None,
-        raw_xml: bytes | None = None,
-    ) -> None:
-        """Forward a message to the forwarder manager if configured.
-
-        If a schema validator is configured and raw_xml is provided,
-        the XML is validated against the IEEE 2030.5 XSD schema.
-        Both valid and invalid messages are forwarded.
-        """
-        if self._forwarder is None or not self._forwarder.running:
-            return
-
-        # Validate against XSD if schema path and raw XML are available
-        is_valid = True
-        validation_error = None
-        if raw_xml is not None and self._schema_path is not None:
-            from py20305.xml.serialization import validate_xml_result
-
-            # Layered: the IEEE 2030.5 body against its schema, and each
-            # extension element (CSIP-AUS) against its own namespace's schema.
-            is_valid, validation_error = validate_xml_result(
-                raw_xml, schema_dir=self._schema_path.parent
-            )
-            if not is_valid:
-                logger.debug(
-                    "XSD validation failed for %s %s: %s",
-                    http_method,
-                    uri,
-                    validation_error,
-                )
-
-        from py20305.forwarders import MessageFrame
-
-        # Inject device LFDI into metadata for message attribution.
-        # Prefer the per-device LFDI resolved from the URL, fall back to
-        # the client's own cert LFDI.
-        effective_metadata = dict(metadata) if metadata else {}
-        if "lfdi" not in effective_metadata:
-            device_lfdi = self._resolve_device_lfdi(uri)
-            if device_lfdi:
-                effective_metadata["lfdi"] = device_lfdi
-            elif self._client_lfdi:
-                effective_metadata["lfdi"] = self._client_lfdi
-
-        frame = MessageFrame(
-            direction=direction,
-            message_type=message_type,
-            content=content,
-            timestamp=datetime.now(UTC),
-            is_valid=is_valid,
-            validation_error=validation_error,
-            http_method=http_method,
-            uri=uri,
-            status_code=status_code,
-            server_host=self._server_host,
-            server_port=self._server_port,
-            metadata=effective_metadata,
-        )
-        try:
-            self._forwarder.queue_message(frame)
-        except Exception as e:
-            logger.debug("Failed to forward message: %s", e)
-
     @property
     def host(self) -> str:
         """Server hostname extracted from the base URL."""
@@ -776,44 +785,8 @@ class Sep2Client:
         self._silence_simulated = None
 
     async def _retry_observed(self, do_fn: Callable[[], Awaitable[T]]) -> T:
-        """Run one logical request through retry, reporting its outcome.
-
-        Every request method that signals its outcome by raising funnels
-        through here, so the connection observer is applied in one place
-        rather than repeated down each method's except ladder. The raw probe
-        methods (``get_raw``, ``request_raw``) are deliberately outside: they
-        are operator-driven diagnostics that report their outcome in-band to
-        their caller, not protocol traffic to account for. With no observer
-        attached this is exactly ``with_retry``.
-
-        Reporting is per logical request, not per retry attempt: the retry
-        wrapper collapses exhausted transport attempts into one
-        ``Sep2ConnectionError``, so the individual attempts are not
-        distinguishable here.
-        """
-        observer = self._connection_observer
-        if observer is None:
-            return await with_retry(self._retry, do_fn, peer=self._server_host)
-        # Scope socket attribution to this request: a connection established
-        # while handling it is this request's, and one left over from an
-        # earlier request in the same task is not.
-        observer.begin_request()
-        try:
-            result = await with_retry(self._retry, do_fn, peer=self._server_host)
-        except Sep2NoContentError:
-            # A 204 is a successful, validated contact that happens to signal
-            # itself by raising. Routing it through the failure branch would
-            # leave it classified as "not a connection outcome" and emit
-            # nothing at all, so every empty optional resource would go
-            # unrecorded — an under-count of attempts in a log whose whole
-            # purpose is to account for them.
-            observer.record_success()
-            raise
-        except BaseException as exc:
-            observer.record_failure(exc)
-            raise
-        observer.record_success()
-        return result
+        """Run one logical request through retry."""
+        return await with_retry(self._retry, do_fn, peer=self._server_host)
 
     async def _send_tracked(self, do_fn: Callable[[], Awaitable[T]]) -> T:
         """Run a non-GET request via retry, recording connectivity health once
@@ -866,7 +839,6 @@ class Sep2Client:
         """
         if self._tls_config is None:
             return
-        from dataclasses import replace
         from pathlib import Path
 
         new_config = replace(self._tls_config, ca_cert=Path(ca_cert_path))
@@ -880,8 +852,8 @@ class Sep2Client:
         Used by COMM-004 PKI tests to swap client identity at runtime.
         Also recomputes `_client_lfdi` and invalidates the cached aiohttp
         session so the new cert's identity takes effect immediately --
-        without that, the `LFDI:` request header (and forwarder message
-        attribution) would keep the OLD cert's LFDI.
+        without that, the `LFDI:` request header (and the client LFDI in
+        exchange records) would keep the OLD cert's LFDI.
 
         Args:
             cert_path: Path to PEM client certificate.
@@ -889,7 +861,6 @@ class Sep2Client:
         """
         if self._tls_config is None:
             return
-        from dataclasses import replace
         from pathlib import Path
 
         new_config = replace(
@@ -1004,27 +975,34 @@ class Sep2Client:
         """
         session = self._get_session()
         logger.debug("GET %s", url)
-        try:
-            async with session.get(_wire_url(url), ssl=self._ssl, allow_redirects=False) as resp:
-                logger.debug("GET %s -> %s", url, resp.status)
-                body = await resp.text()
-                headers = dict(resp.headers.items())
-                content_type = resp.headers.get("Content-Type", "")
-                # The server responded over a handshake-validated connection, so
-                # this on-demand proxy probe keeps /status fresh and consistent
-                # with other requests (a reachable, valid peer).
-                self._record_contact(reachable=True)
-                self._last_error = None
-                return {
-                    "status_code": resp.status,
-                    "content_type": content_type,
-                    "headers": headers,
-                    "body": body,
-                }
-        except (aiohttp.ClientError, OSError) as exc:
-            self._record_contact(reachable=False, error=exc)
-            self._last_error = str(exc)
-            return {"status_code": 0, "error": str(exc)}
+        with self._exchange("GET", _path_of(url), url, None, expected=_ANY_STATUS) as exchange:
+            try:
+                async with session.get(
+                    _wire_url(url), ssl=self._ssl, allow_redirects=False
+                ) as resp:
+                    logger.debug("GET %s -> %s", url, resp.status)
+                    exchange.response(resp)
+                    raw = await resp.read()
+                    exchange.response_body(raw)
+                    body = raw.decode(resp.get_encoding(), errors="replace")
+                    headers = dict(resp.headers.items())
+                    content_type = resp.headers.get("Content-Type", "")
+                    # The server responded over a handshake-validated connection, so
+                    # this on-demand proxy probe keeps /status fresh and consistent
+                    # with other requests (a reachable, valid peer).
+                    self._record_contact(reachable=True)
+                    self._last_error = None
+                    return {
+                        "status_code": resp.status,
+                        "content_type": content_type,
+                        "headers": headers,
+                        "body": body,
+                    }
+            except (aiohttp.ClientError, OSError) as exc:
+                exchange.failed(exc)
+                self._record_contact(reachable=False, error=exc)
+                self._last_error = str(exc)
+                return {"status_code": 0, "error": str(exc)}
 
     async def request_raw(
         self,
@@ -1039,22 +1017,7 @@ class Sep2Client:
         configured request headers, e.g. the server API token), so callers get
         the same TLS/auth context as the client's own traffic without
         re-plumbing credentials. Unlike the typed SEP methods this neither
-        builds nor parses IEEE 2030.5 XML -- the caller supplies the body and
-        content type and receives the raw response, and owns the full URL.
-
-        ``body=None`` sends no body and sets no request-level Content-Type,
-        which is what a GET or DELETE wants. Note the wire still carries the
-        session's default ``Content-Type: application/sep+xml`` (see
-        ``_default_headers``): aiohttp merges session defaults into every
-        request, and omitting a key does not remove it. Harmless -- a
-        Content-Type without a body is ignored -- and the same is already true
-        of ``get_raw``. Removing it properly means dropping the session default
-        and setting it on each typed write path instead, which touches every
-        protocol write and is not worth doing here.
-
-        Every method is recorded in Live Traffic: these are operator-triggered
-        requests carrying the client's credentials, and a write that is
-        invisible afterwards is the one worth seeing.
+        parses nor validates the response.
         """
         verb = method.upper()
         if verb not in _RAW_PROXY_METHODS:
@@ -1068,10 +1031,7 @@ class Sep2Client:
         # Path for Live Traffic; this method takes a full URL, unlike the SEP
         # write paths that record a base-relative path. Keep the query string so
         # the recorded target isn't misleading.
-        parsed = urlparse(url)
-        path = parsed.path or "/"
-        if parsed.query:
-            path = f"{path}?{parsed.query}"
+        path = _path_of(url)
         data = body.encode("utf-8") if body is not None else None
         # Override the session default Accept (application/sep+xml): this is a
         # generic proxy for non-SEP endpoints (e.g. JSON registration), so don't
@@ -1082,37 +1042,42 @@ class Sep2Client:
         if data is not None:
             headers_out["Content-Type"] = content_type
         logger.debug("%s %s", verb, url)
-        # Record the outbound request body where there is one. Recorded straight
-        # to the ring buffer since a generic proxy body isn't a SEP message to
-        # fan out to the forwarders.
+        # Record the outbound request body where there is one.
         if self._traffic_recorder is not None and data is not None:
             self._traffic_recorder.record_request(method=verb, url=path, body=data)
-        try:
-            async with session.request(
-                verb,
-                _wire_url(url),
-                data=data,
-                headers=headers_out,
-                ssl=self._ssl,
-                allow_redirects=False,
-            ) as resp:
-                logger.debug("%s %s -> %s", verb, url, resp.status)
-                resp_body = await resp.text()
-                resp_headers = dict(resp.headers.items())
-                self._record_traffic_response(verb, path, status=resp.status, body=resp_body)
-                self._record_contact(reachable=True)
-                self._last_error = None
-                return {
-                    "status_code": resp.status,
-                    "content_type": resp.headers.get("Content-Type", ""),
-                    "headers": resp_headers,
-                    "body": resp_body,
-                }
-        except (aiohttp.ClientError, OSError) as exc:
-            self._record_traffic_response(verb, path, status=None, error=str(exc))
-            self._record_contact(reachable=False, error=exc)
-            self._last_error = str(exc)
-            return {"status_code": 0, "error": str(exc)}
+        with self._exchange(
+            verb, path, url, data, headers=headers_out, expected=_ANY_STATUS
+        ) as exchange:
+            try:
+                async with session.request(
+                    verb,
+                    _wire_url(url),
+                    data=data,
+                    headers=headers_out,
+                    ssl=self._ssl,
+                    allow_redirects=False,
+                ) as resp:
+                    logger.debug("%s %s -> %s", verb, url, resp.status)
+                    exchange.response(resp)
+                    raw = await resp.read()
+                    exchange.response_body(raw)
+                    resp_body = raw.decode(resp.get_encoding(), errors="replace")
+                    resp_headers = dict(resp.headers.items())
+                    self._record_traffic_response(verb, path, status=resp.status, body=resp_body)
+                    self._record_contact(reachable=True)
+                    self._last_error = None
+                    return {
+                        "status_code": resp.status,
+                        "content_type": resp.headers.get("Content-Type", ""),
+                        "headers": resp_headers,
+                        "body": resp_body,
+                    }
+            except (aiohttp.ClientError, OSError) as exc:
+                exchange.failed(exc)
+                self._record_traffic_response(verb, path, status=None, error=str(exc))
+                self._record_contact(reachable=False, error=exc)
+                self._last_error = str(exc)
+                return {"status_code": 0, "error": str(exc)}
 
     async def post_raw(
         self, url: str, body: str, content_type: str = "application/json"
@@ -1126,189 +1091,118 @@ class Sep2Client:
 
     async def get(self, path: str, model_type: type[T]) -> T:
         """GET a single resource and deserialize to model_type."""
-
-        async def _do_get() -> T:
-            session = self._get_session()
-            url = f"{self._base_url}{path}"
-            logger.debug("GET %s", url)
-            try:
-                async with session.get(
-                    _wire_url(url), ssl=self._ssl, allow_redirects=False
-                ) as resp:
-                    logger.debug("GET %s -> %s", url, resp.status)
-                    self._check_redirect_or_rate_limit(resp, "GET", path)
-                    if resp.status == 204:
-                        # Success with no representation: a typed signal so callers
-                        # treat an optional resource as absent/empty rather than
-                        # crash (CSIP [GEN.037]); distinct from a real error. It's
-                        # still a validated, successful contact, so validate the
-                        # chain and record it (as the 200 path does) before
-                        # signalling -- otherwise /status and the connectivity
-                        # heartbeat wouldn't reflect recovery on a 204.
-                        self._record_traffic_response("GET", path, status=204)
-                        self._validate_chain(resp)
-                        self._record_contact(reachable=True)
-                        self._last_error = None
-                        raise Sep2NoContentError(f"GET {path} returned 204 No Content")
-                    if resp.status != 200:
-                        text = await resp.text()
-                        self._record_traffic_response("GET", path, status=resp.status, body=text)
-                        raise Sep2ProtocolError(
-                            f"GET {path} returned {resp.status}: {text}", resp.status
-                        )
-
-                    # IEEE 2030.5 chain validation (once per session)
-                    self._validate_chain(resp)
-
-                    body = await resp.read()
-                    result = _parse_body(body, model_type, path)
-
-                    # Forward successful response
-                    self._forward_downstream(
-                        result,
-                        model_type.__name__,
-                        "GET",
-                        path,
-                        resp.status,
-                        raw_xml=body,
-                    )
-                    self._record_contact(reachable=True)
-                    self._last_error = None
-                    return result
-            except Sep2PayloadError as exc:
-                # Server replied 200 but body is unusable. Server is reachable
-                # (this is a payload issue, not connectivity), so it counts as
-                # contact; recorded as _last_error for the UI.
-                self._record_contact(reachable=True)
-                self._last_error = str(exc)
-                raise
-            except Sep2NoContentError:
-                # A 204 is a successful, validated contact -- the 204 branch
-                # above already validated the chain and recorded it. Propagate the
-                # signal without the not-validated bookkeeping below (this clause
-                # must precede the Sep2ProtocolError handler: it's a subclass).
-                raise
-            except (Sep2ProtocolError, Sep2RateLimitError, Sep2RedirectError):
-                # Server answered (error status / 429 / 301) over a
-                # handshake-validated connection -- a reachable, valid peer.
-                self._record_contact(reachable=True)
-                self._last_error = None
-                raise
-            except CertChainError as exc:
-                self._record_contact(reachable=False, error=exc)
-                self._chain_validated = False
-                self._last_error = str(exc)
-                await self.close()
-                raise
-            except ssl.SSLError as exc:
-                self._record_contact(reachable=False, error=exc)
-                self._chain_validated = False
-                self._last_error = str(exc)
-                raise
-            except aiohttp.InvalidURL as exc:
-                raise Sep2Error(f"Invalid request URL: {exc}") from exc
-            except aiohttp.ClientError as exc:
-                self._record_contact(reachable=False, error=exc)
-                self._chain_validated = False
-                self._last_error = str(exc)
-                self._record_traffic_response("GET", path, error=str(exc))
-                raise OSError(str(exc)) from exc
-            except OSError as exc:
-                self._record_contact(reachable=False, error=exc)
-                self._chain_validated = False
-                self._last_error = str(exc)
-                self._record_traffic_response("GET", path, error=str(exc))
-                raise
-
-        return await self._retry_observed(_do_get)
+        result, _body = await self._get_parsed(path, model_type)
+        return result
 
     async def get_with_body(self, path: str, model_type: type[T]) -> tuple[T, bytes]:
         """GET a resource, returning both the parsed model and raw response body."""
+        return await self._get_parsed(path, model_type)
+
+    async def _get_parsed(self, path: str, model_type: type[T]) -> tuple[T, bytes]:
+        """GET a resource and return the parsed model with the raw body."""
+        attempts = itertools.count(1)
 
         async def _do_get() -> tuple[T, bytes]:
             session = self._get_session()
             url = f"{self._base_url}{path}"
             logger.debug("GET %s", url)
-            try:
-                async with session.get(
-                    _wire_url(url), ssl=self._ssl, allow_redirects=False
-                ) as resp:
-                    logger.debug("GET %s -> %s", url, resp.status)
-                    self._check_redirect_or_rate_limit(resp, "GET", path)
-                    if resp.status == 204:
-                        # Success with no representation: a typed signal so callers
-                        # treat an optional resource as absent/empty rather than
-                        # crash (CSIP [GEN.037]); distinct from a real error. It's
-                        # still a validated, successful contact, so validate the
-                        # chain and record it (as the 200 path does) before
-                        # signalling -- otherwise /status and the connectivity
-                        # heartbeat wouldn't reflect recovery on a 204.
-                        self._record_traffic_response("GET", path, status=204)
+            with self._exchange(
+                "GET",
+                path,
+                url,
+                None,
+                attempt=next(attempts),
+                resource_hint=model_type.__name__,
+                expected=(200, 204),
+            ) as exchange:
+                try:
+                    async with session.get(
+                        _wire_url(url), ssl=self._ssl, allow_redirects=False
+                    ) as resp:
+                        logger.debug("GET %s -> %s", url, resp.status)
+                        exchange.response(resp)
+                        self._check_redirect_or_rate_limit(resp, "GET", path)
+                        if resp.status == 204:
+                            # Success with no representation: a typed signal so
+                            # callers treat an optional resource as absent/empty
+                            # rather than crash (CSIP [GEN.037]); distinct from a
+                            # real error. It's still a validated, successful
+                            # contact, so validate the chain and record it (as
+                            # the 200 path does) before signalling -- otherwise
+                            # /status and the connectivity heartbeat wouldn't
+                            # reflect recovery on a 204.
+                            self._record_traffic_response("GET", path, status=204)
+                            self._validate_chain(resp)
+                            self._record_contact(reachable=True)
+                            self._last_error = None
+                            raise Sep2NoContentError(f"GET {path} returned 204 No Content")
+                        if resp.status != 200:
+                            raw = await resp.read()
+                            exchange.response_body(raw)
+                            text = raw.decode("utf-8", errors="replace")
+                            self._record_traffic_response(
+                                "GET", path, status=resp.status, body=text
+                            )
+                            raise Sep2ProtocolError(
+                                f"GET {path} returned {resp.status}: {text}", resp.status
+                            )
+
+                        # IEEE 2030.5 chain validation (once per session)
                         self._validate_chain(resp)
+
+                        body = await resp.read()
+                        exchange.response_body(body)
+                        result = _parse_body(body, model_type, path)
+                        self._record_traffic_success("GET", path, resp.status, body)
                         self._record_contact(reachable=True)
                         self._last_error = None
-                        raise Sep2NoContentError(f"GET {path} returned 204 No Content")
-                    if resp.status != 200:
-                        text = await resp.text()
-                        self._record_traffic_response("GET", path, status=resp.status, body=text)
-                        raise Sep2ProtocolError(
-                            f"GET {path} returned {resp.status}: {text}", resp.status
-                        )
-                    self._validate_chain(resp)
-                    body = await resp.read()
-                    result = _parse_body(body, model_type, path)
-                    self._forward_downstream(
-                        result,
-                        model_type.__name__,
-                        "GET",
-                        path,
-                        resp.status,
-                        raw_xml=body,
-                    )
+                        return result, body
+                except Sep2PayloadError as exc:
+                    # Server replied 200 but body is unusable. Server is reachable
+                    # (this is a payload issue, not connectivity), so it counts as
+                    # contact; recorded as _last_error for the UI.
+                    self._record_contact(reachable=True)
+                    self._last_error = str(exc)
+                    raise
+                except Sep2NoContentError:
+                    # A 204 is a successful, validated contact -- the 204 branch
+                    # above already validated the chain and recorded it.
+                    # Propagate the signal without the not-validated bookkeeping
+                    # below (this clause must precede the Sep2ProtocolError
+                    # handler: it's a subclass).
+                    raise
+                except (Sep2ProtocolError, Sep2RateLimitError, Sep2RedirectError):
+                    # Server answered (error status / 429 / 301) over a
+                    # handshake-validated connection -- a reachable, valid peer.
                     self._record_contact(reachable=True)
                     self._last_error = None
-                    return result, body
-            except Sep2PayloadError as exc:
-                self._record_contact(reachable=True)
-                self._last_error = str(exc)
-                raise
-            except Sep2NoContentError:
-                # A 204 is a successful, validated contact -- the 204 branch
-                # above already validated the chain and recorded it. Propagate the
-                # signal without the not-validated bookkeeping below (this clause
-                # must precede the Sep2ProtocolError handler: it's a subclass).
-                raise
-            except (Sep2ProtocolError, Sep2RateLimitError, Sep2RedirectError):
-                # Server answered (error status / 429 / 301) over a
-                # handshake-validated connection -- a reachable, valid peer.
-                self._record_contact(reachable=True)
-                self._last_error = None
-                raise
-            except CertChainError as exc:
-                self._record_contact(reachable=False, error=exc)
-                self._chain_validated = False
-                self._last_error = str(exc)
-                await self.close()
-                raise
-            except ssl.SSLError as exc:
-                self._record_contact(reachable=False, error=exc)
-                self._chain_validated = False
-                self._last_error = str(exc)
-                raise
-            except aiohttp.InvalidURL as exc:
-                raise Sep2Error(f"Invalid request URL: {exc}") from exc
-            except aiohttp.ClientError as exc:
-                self._record_contact(reachable=False, error=exc)
-                self._chain_validated = False
-                self._last_error = str(exc)
-                self._record_traffic_response("GET", path, error=str(exc))
-                raise OSError(str(exc)) from exc
-            except OSError as exc:
-                self._record_contact(reachable=False, error=exc)
-                self._chain_validated = False
-                self._last_error = str(exc)
-                self._record_traffic_response("GET", path, error=str(exc))
-                raise
+                    raise
+                except CertChainError as exc:
+                    self._record_contact(reachable=False, error=exc)
+                    self._chain_validated = False
+                    self._last_error = str(exc)
+                    await self.close()
+                    raise
+                except ssl.SSLError as exc:
+                    self._record_contact(reachable=False, error=exc)
+                    self._chain_validated = False
+                    self._last_error = str(exc)
+                    raise
+                except aiohttp.InvalidURL as exc:
+                    raise Sep2Error(f"Invalid request URL: {exc}") from exc
+                except aiohttp.ClientError as exc:
+                    exchange.failed(exc)
+                    self._record_contact(reachable=False, error=exc)
+                    self._chain_validated = False
+                    self._last_error = str(exc)
+                    self._record_traffic_response("GET", path, error=str(exc))
+                    raise OSError(str(exc)) from exc
+                except OSError as exc:
+                    self._record_contact(reachable=False, error=exc)
+                    self._chain_validated = False
+                    self._last_error = str(exc)
+                    self._record_traffic_response("GET", path, error=str(exc))
+                    raise
 
         return await self._retry_observed(_do_get)
 
@@ -1364,47 +1258,23 @@ class Sep2Client:
 
     async def post(self, path: str, resource: object) -> str | None:
         """POST a resource. Returns the Location header if present."""
-
-        async def _do_post() -> str | None:
-            session = self._get_session()
-            url = f"{self._base_url}{path}"
-            body = to_xml(
-                resource,
-                include_csipaus=self._csip_aus_mode,
-                csipaus_namespace=self._csipaus_namespace,
-                server_2018_compat=self._server_2018_compat,
-            )
-
-            # Forward request (upstream)
-            self._forward_upstream(
-                resource,
-                resource.__class__.__name__,
-                "POST",
-                path,
-                raw_xml=body,
-            )
-
-            logger.debug("POST %s", url)
-            try:
-                async with session.post(_wire_url(url), data=body, ssl=self._ssl) as resp:
-                    logger.debug("POST %s -> %s", url, resp.status)
-                    await self._check_and_record_write("POST", path, resp, (200, 201, 204))
-                    return self._location_href(resp, path)
-            except ssl.SSLError:
-                raise
-            except aiohttp.InvalidURL as exc:
-                raise Sep2Error(f"Invalid request URL: {exc}") from exc
-            except aiohttp.ClientError as exc:
-                raise OSError(str(exc)) from exc
-
-        return await self._send_tracked(_do_post)
+        body = to_xml(
+            resource,
+            include_csipaus=self._csip_aus_mode,
+            csipaus_namespace=self._csipaus_namespace,
+            server_2018_compat=self._server_2018_compat,
+        )
+        return await self._post_body(path, body, resource.__class__.__name__)
 
     async def post_bytes(self, path: str, body: bytes) -> str | None:
         """POST pre-serialized XML bytes. Returns the Location header if present.
 
         Use this when custom XML serialization is needed (e.g., legacy compatibility).
         """
+        return await self._post_body(path, body, None)
 
+    async def _post_body(self, path: str, body: bytes, resource_hint: str | None) -> str | None:
+        """POST an XML body, and learn the device a MirrorUsagePoint location belongs to."""
         # A MirrorUsagePoint is POSTed to the list, which names no device, so
         # it is attributed by the deviceLFDI it carries, and so is the
         # location the server gives it, where its readings are POSTed.
@@ -1412,32 +1282,44 @@ class Sep2Client:
         # readings the MirrorUsagePoint mirrors.
         mup_lfdi = _mirror_usage_point_lfdi(body)
         mirrored = self._registered_device(mup_lfdi)
+        attempts = itertools.count(1)
 
         async def _do_post() -> str | None:
             session = self._get_session()
             url = f"{self._base_url}{path}"
-
-            # Forward request (upstream) - raw bytes
-            self._forward_upstream(body, "RawXML", "POST", path, raw_xml=body, lfdi=mirrored)
-
+            self._record_traffic_request("POST", path, body)
             logger.debug("POST %s", url)
-            try:
-                async with session.post(_wire_url(url), data=body, ssl=self._ssl) as resp:
-                    logger.debug("POST %s -> %s", url, resp.status)
-                    await self._check_and_record_write("POST", path, resp, (200, 201, 204))
-                    location = self._location_href(resp, path)
-                    if location is not None and mup_lfdi is not None:
-                        if mirrored is not None:
-                            self._device_lfdi_by_mup[location] = mirrored
-                        else:
-                            self._device_lfdi_by_mup.pop(location, None)
-                    return location
-            except ssl.SSLError:
-                raise
-            except aiohttp.InvalidURL as exc:
-                raise Sep2Error(f"Invalid request URL: {exc}") from exc
-            except aiohttp.ClientError as exc:
-                raise OSError(str(exc)) from exc
+            with self._exchange(
+                "POST",
+                path,
+                url,
+                body,
+                attempt=next(attempts),
+                resource_hint=resource_hint,
+                expected=(200, 201, 204),
+                device_lfdi=mirrored,
+            ) as exchange:
+                try:
+                    async with session.post(_wire_url(url), data=body, ssl=self._ssl) as resp:
+                        logger.debug("POST %s -> %s", url, resp.status)
+                        exchange.response(resp)
+                        await self._check_and_record_write(
+                            "POST", path, resp, (200, 201, 204), exchange
+                        )
+                        location = self._location_href(resp, path)
+                        if location is not None and mup_lfdi is not None:
+                            if mirrored is not None:
+                                self._device_lfdi_by_mup[location] = mirrored
+                            else:
+                                self._device_lfdi_by_mup.pop(location, None)
+                        return location
+                except ssl.SSLError:
+                    raise
+                except aiohttp.InvalidURL as exc:
+                    raise Sep2Error(f"Invalid request URL: {exc}") from exc
+                except aiohttp.ClientError as exc:
+                    exchange.failed(exc)
+                    raise OSError(str(exc)) from exc
 
         return await self._send_tracked(_do_post)
 
@@ -1446,78 +1328,78 @@ class Sep2Client:
 
         Use this when custom XML serialization is needed (e.g., DERStatus).
         """
-
-        async def _do_put() -> int:
-            session = self._get_session()
-            url = f"{self._base_url}{path}"
-
-            # Forward request (upstream) - raw bytes
-            self._forward_upstream(body, "RawXML", "PUT", path, raw_xml=body)
-
-            logger.debug("PUT %s", url)
-            try:
-                async with session.put(_wire_url(url), data=body, ssl=self._ssl) as resp:
-                    logger.debug("PUT %s -> %s", url, resp.status)
-                    await self._check_and_record_write("PUT", path, resp, (200, 204))
-                    return int(resp.status)
-            except ssl.SSLError:
-                raise
-            except aiohttp.InvalidURL as exc:
-                raise Sep2Error(f"Invalid request URL: {exc}") from exc
-            except aiohttp.ClientError as exc:
-                raise OSError(str(exc)) from exc
-
-        return await self._send_tracked(_do_put)
+        return await self._put_body(path, body, None)
 
     async def put(self, path: str, resource: object) -> int:
         """PUT a resource. Returns the HTTP status code."""
+        body = to_xml(
+            resource,
+            include_csipaus=self._csip_aus_mode,
+            csipaus_namespace=self._csipaus_namespace,
+            server_2018_compat=self._server_2018_compat,
+        )
+        return await self._put_body(path, body, resource.__class__.__name__)
+
+    async def _put_body(self, path: str, body: bytes, resource_hint: str | None) -> int:
+        """PUT an XML body and return the HTTP status code."""
+        attempts = itertools.count(1)
 
         async def _do_put() -> int:
             session = self._get_session()
             url = f"{self._base_url}{path}"
-            body = to_xml(
-                resource,
-                include_csipaus=self._csip_aus_mode,
-                csipaus_namespace=self._csipaus_namespace,
-                server_2018_compat=self._server_2018_compat,
-            )
-
-            # Forward request (upstream)
-            self._forward_upstream(resource, resource.__class__.__name__, "PUT", path, raw_xml=body)
-
+            self._record_traffic_request("PUT", path, body)
             logger.debug("PUT %s", url)
-            try:
-                async with session.put(_wire_url(url), data=body, ssl=self._ssl) as resp:
-                    logger.debug("PUT %s -> %s", url, resp.status)
-                    await self._check_and_record_write("PUT", path, resp, (200, 204))
-                    return int(resp.status)
-            except ssl.SSLError:
-                raise
-            except aiohttp.InvalidURL as exc:
-                raise Sep2Error(f"Invalid request URL: {exc}") from exc
-            except aiohttp.ClientError as exc:
-                raise OSError(str(exc)) from exc
+            with self._exchange(
+                "PUT",
+                path,
+                url,
+                body,
+                attempt=next(attempts),
+                resource_hint=resource_hint,
+                expected=(200, 204),
+            ) as exchange:
+                try:
+                    async with session.put(_wire_url(url), data=body, ssl=self._ssl) as resp:
+                        logger.debug("PUT %s -> %s", url, resp.status)
+                        exchange.response(resp)
+                        await self._check_and_record_write("PUT", path, resp, (200, 204), exchange)
+                        return int(resp.status)
+                except ssl.SSLError:
+                    raise
+                except aiohttp.InvalidURL as exc:
+                    raise Sep2Error(f"Invalid request URL: {exc}") from exc
+                except aiohttp.ClientError as exc:
+                    exchange.failed(exc)
+                    raise OSError(str(exc)) from exc
 
         return await self._send_tracked(_do_put)
 
     async def delete(self, path: str) -> int:
         """DELETE a resource. Returns the HTTP status code."""
+        attempts = itertools.count(1)
 
         async def _do_delete() -> int:
             session = self._get_session()
             url = f"{self._base_url}{path}"
             logger.debug("DELETE %s", url)
-            try:
-                async with session.delete(_wire_url(url), ssl=self._ssl) as resp:
-                    logger.debug("DELETE %s -> %s", url, resp.status)
-                    await self._check_and_record_write("DELETE", path, resp, (200, 204))
-                    return int(resp.status)
-            except ssl.SSLError:
-                raise
-            except aiohttp.InvalidURL as exc:
-                raise Sep2Error(f"Invalid request URL: {exc}") from exc
-            except aiohttp.ClientError as exc:
-                raise OSError(str(exc)) from exc
+            with self._exchange(
+                "DELETE", path, url, None, attempt=next(attempts), expected=(200, 204)
+            ) as exchange:
+                try:
+                    async with session.delete(_wire_url(url), ssl=self._ssl) as resp:
+                        logger.debug("DELETE %s -> %s", url, resp.status)
+                        exchange.response(resp)
+                        await self._check_and_record_write(
+                            "DELETE", path, resp, (200, 204), exchange
+                        )
+                        return int(resp.status)
+                except ssl.SSLError:
+                    raise
+                except aiohttp.InvalidURL as exc:
+                    raise Sep2Error(f"Invalid request URL: {exc}") from exc
+                except aiohttp.ClientError as exc:
+                    exchange.failed(exc)
+                    raise OSError(str(exc)) from exc
 
         return await self._send_tracked(_do_delete)
 
@@ -1590,60 +1472,17 @@ class Sep2Client:
             path = path[len(base.path) :] or "/"
         return f"{path}?{parsed.query}" if parsed.query else path
 
-    def _forward_upstream(
-        self,
-        content: Any,
-        message_type: str,
-        http_method: str,
-        uri: str,
-        raw_xml: bytes | None = None,
-        lfdi: str | None = None,
-    ) -> None:
-        """Forward an upstream (request) message, under ``lfdi`` when given."""
-        from py20305.forwarders import MessageDirection
-
+    def _record_traffic_request(self, method: str, path: str, body: bytes) -> None:
+        """Record an outbound request body in Live Traffic."""
         if self._traffic_recorder is not None:
-            self._traffic_recorder.record_request(
-                method=http_method, url=uri, body=raw_xml if raw_xml is not None else content
-            )
-        self._forward_message(
-            direction=MessageDirection.UPSTREAM,
-            message_type=message_type,
-            content=content,
-            http_method=http_method,
-            uri=uri,
-            raw_xml=raw_xml,
-            metadata={"lfdi": lfdi} if lfdi is not None else None,
-        )
+            self._traffic_recorder.record_request(method=method, url=path, body=body)
 
-    def _forward_downstream(
-        self,
-        content: Any,
-        message_type: str,
-        http_method: str,
-        uri: str,
-        status_code: int,
-        raw_xml: bytes | None = None,
-    ) -> None:
-        """Forward a downstream (response) message."""
-        from py20305.forwarders import MessageDirection
-
+    def _record_traffic_success(self, method: str, path: str, status: int, body: bytes) -> None:
+        """Record a successful GET response in Live Traffic."""
         if self._traffic_recorder is not None:
             self._traffic_recorder.record_response(
-                method=http_method,
-                url=uri,
-                status=status_code,
-                body=raw_xml if raw_xml is not None else content,
+                method=method, url=path, status=status, body=body
             )
-        self._forward_message(
-            direction=MessageDirection.DOWNSTREAM,
-            message_type=message_type,
-            content=content,
-            http_method=http_method,
-            uri=uri,
-            status_code=status_code,
-            raw_xml=raw_xml,
-        )
 
     def _record_traffic_response(
         self,
@@ -1656,7 +1495,7 @@ class Sep2Client:
     ) -> None:
         """Record a response in Live Traffic.
 
-        GET successes are captured via ``_forward_downstream``; this surfaces the
+        GET successes are captured via ``_record_traffic_success``; this surfaces the
         rest: error responses (non-2xx, with the server's error body), GET
         transport failures (no response -> ``status=None`` + ``error``), and write
         (POST/PUT/DELETE) result statuses. Write *transport* failures (no
@@ -1673,31 +1512,28 @@ class Sep2Client:
         path: str,
         resp: aiohttp.ClientResponse,
         ok_statuses: tuple[int, ...],
+        exchange: ExchangeScope | NullScope,
     ) -> None:
         """Validate a write (POST/PUT/DELETE) response, record it, and drain it.
 
         On a non-ok status, records the server's error body and raises
         ``Sep2ProtocolError``; on success, records the result status. Reads the
         body either way so the connection is drained. The matching request body
-        for POST/PUT is captured separately via ``_forward_upstream``.
+        for POST/PUT is captured separately via ``_record_traffic_request``.
         """
+        # Read raw bytes (not resp.text()) so a non-text/bad-charset error
+        # body can't raise, and the recorder gets the byte-safe truncation
+        # path; decode with errors="replace" only for the exception message.
+        raw = await resp.read()
+        exchange.response_body(raw)
         if resp.status not in ok_statuses:
-            # Read raw bytes (not resp.text()) so a non-text/bad-charset error
-            # body can't raise, and the recorder gets the byte-safe truncation
-            # path; decode with errors="replace" only for the exception message.
-            raw = await resp.read()
             self._record_traffic_response(method, path, status=resp.status, body=raw)
             text = raw.decode("utf-8", errors="replace")
             raise Sep2ProtocolError(f"{method} {path} returned {resp.status}: {text}", resp.status)
-        await resp.read()
         self._record_traffic_response(method, path, status=resp.status)
 
     async def close(self) -> None:
         """Close the underlying HTTP session."""
-        # Flush the observer first: successes accumulated since its last
-        # window closed are still attempts the connection log accounts for.
-        if self._connection_observer is not None:
-            self._connection_observer.flush()
         if self._session and not self._session.closed:
             await self._session.close()
 
