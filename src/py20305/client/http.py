@@ -594,7 +594,11 @@ class Sep2Client:
         if raw_xml is not None and self._schema_path is not None:
             from py20305.xml.serialization import validate_xml_result
 
-            is_valid, validation_error = validate_xml_result(raw_xml, self._schema_path)
+            # Layered: the IEEE 2030.5 body against its schema, and each
+            # extension element (CSIP-AUS) against its own namespace's schema.
+            is_valid, validation_error = validate_xml_result(
+                raw_xml, schema_dir=self._schema_path.parent
+            )
             if not is_valid:
                 logger.debug(
                     "XSD validation failed for %s %s: %s",

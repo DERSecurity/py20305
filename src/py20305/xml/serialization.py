@@ -179,25 +179,134 @@ def _load_schema(schema_path: Path) -> etree.XMLSchema:
     return etree.XMLSchema(schema_doc)
 
 
-def validate_xml(xml: bytes, schema_path: Path | None = None) -> list[str]:
-    """Validate XML bytes against the IEEE 2030.5 XSD schema.
+#: The IEEE 2030.5 entry point in a schema directory, newest name first. The
+#: pre-0.14 name ``sep.xsd`` was the same IEEE 2030.5-2023 schema.
+_BASE_SCHEMA_NAMES = ("sep2_schema_2023.xsd", "sep.xsd")
 
-    Returns an empty list if valid, or a list of error strings.
+#: Namespaces whose elements may extend an IEEE 2030.5 body, each with the
+#: schema file that declares them and the namespace that file declares. CSIP-AUS
+#: 1.3 moved its extensions to ``https://csipaus.org/ns/v1.3``; the package ships
+#: no 1.3 extension schema, so those elements are checked against the pre-1.3
+#: declarations, the same definitions the client writes under the 1.3 URI.
+EXTENSION_SCHEMAS: dict[str, tuple[str, str]] = {
+    "https://csipaus.org/ns": ("csipaus-ext.xsd", "https://csipaus.org/ns"),
+    "https://csipaus.org/ns/v1.3": ("csipaus-ext.xsd", "https://csipaus.org/ns"),
+    "https://csipaus.org/ns/v1.3-beta/storage": (
+        "csipaus-ext-v1.3-beta_storage.xsd",
+        "https://csipaus.org/ns/v1.3-beta/storage",
+    ),
+}
+
+
+def _namespace_of(element: etree._Element) -> str | None:
+    """Return the namespace URI of ``element``, or None for an unqualified one."""
+    return etree.QName(element).namespace
+
+
+def _schema_file(name: str, schema_dir: Path | None) -> Path:
+    """Return ``name`` in ``schema_dir`` when it is there, else the packaged copy."""
+    if schema_dir is not None and (schema_dir / name).exists():
+        return schema_dir / name
+    return _SCHEMA_DIR / name
+
+
+def _base_schema(schema_dir: Path | None) -> Path:
+    """Return the IEEE 2030.5 entry point to validate against."""
+    if schema_dir is not None:
+        for name in _BASE_SCHEMA_NAMES:
+            if (schema_dir / name).exists():
+                return schema_dir / name
+    return _SCHEMA_DIR / _BASE_SCHEMA_NAMES[0]
+
+
+def _schema_errors(schema: etree.XMLSchema, doc: etree._Element) -> list[str]:
+    if schema.validate(doc):
+        return []
+    return [str(err) for err in schema.error_log]  # type: ignore[attr-defined]
+
+
+def _set_aside_extensions(doc: etree._Element) -> list[etree._Element]:
+    """Detach every element outside the IEEE 2030.5 namespace, and return them.
+
+    Only the outermost such element is detached; anything inside it belongs to
+    it and is checked with it.
     """
-    if schema_path is None:
-        schema_path = _SCHEMA_DIR / "sep2_schema_2023.xsd"
+    found: list[etree._Element] = []
+    for element in doc.iter():
+        if not isinstance(element.tag, str) or _namespace_of(element) == NS_SEP:
+            continue
+        if all(_namespace_of(ancestor) == NS_SEP for ancestor in element.iterancestors()):
+            found.append(element)
+    for element in found:
+        parent = element.getparent()
+        if parent is not None:
+            parent.remove(element)
+    return found
+
+
+def _extension_errors(element: etree._Element, schema_dir: Path | None) -> list[str]:
+    """Validate one extension element on its own against its namespace's schema."""
+    namespace = _namespace_of(element)
+    name = etree.QName(element).localname
+    known = EXTENSION_SCHEMAS.get(namespace or "")
+    if known is None:
+        return [f"{name}: no schema is known for namespace {namespace!r}"]
+    file_name, declared = known
+    standalone = etree.fromstring(etree.tostring(element), parser=_SAFE_PARSER)
+    if declared != namespace:
+        for node in standalone.iter():
+            if isinstance(node.tag, str) and _namespace_of(node) == namespace:
+                node.tag = f"{{{declared}}}{etree.QName(node).localname}"
+    schema = _load_schema(_schema_file(file_name, schema_dir))
+    return [f"{name}: {error}" for error in _schema_errors(schema, standalone)]
+
+
+def _validate_layered(doc: etree._Element, schema_dir: Path | None) -> list[str]:
+    """Validate an IEEE 2030.5 body that may carry extension elements.
+
+    The body less every element outside the IEEE 2030.5 namespace is checked
+    against the IEEE 2030.5 schema, and each element set aside is checked on
+    its own against the schema of its namespace (:data:`EXTENSION_SCHEMAS`).
+    Utilities mix elements of the 2018 and 2023 editions with profile
+    extensions, so no single schema accepts every valid body. Profile
+    requirements, such as an extension a profile makes mandatory or where it
+    may appear, are not checked.
+    """
+    extensions = _set_aside_extensions(doc)
+    errors: list[str] = []
+    if _namespace_of(doc) == NS_SEP:
+        errors += _schema_errors(_load_schema(_base_schema(schema_dir)), doc)
+    for element in extensions:
+        errors += _extension_errors(element, schema_dir)
+    return errors
+
+
+def validate_xml(
+    xml: bytes, schema_path: Path | None = None, *, schema_dir: Path | None = None
+) -> list[str]:
+    """Validate IEEE 2030.5 XML and return the errors found; empty when it is valid.
+
+    Without ``schema_path`` the body is validated in layers: everything in
+    the IEEE 2030.5 namespace against the IEEE 2030.5-2023 schema, and each
+    element of another namespace (a CSIP-AUS extension, for example) on its
+    own against that namespace's schema. An element of a namespace with no
+    known schema is an error. ``schema_dir`` supplies the schema files,
+    falling back to the packaged ones for any it does not hold.
+
+    With ``schema_path`` the whole body is validated against that one schema,
+    as before layered validation existed.
+    """
     try:
-        schema = _load_schema(schema_path)
         doc = etree.fromstring(xml, parser=_SAFE_PARSER)
-        if schema.validate(doc):
-            return []
-        return [str(err) for err in schema.error_log]  # type: ignore[attr-defined]
     except etree.XMLSyntaxError as e:
         return [f"XML parse error: {e}"]
+    if schema_path is not None:
+        return _schema_errors(_load_schema(schema_path), doc)
+    return _validate_layered(doc, schema_dir)
 
 
 def validate_xml_result(
-    xml: bytes | str, schema_path: Path | None = None
+    xml: bytes | str, schema_path: Path | None = None, *, schema_dir: Path | None = None
 ) -> tuple[bool, str | None]:
     """Validate XML and return ``(is_valid, first_error_or_None)``.
 
@@ -206,16 +315,14 @@ def validate_xml_result(
 
     Args:
         xml: XML content as bytes or string.
-        schema_path: Optional path to XSD file.  Defaults to
-            ``sep2_schema_2023.xsd`` inside the repository ``schemas/``
-            directory -- the IEEE 2030.5-2023 base schema that the generated
-            models in ``py20305.models.sep`` were produced from.
+        schema_path: Validate against this one schema only. When omitted, the
+            body is validated in layers (see :func:`validate_xml`).
+        schema_dir: Directory holding the schema files for layered
+            validation; the packaged schemas fill in any it lacks.
     """
-    if schema_path is None:
-        schema_path = _SCHEMA_DIR / "sep2_schema_2023.xsd"
     if isinstance(xml, str):
         xml = xml.encode("utf-8")
-    errors = validate_xml(xml, schema_path)
+    errors = validate_xml(xml, schema_path, schema_dir=schema_dir)
     if not errors:
         return True, None
     return False, errors[0]

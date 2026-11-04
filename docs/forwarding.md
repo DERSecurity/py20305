@@ -28,6 +28,42 @@ Optional fields are omitted rather than emitted as null, and consumers are
 expected to match on a key being present. That is what makes adding a field a
 compatible change.
 
+### Validation
+
+With `forwarders.schema_dir` set, each 2030.5 exchange is validated before it is
+published, and `is_valid` and `validation_error` carry the result. Utilities
+mix IEEE 2030.5-2018 and 2030.5-2023 elements with CSIP-AUS extensions, so no
+single schema accepts every valid body. Validation is therefore layered:
+
+1. Every element outside the IEEE 2030.5 namespace
+   (`urn:ieee:std:2030.5:ns`) is set aside, wherever it appears, and the rest
+   of the body is validated against the IEEE 2030.5-2023 schema.
+2. Each element set aside is validated on its own against its namespace's
+   schema: `csipaus-ext.xsd` for `https://csipaus.org/ns` and for
+   `https://csipaus.org/ns/v1.3` (no 1.3 extension schema ships with the
+   package, so 1.3 elements are checked against the same definitions the
+   client writes under the 1.3 URI), and `csipaus-ext-v1.3-beta_storage.xsd`
+   for `https://csipaus.org/ns/v1.3-beta/storage`.
+3. An element of any other namespace is an error naming the namespace and the
+   element.
+
+`validation_error` is the first error found. A profile's own rules, such as a
+CSIP-AUS extension the profile makes mandatory or where it may appear, are not
+checked. Schema files in `schema_dir` are used where present, and the packaged
+ones fill in the rest.
+
+The same check is available directly:
+
+```python
+from py20305.xml.serialization import validate_xml, validate_xml_result
+
+errors = validate_xml(body)                 # [] when valid, else every error
+ok, first_error = validate_xml_result(body)
+```
+
+Passing `schema_path` validates the whole body against that one schema
+instead, as earlier releases did.
+
 `client_id` is the LFDI of the device the exchange belongs to. A request under
 an EndDevice or one of its FunctionSetAssignments carries that device's LFDI. A
 MirrorUsagePoint registration, and every readings POST to the location the

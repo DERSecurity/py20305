@@ -121,7 +121,8 @@ protocol, when you have one. Full walkthrough in the
 ## Standards
 
 **IEEE 2030.5-2018 and 2030.5-2023.** Both XSDs ship with the package and
-validation runs against them. The generated bindings track 2023; a
+validation runs against them, layered so a body that carries CSIP-AUS
+extensions is checked against both the IEEE 2030.5 and the CSIP-AUS schemas. The generated bindings track 2023; a
 `server_2018_compat` flag adjusts behavior for servers still on 2018.
 
 **CSIP-AUS**, including DOE (dynamic operating envelope) limits. The client
