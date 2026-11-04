@@ -158,6 +158,8 @@ class CsipClient:
         request_headers: dict[str, str] | None = None,
         dcap_path: str = "/dcap",
         heartbeat_enabled: bool = True,
+        heartbeat_seconds: float | None = None,
+        on_reconnect: Callable[[], None] | None = None,
         connection_heartbeat_seconds: int = 120,
         reconcile_enabled: bool = True,
         reconcile_interval_seconds: int = 0,
@@ -194,11 +196,16 @@ class CsipClient:
         #: rediscovery (state.clear() keeps it) and gates tariff discovery/poll.
         self._state.pricing_enabled = pricing_enabled
         self._heartbeat_enabled = heartbeat_enabled
+        self._heartbeat_seconds = heartbeat_seconds
+        #: Called when the server is reachable again after a sustained loss of
+        #: contact, before the rediscovery that follows, so the host can treat
+        #: what it sent before the outage as possibly lost.
+        self._on_reconnect = on_reconnect
         self._connection_heartbeat_seconds = connection_heartbeat_seconds
         self._reconcile_enabled = reconcile_enabled
         self._reconcile_interval_seconds = reconcile_interval_seconds
         self._renewal_interval_seconds = renewal_interval_seconds
-        self._scheduler = PollScheduler(heartbeat_enabled=heartbeat_enabled)
+        self._scheduler = self._new_scheduler()
         self._shutdown_event = asyncio.Event()
         self._rediscovery_lock = asyncio.Lock()
         self._state_ready = asyncio.Event()
@@ -565,6 +572,13 @@ class CsipClient:
             sub_rate = self._sub_poll_rate()
             if sub_rate is not None:
                 self._scheduler.schedule("sub", sub_rate, self._poll_sub_reconcile)
+
+    def _new_scheduler(self) -> PollScheduler:
+        """A poll scheduler with this client's backstop settings."""
+        return PollScheduler(
+            heartbeat_enabled=self._heartbeat_enabled,
+            heartbeat_seconds=self._heartbeat_seconds,
+        )
 
     def _sub_poll_rate(self) -> int | None:
         """Cadence for the SubscriptionList reconcile poll, in seconds.
@@ -1253,6 +1267,8 @@ class CsipClient:
             # suppression is cleared -- not on every rediscovery.
             if self._subscription_manager is not None:
                 self._subscription_manager.clear_resubscribe_suppression()
+            if self._on_reconnect is not None:
+                self._on_reconnect()
             await self.trigger_rediscovery()
         else:
             logger.info(
@@ -1776,7 +1792,7 @@ class CsipClient:
                 passes += 1
                 logger.info("Rediscovery: resetting polls (preserving event processor)")
                 await self._scheduler.cancel_all()
-                self._scheduler = PollScheduler(heartbeat_enabled=self._heartbeat_enabled)
+                self._scheduler = self._new_scheduler()
                 # Cancel renewal task (reconciliation handles subscriptions)
                 if self._renewal_task and not self._renewal_task.done():
                     self._renewal_task.cancel()

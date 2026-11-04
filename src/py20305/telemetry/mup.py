@@ -385,10 +385,18 @@ class ReadingProfile(StrEnum):
     load convention counts as export, so both are negated. A site meter
     reports them positive for import, from the grid to the premises, which is
     already the load convention, so both are posted as reported.
+
+    ``SIGNED_AS_REPORTED`` posts W and var with the sign the connector reports,
+    whatever the device's role -- for a DER, positive while it delivers and
+    negative while it absorbs (a battery charging) -- and omits flowDirection
+    from every ReadingType (optional, IEEE 2030.5 ``ReadingType``). Every other
+    field keeps its DEFAULT value. It registers no energy totals, which differ
+    only by flowDirection.
     """
 
     DEFAULT = "default"
     SIGNED_LOAD_CONVENTION = "signed_load_convention"
+    SIGNED_AS_REPORTED = "signed_as_reported"
 
 
 class PowerDirection(StrEnum):
@@ -639,11 +647,32 @@ def registration_slots(
     appears, which is the signal to re-POST the MUP so the new mRID arrives
     with its ReadingType (Rule h.2) instead of meeting Rule h.3.
     """
-    if profile is ReadingProfile.SIGNED_LOAD_CONVENTION:
-        specs = _signed_load_specs_for(monitoring_data, registered)
-    else:
-        specs = _default_specs_for(monitoring_data, power_direction)
+    specs = _specs_for(profile, monitoring_data, registered, power_direction)
     return frozenset(index for index, _ in specs)
+
+
+def _specs_for(
+    profile: ReadingProfile,
+    monitoring_data: dict[str, Any],
+    registered: frozenset[int],
+    power_direction: PowerDirection,
+) -> list[tuple[int, ReadingTypeSpec]]:
+    """``(mrid_index, spec)`` for a device under ``profile``."""
+    if profile is ReadingProfile.SIGNED_LOAD_CONVENTION:
+        return _signed_load_specs_for(monitoring_data, registered)
+    if profile is ReadingProfile.SIGNED_AS_REPORTED:
+        # No energy totals and no PowerDirection modes: both rely on a fixed
+        # flowDirection, which this profile omits.
+        return _all_specs_for(monitoring_data)
+    return _default_specs_for(monitoring_data, power_direction)
+
+
+def _as_reported_value(spec: ReadingTypeSpec, monitoring_data: dict[str, Any]) -> int:
+    """A SIGNED_AS_REPORTED value: W and var keep the connector's sign."""
+    scaled = _scaled_for(spec, monitoring_data)
+    if _quantity(spec.key) in _POWER_QUANTITIES and scaled.flow_direction == FLOW_REVERSE:
+        return -scaled.value
+    return scaled.value
 
 
 def _scale_half_away(raw: float, multiplier: int) -> int:
@@ -890,13 +919,15 @@ def _resolve_quality_flags(
     return resolved.to_bytes(2, "big")
 
 
-def _create_reading_type(spec: ReadingTypeSpec, flow_direction: int) -> ReadingType1:
-    """Create a ReadingType from a spec with given flow direction."""
+def _create_reading_type(spec: ReadingTypeSpec, flow_direction: int | None) -> ReadingType1:
+    """Create a ReadingType from a spec with given flow direction, or none."""
     return ReadingType1(
         accumulation_behaviour=AccumulationBehaviourType(value=spec.accumulation_behaviour),
         commodity=CommodityType(value=spec.commodity),
         data_qualifier=DataQualifierType(value=spec.data_qualifier),
-        flow_direction=FlowDirectionType(value=flow_direction),
+        flow_direction=(
+            FlowDirectionType(value=flow_direction) if flow_direction is not None else None
+        ),
         kind=KindType(value=spec.kind),
         power_of_ten_multiplier=PowerOfTenMultiplierType(value=spec.multiplier),
         uom=UomType(value=spec.uom),
@@ -966,16 +997,16 @@ def create_mup(
     mup_mrid = _create_mrid(lfdi_norm, index=0)
 
     signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
-    specs = (
-        _signed_load_specs_for(monitoring_data, registered)
-        if signed_load
-        else _default_specs_for(monitoring_data, power_direction)
-    )
+    as_reported = profile is ReadingProfile.SIGNED_AS_REPORTED
+    specs = _specs_for(profile, monitoring_data, registered, power_direction)
     meter_readings: list[MirrorMeterReading1] = []
     for mrid_index, spec in specs:
         override = overrides.get(spec.key) if overrides else None
+        flow_direction: int | None
         if signed_load:
             flow_direction = FLOW_NOT_APPLICABLE
+        elif as_reported:
+            flow_direction = None
         elif spec.flow_direction is not None:
             flow_direction = spec.flow_direction
         else:
@@ -1073,11 +1104,8 @@ def create_meter_reading_list(
     lfdi_norm = lfdi.lower()
 
     signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
-    specs = (
-        _signed_load_specs_for(monitoring_data, frozenset())
-        if signed_load
-        else _default_specs_for(monitoring_data, power_direction)
-    )
+    as_reported = profile is ReadingProfile.SIGNED_AS_REPORTED
+    specs = _specs_for(profile, monitoring_data, frozenset(), power_direction)
     posted: dict[str, int] = {}
     meter_readings: list[MirrorMeterReading1] = []
     for mrid_index, spec in specs:
@@ -1101,11 +1129,12 @@ def create_meter_reading_list(
         else:
             # An energy total also has a fixed flowDirection, but its value is
             # already the magnitude for that direction.
-            value = (
-                _directed_value(spec, monitoring_data)
-                if spec.flow_direction is not None and spec.key in _DIRECTED_KEYS
-                else _scaled_for(spec, monitoring_data).value
-            )
+            if as_reported:
+                value = _as_reported_value(spec, monitoring_data)
+            elif spec.flow_direction is not None and spec.key in _DIRECTED_KEYS:
+                value = _directed_value(spec, monitoring_data)
+            else:
+                value = _scaled_for(spec, monitoring_data).value
             # timePeriod duration: an interval reading (Average/Maximum/Minimum)
             # covers a window, and CSIP-AUS requires that window to match the MUP
             # postRate, so its duration is post_rate; an instantaneous reading is a

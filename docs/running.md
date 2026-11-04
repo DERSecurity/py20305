@@ -99,6 +99,14 @@ meter, export is the DER's output, so generation posts negative W. For a site
 meter, export is power from the premises to the grid: import posts positive
 W and var, and export negative (see [Meters](#meters)).
 
+`signed_as_reported` posts W and var with the sign the connector reports, for
+every role: for a DER, positive while it delivers power and negative while it
+absorbs it, so a charging battery posts negative W. It omits flowDirection from
+every ReadingType, keeps the `default` values of every other field, and
+registers no energy totals, since `WhFwd` and `WhRev` differ only by
+flowDirection. A cycle with no reading to post, such as a charger with no
+vehicle plugged in, sends no readings POST at all; the MirrorUsagePoint stays.
+
 `power_direction` sets how real and reactive power carry their direction under
 the `default` profile. IEEE 2030.5 does not let a MeterReading's ReadingType
 change once it is created, so the choice matters for a device whose power
@@ -113,8 +121,8 @@ changes direction, such as a battery:
 `net` and `split` post their readings under new mRIDs, so switching between
 modes never posts a value under a ReadingType registered for another mode. They
 apply to total and per-line W and var. `power_direction` is refused with
-`signed_load_convention`, which already signs every value. Like the profile, it
-is read at startup.
+`signed_load_convention` and `signed_as_reported`, which already sign every
+value. Like the profile, it is read at startup.
 
 Rediscovery re-reads every path. A server that moves its resources, or that
 brings the MirrorUsagePoint function set online only after the client

@@ -381,13 +381,16 @@ class TelemetryConfig(_Strict):
         gt=0,
         description="How often DERSettings is PUT, when it has changed",
     )
-    reading_profile: Literal["default", "signed_load_convention"] = Field(
+    reading_profile: Literal["default", "signed_load_convention", "signed_as_reported"] = Field(
         default="default",
         description=(
             "How MirrorMeterReadings are encoded. 'signed_load_convention' carries the "
             "sign on each value (flowDirection 0) with export and reactive power "
             "injection negative, and adds line-to-line voltage and State of Energy "
-            "readings when the device supplies them. Applied at startup."
+            "readings when the device supplies them. 'signed_as_reported' posts real and "
+            "reactive power with the sign the connector reports, omits flowDirection, "
+            "registers no energy totals, and sends no readings on a cycle with none. "
+            "Applied at startup."
         ),
     )
     power_direction: Literal["default", "net", "split"] = Field(
@@ -407,7 +410,7 @@ class TelemetryConfig(_Strict):
         if self.power_direction != "default" and self.reading_profile != "default":
             raise ValueError(
                 "telemetry.power_direction applies to the default reading profile only; "
-                "signed_load_convention already signs every value"
+                f"{self.reading_profile} already signs every value"
             )
         return self
 

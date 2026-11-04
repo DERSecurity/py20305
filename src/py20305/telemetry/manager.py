@@ -835,6 +835,15 @@ class TelemetryManager:
             power_direction=self._power_direction,
             role=state.role,
         )
+        if (
+            self._reading_profile is ReadingProfile.SIGNED_AS_REPORTED
+            and not readings.mirror_meter_reading
+        ):
+            # A device with nothing to report this cycle (an EV charger with no
+            # vehicle plugged in, say) sends nothing rather than an empty list
+            # (CSIP G27: data a DER cannot provide SHALL not be sent).
+            logger.debug("No readings for %s this cycle, skipping POST", state.lfdi[:8])
+            return
         body = to_xml(readings, server_2018_compat=self._client.server_2018_compat)
 
         try:

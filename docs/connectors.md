@@ -148,7 +148,8 @@ and `Var` is positive for reactive power injection (over-excited) and negative
 for absorption. A meter's connector reports them in its role's frame instead,
 as described above. The `SIGNED_LOAD_CONVENTION` reading profile negates both
 for a DER and a DER meter and posts a site meter's as reported, since import
-positive is already the load convention. A connector that reports another
+positive is already the load convention. The `SIGNED_AS_REPORTED` profile posts
+both as the connector reports them. A connector that reports another
 convention posts the wrong sign.
 
 Point a device at it by import path — no registration needed:

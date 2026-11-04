@@ -1846,6 +1846,53 @@ class TestPowerDirection:
         await manager.shutdown()
 
 
+class TestEmptyCycle:
+    """A cycle with no reading to post: SIGNED_AS_REPORTED sends nothing (CSIP
+    G27: when a DER cannot provide monitoring data, it SHALL not be sent); the
+    DEFAULT profile keeps posting an empty list."""
+
+    @staticmethod
+    def _readings_posts(mock_client):
+        return [c for c in mock_client.post_bytes.call_args_list if c.args[0] == "/mup/device1"]
+
+    async def _empty_second_cycle(self, mock_client, mock_connector, connector_resolver, profile):
+        manager = TelemetryManager(
+            mock_client, MUP_LIST_HREF, connector_resolver, reading_profile=profile
+        )
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        mock_connector.fetch_monitoring.return_value = {}
+        mock_client.post_bytes.reset_mock()
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_signed_as_reported_skips_the_readings_post(
+        self, mock_client, mock_connector, connector_resolver
+    ):
+        from py20305.telemetry.mup import ReadingProfile
+
+        manager = await self._empty_second_cycle(
+            mock_client, mock_connector, connector_resolver, ReadingProfile.SIGNED_AS_REPORTED
+        )
+
+        assert self._readings_posts(mock_client) == []
+        state = manager.get_device_state(SAMPLE_LFDI.lower())
+        assert state is not None and state.mup_posted
+
+    @pytest.mark.asyncio
+    async def test_default_profile_still_posts_the_empty_list(
+        self, mock_client, mock_connector, connector_resolver
+    ):
+        from py20305.telemetry.mup import ReadingProfile
+
+        await self._empty_second_cycle(
+            mock_client, mock_connector, connector_resolver, ReadingProfile.DEFAULT
+        )
+
+        assert len(self._readings_posts(mock_client)) == 1
+
+
 class TestSignedLoadRegistration:
     """SIGNED_LOAD_CONVENTION re-POSTs the MUP when a new reading appears."""
 

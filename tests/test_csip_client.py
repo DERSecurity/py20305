@@ -160,6 +160,39 @@ async def test_poll_204_below_threshold_resubscribes(client: CsipClient):
 
 
 @pytest.mark.asyncio
+async def test_sustained_failure_recovery_reports_reconnect_before_rediscovery():
+    """A host learns of a reconnect before the rediscovery that follows it, so
+    what it resends on rediscovery already knows the server may have lost it."""
+    order: list[str] = []
+    client = CsipClient("https://example.com", on_reconnect=lambda: order.append("reconnect"))
+
+    async def rediscover() -> None:
+        order.append("rediscovery")
+
+    with patch.object(client, "trigger_rediscovery", side_effect=rediscover):
+        client._poll_failure_count = 3
+        await client._note_successful_contact()
+
+    assert order == ["reconnect", "rediscovery"]
+
+
+@pytest.mark.asyncio
+async def test_brief_failure_recovery_does_not_report_reconnect():
+    reconnects: list[None] = []
+    client = CsipClient("https://example.com", on_reconnect=lambda: reconnects.append(None))
+
+    with (
+        patch.object(client, "trigger_rediscovery", new_callable=AsyncMock),
+        patch.object(client, "_auto_subscribe", new_callable=AsyncMock),
+    ):
+        client._subscription_manager = MagicMock()
+        client._poll_failure_count = 1
+        await client._note_successful_contact()
+
+    assert reconnects == []
+
+
+@pytest.mark.asyncio
 async def test_poll_persistent_redirect_triggers_rediscovery(client: CsipClient):
     """A persistent redirect during a poll triggers rediscovery (IEEE 5.5.2.7)."""
 
@@ -811,6 +844,36 @@ class TestRouteDefaultNotification:
         client._subscription_manager = MagicMock(spec=SubscriptionManager)
         await client._route_default_notification("/edev")
         callback.assert_awaited_once()
+
+
+class TestHeartbeatSeconds:
+    """The configured backstop interval reaches the scheduler that polls
+    subscribed resources, including the one rediscovery builds."""
+
+    def test_scheduler_uses_configured_heartbeat(self):
+        client = CsipClient("https://example.com", heartbeat_seconds=300)
+        assert client._scheduler._heartbeat_seconds == 300
+
+    @pytest.mark.asyncio
+    async def test_rediscovery_scheduler_keeps_configured_heartbeat(self):
+        client = CsipClient("https://example.com", heartbeat_seconds=300)
+        with (
+            patch("py20305.client.csip_client.discover", new_callable=AsyncMock),
+            patch(
+                "py20305.client.csip_client.refresh_function_set_assignments",
+                new_callable=AsyncMock,
+            ),
+            patch("py20305.client.csip_client.refresh_der_programs", new_callable=AsyncMock),
+            patch("py20305.client.csip_client.refresh_der_controls", new_callable=AsyncMock),
+        ):
+            await client.connect()
+            first = client._scheduler
+            await client.trigger_rediscovery()
+        try:
+            assert client._scheduler is not first
+            assert client._scheduler._heartbeat_seconds == 300
+        finally:
+            await client._scheduler.cancel_all()
 
 
 class TestPollSuppression:
