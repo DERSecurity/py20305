@@ -39,8 +39,8 @@ def _make_connector(
 ) -> MagicMock:
     """Create a mock connector with async fetch methods."""
     connector = MagicMock()
-    connector.fetch_nameplate = AsyncMock(return_value=nameplate or {"WMaxRtg": 15000})
-    connector.fetch_configuration = AsyncMock(return_value=configuration or {"WMax": 10000})
+    connector.fetch_nameplate = AsyncMock(return_value=nameplate or {"rtgMaxW": 15000})
+    connector.fetch_configuration = AsyncMock(return_value=configuration or {"setMaxW": 10000})
     connector.fetch_status = AsyncMock(
         return_value=status
         or {
@@ -107,7 +107,7 @@ class TestDerResourceManagerCapabilityCycle:
     async def test_capability_puts_xml(self) -> None:
         client = AsyncMock()
         client.put_bytes = AsyncMock(return_value=200)
-        connector = _make_connector(nameplate={"WMaxRtg": 15000})
+        connector = _make_connector(nameplate={"rtgMaxW": 15000})
         manager = DerResourceManager(client, _aresolver(connector))
 
         manager.start_device("ab", "/cap", None, None)
@@ -127,7 +127,7 @@ class TestDerResourceManagerCapabilityCycle:
         client.server_2018_compat = False
         client.csip_aus_mode = True
         client.csipaus_namespace = "https://csipaus.org/ns/v1.3"
-        connector = _make_connector(nameplate={"WMaxRtg": 15000})
+        connector = _make_connector(nameplate={"rtgMaxW": 15000})
         manager = DerResourceManager(client, _aresolver(connector))
 
         manager.start_device("ab", "/cap", None, None)
@@ -168,7 +168,7 @@ class TestDerResourceManagerSettingsCycle:
     async def test_settings_puts_xml(self) -> None:
         client = AsyncMock()
         client.put_bytes = AsyncMock(return_value=200)
-        connector = _make_connector(configuration={"WMax": 10000})
+        connector = _make_connector(configuration={"setMaxW": 10000})
         manager = DerResourceManager(client, _aresolver(connector))
 
         manager.start_device("ab", None, "/set", None)
@@ -193,12 +193,12 @@ class TestDerResourceManagerSettingsCycle:
     @pytest.mark.asyncio
     async def test_settings_missing_wmax_skips_put_with_actionable_warning(self) -> None:
         # Regression: a connector whose fetch_configuration omits the
-        # required WMax (e.g. one based on the pre-fix print_demo example) must
+        # required setMaxW (e.g. one based on the pre-fix print_demo example) must
         # not crash the cycle with a full traceback every tick. The cycle should
         # skip the PUT and emit one actionable, traceback-free warning.
         client = AsyncMock()
         client.put_bytes = AsyncMock(return_value=200)
-        connector = _make_connector(configuration={"VAMax": 5000})  # no WMax
+        connector = _make_connector(configuration={"setMaxVA": 5000})  # no setMaxW
         manager = DerResourceManager(client, _aresolver(connector))
         manager.start_device("ab", None, "/set", None)
 
@@ -209,7 +209,7 @@ class TestDerResourceManagerSettingsCycle:
         mock_report.assert_called_once()
         args, kwargs = mock_report.call_args
         assert args[0] == "warnings"
-        assert "WMax" in args[1]
+        assert "setMaxW" in args[1]
         # A known connector-contract problem, not a crash: no traceback, and a
         # distinct dedup key from the generic-exception path.
         assert not kwargs.get("exc_info", False)
@@ -253,7 +253,7 @@ class TestDerResourceManagerChangeDetection:
         """DERCapability always PUTs, even when data is unchanged."""
         client = AsyncMock()
         client.put_bytes = AsyncMock(return_value=200)
-        connector = _make_connector(nameplate={"WMaxRtg": 15000})
+        connector = _make_connector(nameplate={"rtgMaxW": 15000})
         manager = DerResourceManager(client, _aresolver(connector))
 
         # Register device without scheduling (avoids background task interference)
@@ -270,7 +270,7 @@ class TestDerResourceManagerChangeDetection:
         """Second settings cycle with same data skips the PUT."""
         client = AsyncMock()
         client.put_bytes = AsyncMock(return_value=200)
-        config = {"WMax": 10000, "VAMax": 20000}
+        config = {"setMaxW": 10000, "setMaxVA": 20000}
         connector = _make_connector(configuration=config)
         manager = DerResourceManager(client, _aresolver(connector))
 
@@ -285,13 +285,13 @@ class TestDerResourceManagerChangeDetection:
         """Settings PUT fires again when connector data changes."""
         client = AsyncMock()
         client.put_bytes = AsyncMock(return_value=200)
-        connector = _make_connector(configuration={"WMax": 10000})
+        connector = _make_connector(configuration={"setMaxW": 10000})
         manager = DerResourceManager(client, _aresolver(connector))
 
         manager.start_device("ab", None, "/set", None)
         await manager._settings_cycle("ab")
 
-        connector.fetch_configuration = AsyncMock(return_value={"WMax": 8000})
+        connector.fetch_configuration = AsyncMock(return_value={"setMaxW": 8000})
         await manager._settings_cycle("ab")
 
         assert client.put_bytes.call_count == 2
@@ -428,7 +428,7 @@ class TestReadsAreReported:
         emitter, fw = _make_telemetry()
         manager = DerResourceManager(
             client,
-            _aresolver(_make_connector(nameplate={"WMaxRtg": 15000})),
+            _aresolver(_make_connector(nameplate={"rtgMaxW": 15000})),
             device_telemetry=emitter,
         )
 
@@ -437,7 +437,7 @@ class TestReadsAreReported:
 
         assert len(fw.events) == 1
         assert fw.events[0].payload["direction"] == "upstream"
-        assert _points_of(fw.events[0]) == {"WMaxRtg": 15000}
+        assert _points_of(fw.events[0]) == {"rtgMaxW": 15000}
 
     @pytest.mark.asyncio
     async def test_settings_cycle_reports_the_configuration_read(self) -> None:
@@ -446,7 +446,7 @@ class TestReadsAreReported:
         emitter, fw = _make_telemetry()
         manager = DerResourceManager(
             client,
-            _aresolver(_make_connector(configuration={"WMax": 10000})),
+            _aresolver(_make_connector(configuration={"setMaxW": 10000})),
             device_telemetry=emitter,
         )
 
@@ -454,7 +454,7 @@ class TestReadsAreReported:
         await manager._settings_cycle("ab")
 
         assert len(fw.events) == 1
-        assert _points_of(fw.events[0]) == {"WMax": 10000}
+        assert _points_of(fw.events[0]) == {"setMaxW": 10000}
 
     @pytest.mark.asyncio
     async def test_status_cycle_reports_the_status_read(self) -> None:

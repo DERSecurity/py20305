@@ -27,6 +27,7 @@ from py20305.connectors.errors import (
     ConnectorValueError,
     ConnectorWriteError,
 )
+from py20305.connectors.reading import Reading
 
 ConnectorPayload = dict[str, Any] | None
 
@@ -69,33 +70,6 @@ class ScheduleNotification:
     payload: dict[str, Any]
 
 
-@dataclass(frozen=True)
-class ReadingOverride:
-    """Per-quantity overrides for a connector's MirrorMeterReadings.
-
-    Returned (keyed by monitoring key, e.g. ``"W"``, ``"VL2"``) from
-    :meth:`BaseConnector.reading_overrides` to tailor ReadingType metadata and
-    the default ``qualityFlags`` to a connector's use case -- e.g. report a
-    quantity as a Maximum (``data_qualifier=8``) or a Summation
-    (``accumulation_behaviour=9``), or mark its readings ``derived``.
-
-    Every field is optional; ``None`` leaves the client default in place, so
-    a connector only states the deltas it cares about. The ReadingType fields map
-    onto ``ReadingTypeSpec``. ``quality_flags`` is a 16-bit value applied to the
-    ``Reading`` (not the ReadingType). ``flow_direction`` is intentionally not
-    overridable -- it stays derived from the value's sign.
-    """
-
-    accumulation_behaviour: int | None = None
-    data_qualifier: int | None = None
-    kind: int | None = None
-    commodity: int | None = None
-    multiplier: int | None = None  # powerOfTenMultiplier
-    uom: int | None = None
-    phase: int | None = None
-    quality_flags: int | None = None
-
-
 __all__ = [
     "BaseConnector",
     "ConnectorConnectionError",
@@ -104,7 +78,7 @@ __all__ = [
     "ConnectorTimeoutError",
     "ConnectorValueError",
     "ConnectorWriteError",
-    "ReadingOverride",
+    "Reading",
     "ScheduleNotification",
 ]
 
@@ -133,113 +107,82 @@ class BaseConnector:
     # Telemetry
     # ------------------------------------------------------------------
 
-    async def fetch_monitoring(self) -> dict[str, Any]:
-        """Return raw, unscaled power telemetry.
+    async def fetch_monitoring(self) -> list[Reading]:
+        """Return the device's measurements, one :class:`Reading` each.
 
-        Signs are referenced to the DER and are a requirement, not a hint:
-        ``W`` SHALL be positive for generation and negative for absorption, and
-        ``Var`` positive for reactive power injection (over-excited) and negative
-        for absorption (under-excited). This is the SunSpec model 701 convention.
-        A connector for a meter reports both in the frame of its role instead
-        (see ``py20305.telemetry.mup.DeviceRole``). The
-        ``SIGNED_LOAD_CONVENTION`` reading profile negates both for a DER and a
-        DER meter and posts a site meter's as reported, so a connector reporting
-        another convention posts the wrong sign.
-
-        Beyond the keys below, a connector may supply per-line keys (``WL1``,
-        ``VarL2``, ...), ``ACType`` (SunSpec 701 enum), phase-to-phase voltages
-        (``VL1L2``, ``VL2L3``, ``VL3L1``) and State of Energy in Wh
-        (``WHAvail``). Absent or ``None`` means not measured.
+        Each reading states its IEEE 2030.5 ReadingType (``uom``, ``phase``,
+        ``kind``, ``data_qualifier``, ...) and its value in engineering units.
+        Real and reactive power are signed in the frame of the device's role
+        (see :class:`~py20305.connectors.reading.Reading`); a reading profile
+        that posts another convention converts them. A quantity the device does
+        not measure is left out. Give each reading a distinct ReadingType: a
+        second reading with the same one is dropped.
         """
-        return {
-            "W": None,
-            "Var": None,
-            "Hz": None,
-            "V": None,
-            "PF": None,
-            "VA": None,
-            "A": None,
-        }
-
-    def reading_overrides(self) -> dict[str, ReadingOverride] | None:
-        """Optional per-quantity ReadingType / qualityFlags overrides.
-
-        Keyed by the same monitoring key as ``fetch_monitoring`` (``"W"``,
-        ``"VL2"``, ...). Return ``None`` (the default) to use the standard
-        ReadingType metadata and ``qualityFlags=valid`` for every reading. A
-        connector overrides only the deltas it needs; see :class:`ReadingOverride`.
-
-        For a *static* per-key ``qualityFlags`` default, set it here. For a
-        *per-cycle* value that varies with each sample (e.g. ``questionable`` on a
-        stale read), put it in ``fetch_monitoring`` under ``"<key>__quality"``
-        (e.g. ``{"W": 1500, "W__quality": 0x10}``); it takes precedence over the
-        static default for that cycle.
-        """
-        return None
+        return []
 
     async def fetch_nameplate(self) -> dict[str, Any]:
-        """Return DER nameplate ratings."""
+        """Return DER ratings keyed by IEEE 2030.5 DERCapability element name.
+
+        A value is a number, ``{"value": ..., "multiplier": ...}``, or for a
+        power factor ``{"displacement": ..., "multiplier": ...}``. ``rtgMaxW``
+        is required. ``modesSupported`` is the DERControlType bitmap;
+        ``doeModesSupported`` is the CSIP-AUS extension bitmap and defaults to
+        all four limits. An absent or ``None`` key is not reported; an explicit
+        0 is.
+        """
         return {
-            "WMaxRtg": None,
-            "WOvrExtRtg": None,
-            "WOvrExtRtgPF": None,
-            "WUndExtRtg": None,
-            "WUndExtRtgPF": None,
-            "VAMaxRtg": None,
-            # IEEE 2030.5 DERCapability rtgMaxA: maximum continuous AC
-            # current in amperes RMS, as a number or {value, multiplier}.
+            "rtgMaxW": None,
+            "rtgMaxVA": None,
+            "rtgMaxVar": None,
+            "rtgMaxVarNeg": None,
             "rtgMaxA": None,
-            "VarMaxInjRtg": None,
-            "VarMaxAbsRtg": None,
-            "WChaRteMaxRtg": None,
-            "VAChaRteMaxRtg": None,
-            # Storage ratings (rtgMaxDischargeRateW/VA, rtgMaxWh, rtgMaxAh).
-            # Omitted when None; a connector that reports them -- including an
-            # explicit 0 -- has them serialized as-is.
-            "WDisChaRteMaxRtg": None,
-            "VADisChaRteMaxRtg": None,
-            "WhMaxRtg": None,
-            "AhMaxRtg": None,
-            "VNomRtg": None,
-            "VMaxRtg": None,
-            "VMinRtg": None,
-            "ReactSusceptRtg": None,
-            "NorOpCatRtg": None,
-            "AbnOpCatRtg": None,
-            "CtrlModes": None,
-            # CSIP-AUS only: DOE control bitmap (doeModesSupported). Connector
-            # provides an int (4-bit bitmap); omitted/None defaults to all four
-            # DOE limits (0x0F).
-            "DoeModesSupported": None,
+            "rtgOverExcitedW": None,
+            "rtgOverExcitedPF": None,
+            "rtgUnderExcitedW": None,
+            "rtgUnderExcitedPF": None,
+            "rtgMaxChargeRateW": None,
+            "rtgMaxChargeRateVA": None,
+            "rtgMaxDischargeRateW": None,
+            "rtgMaxDischargeRateVA": None,
+            "rtgMaxWh": None,
+            "rtgMaxAh": None,
+            "rtgVNom": None,
+            "rtgMaxV": None,
+            "rtgMinV": None,
+            "rtgReactiveSusceptance": None,
+            "rtgNormalCategory": None,
+            "rtgAbnormalCategory": None,
+            "modesSupported": None,
+            "doeModesSupported": None,
         }
 
     async def fetch_configuration(self) -> dict[str, Any]:
-        """Return DER configuration settings."""
+        """Return DER settings keyed by IEEE 2030.5 DERSettings element name.
+
+        Values take the shapes :meth:`fetch_nameplate` describes. ``setMaxW``
+        is required. ``modesEnabled`` is the DERControlType bitmap;
+        ``doeModesEnabled`` is the CSIP-AUS extension bitmap and defaults to
+        the export and import limits.
+        """
         return {
-            "WMax": None,
-            "WMaxOvrExt": None,
-            "WOvrExtPF": None,
-            "WMaxUndExt": None,
-            "WUndExtPF": None,
-            "VAMax": None,
-            "VarMaxInj": None,
-            "VarMaxAbs": None,
-            "WChaRteMax": None,
-            "VAChaRteMax": None,
-            # Storage settings (setMaxDischargeRateW/VA, setMaxWh, setMaxAh).
-            # Omitted when None; an explicit 0 is serialized as-is.
-            "WDisChaRteMax": None,
-            "VADisChaRteMax": None,
-            "WhMax": None,
-            "AhMax": None,
-            "VNom": None,
-            "VMax": None,
-            "VMin": None,
-            "CtrlModes": None,
-            # CSIP-AUS only: enabled DOE control bitmap (doeModesEnabled).
-            # Connector provides an int (4-bit bitmap); omitted/None -> export +
-            # import limits (0x03).
-            "DoeModesEnabled": None,
+            "setMaxW": None,
+            "setMaxVA": None,
+            "setMaxVar": None,
+            "setMaxVarNeg": None,
+            "setMinPFOverExcited": None,
+            "setMinPFUnderExcited": None,
+            "setMaxChargeRateW": None,
+            "setMaxChargeRateVA": None,
+            "setMaxDischargeRateW": None,
+            "setMaxDischargeRateVA": None,
+            "setMaxWh": None,
+            "setMaxAh": None,
+            "setVNom": None,
+            "setMaxV": None,
+            "setMinV": None,
+            "setGradW": None,
+            "modesEnabled": None,
+            "doeModesEnabled": None,
         }
 
     async def fetch_availability(self) -> dict[str, Any]:
@@ -270,204 +213,240 @@ class BaseConnector:
             "readingTime": None,
         }
 
-    # ------------------------------------------------------------------
-    # Curve-based control modes
-    # ------------------------------------------------------------------
-
-    async def update_qv(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set Q(V) volt-var curve."""
-        return None
-
-    async def update_pv(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set P(V) volt-watt curve."""
-        return None
-
-    async def update_qp(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set Q(P) watt-var curve."""
-        return None
+    # Controls. Each method receives one IEEE 2030.5 control element; see
+    # py20305.connectors.modes for the parameter dict. A connector overrides
+    # the methods for the functions its device has.
 
     # ------------------------------------------------------------------
-    # Power limits
+    # DERControlBase elements
     # ------------------------------------------------------------------
 
-    async def update_p_lim(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set active power limit."""
+    async def update_op_mod_connect(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModConnect."""
         return None
 
-    async def update_p_lim_inj(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set active power limit (injection)."""
+    async def update_op_mod_energize(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModEnergize."""
         return None
 
-    async def update_p_lim_abs(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set active power limit (absorption)."""
+    async def update_op_mod_delta_var(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModDeltaVar."""
         return None
 
-    # ------------------------------------------------------------------
-    # Frequency response
-    # ------------------------------------------------------------------
-
-    async def update_freq_watt(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set curve-based frequency-watt mode."""
+    async def update_op_mod_delta_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModDeltaW."""
         return None
 
-    async def update_pf(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set frequency droop parameters."""
+    async def update_op_mod_fixed_pf_absorb_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModFixedPFAbsorbW."""
         return None
 
-    # ------------------------------------------------------------------
-    # Reactive power
-    # ------------------------------------------------------------------
-
-    async def update_const_q(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set constant reactive power."""
+    async def update_op_mod_fixed_pf_inject_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModFixedPFInjectW."""
         return None
 
-    async def update_const_pf(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set constant power factor."""
+    async def update_op_mod_fixed_v(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModFixedV."""
         return None
 
-    # ------------------------------------------------------------------
-    # Voltage ride-through
-    # ------------------------------------------------------------------
-
-    async def update_ov(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set over-voltage ride-through (must trip)."""
+    async def update_op_mod_fixed_var(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModFixedVar."""
         return None
 
-    async def update_uv(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set under-voltage ride-through (must trip)."""
+    async def update_op_mod_fixed_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModFixedW."""
         return None
 
-    async def update_ov_mc(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set over-voltage momentary cessation."""
+    async def update_op_mod_freq_droop(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModFreqDroop."""
         return None
 
-    async def update_uv_mc(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set under-voltage momentary cessation."""
+    async def update_op_mod_freq_watt(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModFreqWatt."""
         return None
 
-    # ------------------------------------------------------------------
-    # Frequency ride-through
-    # ------------------------------------------------------------------
-
-    async def update_of(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set over-frequency ride-through (must trip)."""
+    async def update_op_mod_grid_connect_permit(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModGridConnectPermit."""
         return None
 
-    async def update_uf(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set under-frequency ride-through (must trip)."""
+    async def update_op_mod_hfrt_may_trip(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModHFRTMayTrip."""
         return None
 
-    # ------------------------------------------------------------------
-    # Fixed output and ramp
-    # ------------------------------------------------------------------
-
-    async def update_fixed_w(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set fixed active power output."""
+    async def update_op_mod_hfrt_must_trip(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModHFRTMustTrip."""
         return None
 
-    async def update_p_ramp(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set active power ramp rate."""
+    async def update_op_mod_hvrt_may_trip(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModHVRTMayTrip."""
         return None
 
-    async def update_es_permit_service(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set enter service permission."""
+    async def update_op_mod_hvrt_momentary_cessation(
+        self, params: dict[str, Any]
+    ) -> ConnectorPayload:
+        """Apply or withdraw opModHVRTMomentaryCessation."""
         return None
 
-    # ------------------------------------------------------------------
-    # IEEE 2030.5-2023 new modes (Gaps 16-19)
-    # ------------------------------------------------------------------
-
-    async def update_connect(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set connect/energize state (AND logic)."""
+    async def update_op_mod_hvrt_must_trip(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModHVRTMustTrip."""
         return None
 
-    async def update_max_lim_pct_va_absorb(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set max VA absorption as percent."""
+    async def update_op_mod_island_permit(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModIslandPermit."""
         return None
 
-    async def update_max_lim_pct_va_inject(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set max VA injection as percent."""
+    async def update_op_mod_lfrt_may_trip(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModLFRTMayTrip."""
         return None
 
-    async def update_max_lim_pct_var_absorb(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set max var absorption as percent."""
+    async def update_op_mod_lfrt_must_trip(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModLFRTMustTrip."""
         return None
 
-    async def update_max_lim_pct_var_inject(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set max var injection as percent."""
+    async def update_op_mod_lvrt_may_trip(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModLVRTMayTrip."""
         return None
 
-    async def update_max_lim_pct_w_absorb(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set max W absorption as percent."""
+    async def update_op_mod_lvrt_momentary_cessation(
+        self, params: dict[str, Any]
+    ) -> ConnectorPayload:
+        """Apply or withdraw opModLVRTMomentaryCessation."""
         return None
 
-    async def update_max_lim_var_absorb(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set max var absorption (absolute)."""
+    async def update_op_mod_lvrt_must_trip(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModLVRTMustTrip."""
         return None
 
-    async def update_max_lim_var_inject(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set max var injection (absolute)."""
+    async def update_op_mod_max_lim_pct_va_absorb(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModMaxLimPctVAAbsorb."""
         return None
 
-    async def update_target_v(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set target voltage output."""
+    async def update_op_mod_max_lim_pct_va_inject(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModMaxLimPctVAInject."""
         return None
 
-    async def update_target_var(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set target reactive power output."""
+    async def update_op_mod_max_lim_pct_var_absorb(
+        self, params: dict[str, Any]
+    ) -> ConnectorPayload:
+        """Apply or withdraw opModMaxLimPctVarAbsorb."""
         return None
 
-    async def update_target_w(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set target active power output."""
+    async def update_op_mod_max_lim_pct_var_inject(
+        self, params: dict[str, Any]
+    ) -> ConnectorPayload:
+        """Apply or withdraw opModMaxLimPctVarInject."""
         return None
 
-    async def update_delta_w(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set delta active power change."""
+    async def update_op_mod_max_lim_pct_w_absorb(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModMaxLimPctWAbsorb."""
         return None
 
-    async def update_delta_var(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set delta reactive power change."""
+    async def update_op_mod_max_lim_var_absorb(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModMaxLimVarAbsorb."""
         return None
 
-    async def update_fixed_v(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set fixed voltage setpoint."""
+    async def update_op_mod_max_lim_var_inject(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModMaxLimVarInject."""
         return None
 
-    async def update_grid_connect_permit(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set grid connect permission."""
+    async def update_op_mod_max_lim_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModMaxLimW."""
         return None
 
-    async def update_island_permit(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set island operation permission."""
+    async def update_op_mod_max_lim_w_absorb(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModMaxLimWAbsorb."""
         return None
 
-    # ------------------------------------------------------------------
-    # CSIP-AUS extension modes
-    # ------------------------------------------------------------------
-
-    async def update_exp_lim(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set export power limit."""
+    async def update_op_mod_max_lim_w_inject(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModMaxLimWInject."""
         return None
 
-    async def update_imp_lim(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set import power limit."""
+    async def update_op_mod_target_v(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModTargetV."""
         return None
 
-    async def update_gen_lim(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set generation power limit."""
+    async def update_op_mod_target_var(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModTargetVar."""
         return None
 
-    async def update_load_lim(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set load power limit."""
+    async def update_op_mod_target_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModTargetW."""
+        return None
+
+    async def update_op_mod_volt_var(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModVoltVar."""
+        return None
+
+    async def update_op_mod_volt_watt(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModVoltWatt."""
+        return None
+
+    async def update_op_mod_watt_pf(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModWattPF."""
+        return None
+
+    async def update_op_mod_watt_var(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModWattVar."""
         return None
 
     # ------------------------------------------------------------------
-    # Pricing
+    # CSIP-AUS dynamic operating envelope limits
     # ------------------------------------------------------------------
 
-    async def update_pricing_mode(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Set pricing mode data."""
+    async def update_op_mod_exp_lim_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModExpLimW."""
+        return None
+
+    async def update_op_mod_imp_lim_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModImpLimW."""
+        return None
+
+    async def update_op_mod_gen_lim_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModGenLimW."""
+        return None
+
+    async def update_op_mod_load_lim_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw opModLoadLimW."""
+        return None
+
+    # ------------------------------------------------------------------
+    # DefaultDERControl settings
+    # ------------------------------------------------------------------
+
+    async def update_set_es_delay(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw setESDelay."""
+        return None
+
+    async def update_set_es_high_freq(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw setESHighFreq."""
+        return None
+
+    async def update_set_es_high_volt(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw setESHighVolt."""
+        return None
+
+    async def update_set_es_low_freq(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw setESLowFreq."""
+        return None
+
+    async def update_set_es_low_volt(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw setESLowVolt."""
+        return None
+
+    async def update_set_es_ramp_tms(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw setESRampTms."""
+        return None
+
+    async def update_set_es_random_delay(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw setESRandomDelay."""
+        return None
+
+    async def update_set_grad_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw setGradW."""
+        return None
+
+    async def update_set_soft_grad_w(self, params: dict[str, Any]) -> ConnectorPayload:
+        """Apply or withdraw setSoftGradW."""
         return None
 
     # ------------------------------------------------------------------

@@ -10,15 +10,12 @@ import pytest
 
 from py20305.client.errors import Sep2ConnectionError, Sep2ProtocolError
 from py20305.client.timebase import ServerTimebase
-from py20305.connectors.base import (
-    BaseConnector,
-    ConnectorConnectionError,
-    ReadingOverride,
-)
+from py20305.connectors.base import BaseConnector, ConnectorConnectionError, Reading
 from py20305.models.sep import MirrorUsagePointList
 from py20305.readings import DirectConnectorSource, Quality
 from py20305.telemetry.manager import DeviceTelemetryState, TelemetryManager
 from py20305.telemetry.mup import mup_mrid
+from tests.legacy_readings import KEYS, readings_from
 
 SAMPLE_LFDI = "1234567890abcdef1234567890abcdef12345678"
 MUP_LIST_HREF = "/mup"
@@ -40,15 +37,17 @@ def mock_connector():
     """Mock connector with monitoring data."""
     connector = AsyncMock(spec=BaseConnector)
     connector.fetch_monitoring = AsyncMock(
-        return_value={
-            "W": 1000.0,
-            "Var": 200.0,
-            "Hz": 60.0,
-            "V": 240.0,
-            "PF": 0.98,
-            "VA": 1020.0,
-            "A": 4.25,
-        }
+        return_value=readings_from(
+            {
+                "W": 1000.0,
+                "Var": 200.0,
+                "Hz": 60.0,
+                "V": 240.0,
+                "PF": 0.98,
+                "VA": 1020.0,
+                "A": 4.25,
+            }
+        )
     )
     connector.fetch_status = AsyncMock(
         return_value={
@@ -280,7 +279,6 @@ class TestMeteringCycle:
         assert state.post_rate == 300  # Unchanged
 
         await manager.shutdown()
-
 
     @pytest.mark.asyncio
     async def test_readback_post_rate_retunes_schedule_and_acquisition(
@@ -1236,56 +1234,43 @@ class TestOnlyMirrorDiscoveredDevices:
         mock_connector.fetch_monitoring.assert_awaited()
 
 
-class TestConnectorReadingOverrides:
-    """The connector's reading_overrides() flow through to the MUP/readings builders."""
+class TestConnectorReadings:
+    """The connector's readings flow through to the MUP and readings builders."""
 
     @pytest.mark.asyncio
-    async def test_overrides_reach_mup_builder(self, manager, mock_connector):
-        from unittest.mock import patch
-
-        from py20305.connectors.base import ReadingOverride
+    async def test_readings_reach_the_mup_builder(self, manager, mock_connector):
         from py20305.telemetry import manager as mgr_mod
 
-        ov = {"W": ReadingOverride(accumulation_behaviour=9)}
-        mock_connector.reading_overrides.return_value = ov
+        reading = Reading(uom=38, value=1000.0, accumulation_behaviour=9)
+        mock_connector.fetch_monitoring.return_value = [reading]
         manager.start_metering(SAMPLE_LFDI, post_rate=300)
         with patch.object(mgr_mod, "create_mup", wraps=mgr_mod.create_mup) as spy:
             await manager._metering_cycle(SAMPLE_LFDI)
-        # create_mup(lfdi, monitoring, post_rate, overrides). The container is
-        # a copy -- the store does not alias connector-owned dicts -- so assert
-        # on what carries the semantics: the same override under the same key.
-        delivered = spy.call_args.args[3]
-        assert delivered == ov
-        assert delivered["W"] is ov["W"]
+        assert spy.call_args.args[1] == [reading]
         await manager.shutdown()
 
     @pytest.mark.asyncio
-    async def test_overrides_reach_readings_builder(self, manager, mock_connector):
-        from unittest.mock import patch
-
-        from py20305.connectors.base import ReadingOverride
-        from py20305.telemetry import manager as mgr_mod
-
-        ov = {"W": ReadingOverride(quality_flags=0x10)}
-        mock_connector.reading_overrides.return_value = ov
+    async def test_a_reading_quality_reaches_the_posted_reading(
+        self, manager, mock_client, mock_connector
+    ):
+        mock_connector.fetch_monitoring.return_value = [
+            Reading(uom=38, value=1000.0, quality_flags=0x10)
+        ]
         manager.start_metering(SAMPLE_LFDI, post_rate=300)
         await manager._metering_cycle(SAMPLE_LFDI)  # cycle 1: MUP
-        with patch.object(
-            mgr_mod, "create_meter_reading_list", wraps=mgr_mod.create_meter_reading_list
-        ) as spy:
-            await manager._metering_cycle(SAMPLE_LFDI)  # cycle 2: readings
-        delivered = spy.call_args.kwargs["overrides"]
-        assert delivered == ov
-        assert delivered["W"] is ov["W"]
+        await manager._metering_cycle(SAMPLE_LFDI)  # cycle 2: readings
+        body = mock_client.post_bytes.call_args_list[-1].args[1].decode()
+        assert "<qualityFlags>0010</qualityFlags>" in body
         await manager.shutdown()
 
     @pytest.mark.asyncio
-    async def test_non_dict_overrides_coerced_to_none(self, manager, mock_client, mock_connector):
-        # A connector returning a non-dict (or a bare mock) must not break the cycle.
-        mock_connector.reading_overrides.return_value = "nonsense"
+    async def test_a_monitoring_result_that_is_not_a_list_posts_nothing(
+        self, manager, mock_client, mock_connector
+    ):
+        mock_connector.fetch_monitoring.return_value = {"W": 1000.0}
         manager.start_metering(SAMPLE_LFDI, post_rate=300)
         await manager._metering_cycle(SAMPLE_LFDI)
-        mock_client.post_bytes.assert_called_once()  # MUP still posted
+        mock_client.post_bytes.assert_not_called()
         await manager.shutdown()
 
 
@@ -1544,8 +1529,9 @@ class TestRunsWithoutAStore:
     async def test_metering_cycle_needs_no_store(self) -> None:
         """A default-constructed manager reads its connector and posts."""
         connector = AsyncMock(spec=BaseConnector)
-        connector.fetch_monitoring = AsyncMock(return_value={"W": 1000, "W__quality": 0})
-        connector.reading_overrides = MagicMock(return_value={})
+        connector.fetch_monitoring = AsyncMock(
+            return_value=readings_from({"W": 1000, "W__quality": 0})
+        )
 
         client = AsyncMock()
         client.get_bytes = AsyncMock(return_value=b"")
@@ -1574,8 +1560,7 @@ class TestRunsWithoutAStore:
     async def test_default_source_reads_every_cycle(self) -> None:
         """Caching is the store's job, so the direct source must not do it."""
         connector = AsyncMock(spec=BaseConnector)
-        connector.fetch_monitoring = AsyncMock(return_value={"W": 1000})
-        connector.reading_overrides = MagicMock(return_value={})
+        connector.fetch_monitoring = AsyncMock(return_value=readings_from({"W": 1000}))
 
         source = DirectConnectorSource(lambda _lfdi: connector)
         source.declare(SAMPLE_LFDI, 300.0)  # inert, but part of the contract
@@ -1589,8 +1574,7 @@ class TestRunsWithoutAStore:
     async def test_direct_source_reports_comm_lost_against_history(self) -> None:
         """A failed read keeps the last known values rather than emptying out."""
         connector = AsyncMock(spec=BaseConnector)
-        connector.fetch_monitoring = AsyncMock(return_value={"W": 1000})
-        connector.reading_overrides = MagicMock(return_value={})
+        connector.fetch_monitoring = AsyncMock(return_value=readings_from({"W": 1000}))
         source = DirectConnectorSource(lambda _lfdi: connector)
 
         good = await source.read(SAMPLE_LFDI)
@@ -1600,7 +1584,7 @@ class TestRunsWithoutAStore:
         lost = await source.read(SAMPLE_LFDI)
 
         assert lost.quality is Quality.COMM_LOST
-        assert lost.entries["W"].value == 1000
+        assert lost.entries[KEYS["W"]].value == 1000
         assert lost.last_success == good.last_success
         assert isinstance(lost.error, ConnectorConnectionError)
 
@@ -1612,8 +1596,7 @@ class TestRunsWithoutAStore:
         with the snapshot's.
         """
         connector = AsyncMock(spec=BaseConnector)
-        connector.fetch_monitoring = AsyncMock(return_value={"W": 1000})
-        connector.reading_overrides = MagicMock(return_value={})
+        connector.fetch_monitoring = AsyncMock(return_value=readings_from({"W": 1000}))
         source = DirectConnectorSource(lambda _lfdi: connector)
 
         good = await source.read(SAMPLE_LFDI)
@@ -1621,9 +1604,9 @@ class TestRunsWithoutAStore:
         lost = await source.read(SAMPLE_LFDI)
 
         assert lost.quality is Quality.COMM_LOST
-        assert lost.entries["W"].quality is Quality.COMM_LOST
-        assert lost.entries["W"].value == 1000
-        assert lost.entries["W"].source_timestamp == good.entries["W"].source_timestamp
+        assert lost.entries[KEYS["W"]].quality is Quality.COMM_LOST
+        assert lost.entries[KEYS["W"]].value == 1000
+        assert lost.entries[KEYS["W"]].source_timestamp == good.entries[KEYS["W"]].source_timestamp
 
     async def test_timestamp_excludes_connector_resolution(self) -> None:
         """First-touch construction must not be counted against the sample's age.
@@ -1634,8 +1617,7 @@ class TestRunsWithoutAStore:
         """
         clock = iter([100.0, 200.0, 300.0])
         connector = AsyncMock(spec=BaseConnector)
-        connector.fetch_monitoring = AsyncMock(return_value={"W": 1})
-        connector.reading_overrides = MagicMock(return_value={})
+        connector.fetch_monitoring = AsyncMock(return_value=readings_from({"W": 1}))
 
         async def slow_resolve(_lfdi: str) -> BaseConnector:
             return connector
@@ -1646,68 +1628,41 @@ class TestRunsWithoutAStore:
         # The first clock read happens after resolution, not before it.
         assert snapshot.last_success == 100.0
 
-    async def test_direct_source_drops_non_int_protocol_quality(self) -> None:
-        """A malformed "<key>__quality" must not reach the reading.
+    async def test_direct_source_drops_invalid_readings(self) -> None:
+        """An invalid reading never reaches the snapshot; the valid ones do.
 
-        The MUP path validates qualityFlags again downstream, so carrying a bad
-        value through would log the same complaint once per cycle forever. The
-        store path drops it; this path has to agree, or a deployment running
-        telemetry without a store gets different behavior from the same
-        connector.
+        The MUP path checks readings again downstream, so carrying a bad one
+        through would log the same complaint once per cycle forever. Every
+        acquisition path applies the same check, so a deployment without a
+        store behaves the same as one with it.
         """
+        good = Reading(uom=33, value=60.0, quality_flags=8)
         connector = AsyncMock(spec=BaseConnector)
         connector.fetch_monitoring = AsyncMock(
-            return_value={
-                "W": 1000,
-                "W__quality": "not-an-int",
-                "V": 240,
-                "V__quality": True,  # bool is an int subclass; would post as 1
-                "Hz": 60,
-                "Hz__quality": 8,
-            }
-        )
-        connector.reading_overrides = MagicMock(return_value={})
-        source = DirectConnectorSource(lambda _lfdi: connector)
-
-        snapshot = await source.read(SAMPLE_LFDI)
-
-        assert snapshot.entries["W"].protocol_quality is None
-        assert snapshot.entries["V"].protocol_quality is None
-        assert snapshot.entries["Hz"].protocol_quality == 8
-        # The quality companions are not themselves measured quantities.
-        assert set(snapshot.entries) == {"W", "V", "Hz"}
-
-    async def test_direct_source_drops_malformed_override_values(self) -> None:
-        """A non-ReadingOverride value never reaches the snapshot.
-
-        ``DeviceSnapshot.reading_overrides`` is typed
-        ``Mapping[str, ReadingOverride]`` and the values come from third-party
-        code through an ``Any``, so the filter is what keeps that annotation
-        honest. Both acquisition paths share it; this pins the direct one.
-        """
-        connector = MagicMock(spec=BaseConnector)
-        connector.fetch_monitoring = AsyncMock(return_value={"W": 1000})
-        good = ReadingOverride(uom=38)
-        connector.reading_overrides = MagicMock(
-            return_value={"W": good, "V": "not-an-override", "Hz": None}
+            return_value=[
+                Reading(uom=38, value=1000.0, quality_flags=True),  # type: ignore[arg-type]
+                Reading(uom=29, value=float("nan")),
+                "not a reading",
+                good,
+            ]
         )
         source = DirectConnectorSource(lambda _lfdi: connector)
 
         snapshot = await source.read(SAMPLE_LFDI)
 
-        assert dict(snapshot.reading_overrides) == {"W": good}
+        assert [entry.reading for entry in snapshot.entries.values()] == [good]
+        assert snapshot.entries[KEYS["Hz"]].protocol_quality == 8
 
-    async def test_direct_source_survives_a_non_dict_override_map(self) -> None:
-        """A connector returning the wrong type entirely yields no overrides."""
+    async def test_direct_source_reports_a_non_list_result_as_comm_lost(self) -> None:
+        """A connector returning the wrong type entirely is a failed read."""
         connector = MagicMock(spec=BaseConnector)
         connector.fetch_monitoring = AsyncMock(return_value={"W": 1000})
-        connector.reading_overrides = MagicMock(return_value=["not", "a", "dict"])
         source = DirectConnectorSource(lambda _lfdi: connector)
 
         snapshot = await source.read(SAMPLE_LFDI)
 
-        assert dict(snapshot.reading_overrides) == {}
-        assert snapshot.quality is Quality.GOOD
+        assert snapshot.quality is Quality.COMM_LOST
+        assert isinstance(snapshot.error, TypeError)
 
 
 class _RecordingForwarder:
@@ -1822,12 +1777,14 @@ class TestPowerDirection:
         manager = TelemetryManager(
             mock_client, MUP_LIST_HREF, connector_resolver, power_direction=PowerDirection.NET
         )
-        mock_connector.fetch_monitoring.return_value = {
-            "W": -800.0,
-            "Var": 100.0,
-            "Hz": 60.0,
-            "V": 240.0,
-        }
+        mock_connector.fetch_monitoring.return_value = readings_from(
+            {
+                "W": -800.0,
+                "Var": 100.0,
+                "Hz": 60.0,
+                "V": 240.0,
+            }
+        )
         manager.start_metering(SAMPLE_LFDI, post_rate=300)
         await manager._metering_cycle(SAMPLE_LFDI.lower())
         await manager._metering_cycle(SAMPLE_LFDI.lower())
@@ -1892,11 +1849,11 @@ class TestSignedLoadRegistration:
     async def test_new_reading_reposts_mup_before_readings(
         self, signed_manager, mock_client, mock_connector
     ):
-        mock_connector.fetch_monitoring.return_value = self._monitoring()
+        mock_connector.fetch_monitoring.return_value = readings_from(self._monitoring())
         signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
 
-        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        mock_connector.fetch_monitoring.return_value = readings_from(self._monitoring(WHAvail=5000))
         mock_client.post_bytes.reset_mock()
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
 
@@ -1907,10 +1864,10 @@ class TestSignedLoadRegistration:
         await signed_manager.shutdown()
 
     async def test_repost_happens_once(self, signed_manager, mock_client, mock_connector):
-        mock_connector.fetch_monitoring.return_value = self._monitoring()
+        mock_connector.fetch_monitoring.return_value = readings_from(self._monitoring())
         signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
-        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        mock_connector.fetch_monitoring.return_value = readings_from(self._monitoring(WHAvail=5000))
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
 
         mock_client.post_bytes.reset_mock()
@@ -1923,12 +1880,12 @@ class TestSignedLoadRegistration:
     async def test_repost_keeps_a_reading_absent_this_cycle(
         self, signed_manager, mock_client, mock_connector
     ):
-        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        mock_connector.fetch_monitoring.return_value = readings_from(self._monitoring(WHAvail=5000))
         signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
 
         # State of Energy drops out in the same cycle a line-to-line voltage appears.
-        mock_connector.fetch_monitoring.return_value = self._monitoring(VL1L2=240.0)
+        mock_connector.fetch_monitoring.return_value = readings_from(self._monitoring(VL1L2=240.0))
         mock_client.post_bytes.reset_mock()
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
 
@@ -1937,15 +1894,26 @@ class TestSignedLoadRegistration:
 
         await signed_manager.shutdown()
 
-    async def test_default_profile_never_reposts(self, manager, mock_client, mock_connector):
+    async def test_default_profile_reposts_with_the_registered_reading_types(
+        self, manager, mock_client, mock_connector
+    ):
+        mock_connector.fetch_monitoring.return_value = readings_from(self._monitoring(W=-1000.0))
         manager.start_metering(SAMPLE_LFDI, post_rate=300)
         await manager._metering_cycle(SAMPLE_LFDI.lower())
+        first = self._mup_posts(mock_client)[0]
 
-        mock_connector.fetch_monitoring.return_value = self._monitoring(WHAvail=5000)
+        # The sign flips and a new reading appears in the same cycle.
+        mock_connector.fetch_monitoring.return_value = readings_from(
+            self._monitoring(W=1000.0, WHAvail=5000)
+        )
         mock_client.post_bytes.reset_mock()
         await manager._metering_cycle(SAMPLE_LFDI.lower())
 
-        assert self._mup_posts(mock_client) == []
+        (repost,) = self._mup_posts(mock_client)
+        before = {m.m_rid.value: m.reading_type for m in first.mirror_meter_reading}
+        after = {m.m_rid.value: m.reading_type for m in repost.mirror_meter_reading}
+        assert len(after) == len(before) + 1
+        assert all(after[mrid] == reading_type for mrid, reading_type in before.items())
 
         await manager.shutdown()
 
@@ -1973,10 +1941,12 @@ class TestSignedLoadFailedRepost:
             return "/mup/device1"
 
         mock_client.post_bytes.side_effect = post
-        mock_connector.fetch_monitoring.return_value = {
-            **mock_connector.fetch_monitoring.return_value,
-            "WHAvail": 5000,
-        }
+        mock_connector.fetch_monitoring.return_value = readings_from(
+            {
+                **mock_connector.fetch_monitoring.return_value.source,
+                "WHAvail": 5000,
+            }
+        )
         mock_client.post_bytes.reset_mock()
         await manager._metering_cycle(SAMPLE_LFDI.lower())
 
@@ -1994,8 +1964,8 @@ class TestSignedLoadFailedRepost:
         await manager.shutdown()
 
 
-class TestSignedLoadAcType:
-    """The totals' phase code must not follow a cycle that lacks ACType."""
+class TestSignedLoadRefusedRepost:
+    """A refused re-POST leaves the registered readings posting."""
 
     @pytest.fixture
     def signed_manager(self, mock_client, connector_resolver):
@@ -2007,51 +1977,6 @@ class TestSignedLoadAcType:
             connector_resolver,
             reading_profile=ReadingProfile.SIGNED_LOAD_CONVENTION,
         )
-
-    @staticmethod
-    def _last_mup_power_phase(mock_client):
-        from py20305.models.sep import MirrorUsagePoint
-        from py20305.xml.serialization import from_xml
-
-        bodies = [
-            c.args[1] for c in mock_client.post_bytes.call_args_list if c.args[0] == MUP_LIST_HREF
-        ]
-        mup = from_xml(bodies[-1], MirrorUsagePoint)
-        power = next(m for m in mup.mirror_meter_reading if m.description == "Real Power")
-        return power.reading_type.phase.value if power.reading_type.phase else None
-
-    async def test_repost_without_ac_type_keeps_the_registered_phase(
-        self, signed_manager, mock_client, mock_connector
-    ):
-        base = {**mock_connector.fetch_monitoring.return_value, "ACType": 2}
-        mock_connector.fetch_monitoring.return_value = base
-        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
-        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
-
-        later = {k: v for k, v in base.items() if k != "ACType"} | {"WHAvail": 5000}
-        mock_connector.fetch_monitoring.return_value = later
-        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
-
-        assert self._last_mup_power_phase(mock_client) == 224
-
-        await signed_manager.shutdown()
-
-    async def test_ac_type_appearing_later_reposts_with_its_phase(
-        self, signed_manager, mock_client, mock_connector
-    ):
-        signed_manager.start_metering(SAMPLE_LFDI, post_rate=300)
-        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
-        assert self._last_mup_power_phase(mock_client) is None
-
-        mock_connector.fetch_monitoring.return_value = {
-            **mock_connector.fetch_monitoring.return_value,
-            "ACType": 0,
-        }
-        await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
-
-        assert self._last_mup_power_phase(mock_client) == 128
-
-        await signed_manager.shutdown()
 
     async def test_403_on_a_repost_does_not_block_the_device(
         self, signed_manager, mock_client, mock_connector
@@ -2070,10 +1995,12 @@ class TestSignedLoadAcType:
             return "/mup/device1"
 
         mock_client.post_bytes.side_effect = post
-        mock_connector.fetch_monitoring.return_value = {
-            **mock_connector.fetch_monitoring.return_value,
-            "WHAvail": 5000,
-        }
+        mock_connector.fetch_monitoring.return_value = readings_from(
+            {
+                **mock_connector.fetch_monitoring.return_value.source,
+                "WHAvail": 5000,
+            }
+        )
         mock_client.post_bytes.reset_mock()
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
         assert [c.args[0] for c in mock_client.post_bytes.call_args_list] == [
@@ -2084,9 +2011,7 @@ class TestSignedLoadAcType:
         for _ in range(3):
             mock_client.post_bytes.reset_mock()
             await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
-            assert [c.args[0] for c in mock_client.post_bytes.call_args_list] == [
-                "/mup/device1"
-            ]
+            assert [c.args[0] for c in mock_client.post_bytes.call_args_list] == ["/mup/device1"]
 
         state = signed_manager._devices[SAMPLE_LFDI.lower()]
         assert state.telemetry_blocked is False
@@ -2117,10 +2042,12 @@ class TestSignedLoadRepostAdoptsRate:
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
 
         mock_client.get = AsyncMock(return_value=MagicMock(post_rate=30))
-        mock_connector.fetch_monitoring.return_value = {
-            **mock_connector.fetch_monitoring.return_value,
-            "WHAvail": 5000,
-        }
+        mock_connector.fetch_monitoring.return_value = readings_from(
+            {
+                **mock_connector.fetch_monitoring.return_value.source,
+                "WHAvail": 5000,
+            }
+        )
         mock_client.post_bytes.reset_mock()
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
 
@@ -2158,18 +2085,18 @@ class TestSignedLoadRejectedRepost:
         manager.start_metering(SAMPLE_LFDI, post_rate=300)
         await manager._metering_cycle(SAMPLE_LFDI.lower())
         mock_client.post_bytes.side_effect = self._rejecting(status_code)
-        mock_connector.fetch_monitoring.return_value = {
-            **mock_connector.fetch_monitoring.return_value,
-            "WHAvail": 5000,
-        }
+        mock_connector.fetch_monitoring.return_value = readings_from(
+            {
+                **mock_connector.fetch_monitoring.return_value.source,
+                "WHAvail": 5000,
+            }
+        )
         await manager._metering_cycle(SAMPLE_LFDI.lower())
         mock_client.post_bytes.reset_mock()
         await manager._metering_cycle(SAMPLE_LFDI.lower())
         return [c.args[0] for c in mock_client.post_bytes.call_args_list]
 
-    async def test_4xx_rejection_is_not_retried(
-        self, signed_manager, mock_client, mock_connector
-    ):
+    async def test_4xx_rejection_is_not_retried(self, signed_manager, mock_client, mock_connector):
         targets = await self._register_then_grow(signed_manager, mock_client, mock_connector, 405)
 
         assert targets == ["/mup/device1"]
@@ -2188,11 +2115,13 @@ class TestSignedLoadRejectedRepost:
     ):
         await self._register_then_grow(signed_manager, mock_client, mock_connector, 405)
 
-        mock_connector.fetch_monitoring.return_value = {
-            **mock_connector.fetch_monitoring.return_value,
-            "ACType": 2,
-            "VL1L2": 240.0,
-        }
+        mock_connector.fetch_monitoring.return_value = readings_from(
+            {
+                **mock_connector.fetch_monitoring.return_value.source,
+                "ACType": 2,
+                "VL1L2": 240.0,
+            }
+        )
         mock_client.post_bytes.reset_mock()
         await signed_manager._metering_cycle(SAMPLE_LFDI.lower())
 

@@ -40,8 +40,8 @@ def build_der_settings(
     """Build a ``Dersettings`` model from connector configuration data.
 
     Args:
-        configuration: Dict from connector.fetch_configuration() with keys
-            like WMax, VAMax, VarMaxInj, CtrlModes, GradW, etc.
+        configuration: Dict from connector.fetch_configuration(), keyed by
+            DERSettings element name (setMaxW, setMaxVA, modesEnabled, ...).
         updated_time: Epoch seconds for updatedTime field. Defaults to now.
         csip_aus_mode: When True, attach the CSIP-AUS ``doeModesEnabled``
             extension (required by CSIP-AUS servers); plain 2030.5 servers omit
@@ -51,40 +51,34 @@ def build_der_settings(
         Pydantic model ready for ``to_xml()`` serialization.
 
     Raises:
-        ValueError: If WMax is missing (required by IEEE 2030.5 schema).
-
-    Note:
-        WMaxOvrExt and WMaxUndExt are deliberately omitted -- these keys
-        do not exist in the IEEE 2030.5 DERSettings XSD (sep2_schema_2023.xsd
-        lines 4211-4370) and were copy-paste errors in the reference
-        implementation.
+        ValueError: If setMaxW is missing (required by IEEE 2030.5 schema).
     """
     # Required field: setMaxW
-    set_max_w = to_active_power(configuration.get("WMax"))
+    set_max_w = to_active_power(configuration.get("setMaxW"))
     if set_max_w is None:
-        msg = "WMax is required for DERSettings but was missing or None"
+        msg = "setMaxW is required for DERSettings but was missing or None"
         raise ValueError(msg)
 
     # modesEnabled: optional bitmap
-    ctrl_modes = configuration.get("CtrlModes")
+    ctrl_modes = configuration.get("modesEnabled")
     modes_enabled = None
     if ctrl_modes is not None and isinstance(ctrl_modes, int):
         modes_enabled = DercontrolType(value=ctrl_modes.to_bytes(4, "big"))
 
     # setGradW: required UInt16, plain integer (not a scale factor type)
-    grad_w = configuration.get("GradW", 0)
+    grad_w = configuration.get("setGradW", 0)
     set_grad_w = int(grad_w) if isinstance(grad_w, (int, float)) else 0
 
     # updatedTime: required
     ut = updated_time if updated_time is not None else int(time.time())
 
     # CSIP-AUS extension: doeModesEnabled (the enabled DOE control bitmap, 4
-    # bits). Connector-provided via "DoeModesEnabled"; defaults to export +
+    # bits). Connector-provided via "doeModesEnabled"; defaults to export +
     # import active-power limits when absent. Rides in the DERSettings wildcard
     # slot, only in CSIP-AUS mode.
     other_element: list[object] = []
     if csip_aus_mode:
-        doe = configuration.get("DoeModesEnabled")
+        doe = configuration.get("doeModesEnabled")
         # Reject bool (a subclass of int) and mask to the 4 defined bits so
         # reserved bits are never set and a bad/negative connector value can't
         # overflow to_bytes and crash the settings cycle.
@@ -99,20 +93,20 @@ def build_der_settings(
         modes_enabled=modes_enabled,
         other_element=other_element,
         set_grad_w=set_grad_w,
-        set_max_ah=to_amp_hour(configuration.get("AhMax")),
-        set_max_charge_rate_va=to_apparent_power(configuration.get("VAChaRteMax")),
-        set_max_charge_rate_w=to_active_power(configuration.get("WChaRteMax")),
-        set_max_discharge_rate_va=to_apparent_power(configuration.get("VADisChaRteMax")),
-        set_max_discharge_rate_w=to_active_power(configuration.get("WDisChaRteMax")),
-        set_max_v=to_voltage_rms(configuration.get("VMax")),
-        set_max_va=to_apparent_power(configuration.get("VAMax")),
-        set_max_var=to_reactive_power(configuration.get("VarMaxInj")),
-        set_max_var_neg=to_reactive_power(configuration.get("VarMaxAbs")),
+        set_max_ah=to_amp_hour(configuration.get("setMaxAh")),
+        set_max_charge_rate_va=to_apparent_power(configuration.get("setMaxChargeRateVA")),
+        set_max_charge_rate_w=to_active_power(configuration.get("setMaxChargeRateW")),
+        set_max_discharge_rate_va=to_apparent_power(configuration.get("setMaxDischargeRateVA")),
+        set_max_discharge_rate_w=to_active_power(configuration.get("setMaxDischargeRateW")),
+        set_max_v=to_voltage_rms(configuration.get("setMaxV")),
+        set_max_va=to_apparent_power(configuration.get("setMaxVA")),
+        set_max_var=to_reactive_power(configuration.get("setMaxVar")),
+        set_max_var_neg=to_reactive_power(configuration.get("setMaxVarNeg")),
         set_max_w=set_max_w,
-        set_max_wh=to_watt_hour(configuration.get("WhMax")),
-        set_min_pfover_excited=to_power_factor(configuration.get("WOvrExtPF")),
-        set_min_pfunder_excited=to_power_factor(configuration.get("WUndExtPF")),
-        set_min_v=to_voltage_rms(configuration.get("VMin")),
-        set_vnom=to_voltage_rms(configuration.get("VNom")),
+        set_max_wh=to_watt_hour(configuration.get("setMaxWh")),
+        set_min_pfover_excited=to_power_factor(configuration.get("setMinPFOverExcited")),
+        set_min_pfunder_excited=to_power_factor(configuration.get("setMinPFUnderExcited")),
+        set_min_v=to_voltage_rms(configuration.get("setMinV")),
+        set_vnom=to_voltage_rms(configuration.get("setVNom")),
         updated_time=TimeType(value=ut),
     )

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from py20305.commands import CommandOrigin
-from py20305.connectors.base import BaseConnector
+from py20305.connectors.base import BaseConnector, Reading
 from py20305.connectors.device_telemetry import (
     MAX_ERROR_CHARS,
     DeviceTelemetryEmitter,
@@ -27,6 +27,7 @@ from py20305.forwarders.base import EventFrame
 from py20305.forwarders.config import DeviceTelemetryConfig
 from py20305.forwarders.mqtt_forwarder import PROTOCOL_MESSAGE_TOPIC_SUFFIX
 from py20305.readings import DirectConnectorSource
+from tests.legacy_readings import KEYS, readings_from
 
 
 @pytest.fixture(autouse=True)
@@ -291,7 +292,7 @@ class _WritableConnector(BaseConnector):
         self.fail = fail
         self.applied: list[dict[str, Any]] = []
 
-    async def update_p_lim(self, params: dict[str, Any]) -> None:
+    async def update_op_mod_max_lim_w(self, params: dict[str, Any]) -> None:
         if self.fail:
             raise RuntimeError("device rejected it")
         self.applied.append(params)
@@ -324,8 +325,8 @@ class TestWriteChokepoint:
         )
 
         await dispatcher._apply_one(
-            connector.update_p_lim,
-            "update_p_lim",
+            connector.update_op_mod_max_lim_w,
+            "update_op_mod_max_lim_w",
             {"value": 80},
             lfdi=LFDI_A,
             origin=Mock(),
@@ -333,7 +334,7 @@ class TestWriteChokepoint:
         )
 
         assert len(fw.events) == 1
-        assert body_of(fw.events[0])["control"] == "p_lim"
+        assert body_of(fw.events[0])["control"] == "op_mod_max_lim_w"
         assert fw.events[0].payload["direction"] == "downstream"
 
     @pytest.mark.asyncio
@@ -346,8 +347,8 @@ class TestWriteChokepoint:
 
         with pytest.raises(RuntimeError):
             await dispatcher._apply_one(
-                connector.update_p_lim,
-                "update_p_lim",
+                connector.update_op_mod_max_lim_w,
+                "update_op_mod_max_lim_w",
                 {"value": 80},
                 lfdi=LFDI_A,
                 origin=Mock(),
@@ -367,8 +368,8 @@ class TestWriteChokepoint:
         )
 
         await dispatcher._apply_one(
-            connector.update_p_lim,
-            "update_p_lim",
+            connector.update_op_mod_max_lim_w,
+            "update_op_mod_max_lim_w",
             {"value": 80},
             lfdi=LFDI_A,
             origin=Mock(),
@@ -384,8 +385,8 @@ class TestWriteChokepoint:
         dispatcher = ConnectorDispatcher(_registry_for({LFDI_A: connector}), lambda _h: LFDI_A)
 
         await dispatcher._apply_one(
-            connector.update_p_lim,
-            "update_p_lim",
+            connector.update_op_mod_max_lim_w,
+            "update_op_mod_max_lim_w",
             {"value": 80},
             lfdi=LFDI_A,
             origin=Mock(),
@@ -447,11 +448,11 @@ class _FanOutConnector:
     def __init__(self) -> None:
         self.applied: list[tuple[str, dict[str, Any]]] = []
 
-    async def update_p_lim(self, params: dict[str, Any]) -> None:
-        self.applied.append(("update_p_lim", params))
+    async def update_op_mod_max_lim_w(self, params: dict[str, Any]) -> None:
+        self.applied.append(("update_op_mod_max_lim_w", params))
 
-    async def update_pf(self, params: dict[str, Any]) -> None:
-        self.applied.append(("update_pf", params))
+    async def update_op_mod_freq_droop(self, params: dict[str, Any]) -> None:
+        self.applied.append(("update_op_mod_freq_droop", params))
 
 
 class TestClearControlAudit:
@@ -515,8 +516,14 @@ class TestClearControlAudit:
         await dispatcher.clear_control_by_lfdi(LFDI_A)
 
         # The connector exposes two modes, so the fan-out disables exactly those.
-        assert {name for name, _ in connector.applied} == {"update_p_lim", "update_pf"}
-        assert {c["control"] for c in observer.commands} == {"p_lim", "pf"}
+        assert {name for name, _ in connector.applied} == {
+            "update_op_mod_max_lim_w",
+            "update_op_mod_freq_droop",
+        }
+        assert {c["control"] for c in observer.commands} == {
+            "op_mod_max_lim_w",
+            "op_mod_freq_droop",
+        }
         assert all(c["origin"] == CommandOrigin.COMMS_LOSS for c in observer.commands)
         # And each write reaches the monitoring stream with the device's address.
         assert len(fw.events) == 2
@@ -530,13 +537,10 @@ class _ReadableConnector(BaseConnector):
         self._values = values if values is not None else {"W": 1500}
         self.fail = fail
 
-    async def fetch_monitoring(self) -> dict[str, Any]:
+    async def fetch_monitoring(self) -> list[Reading]:
         if self.fail:
             raise RuntimeError("device unreachable")
-        return self._values
-
-    def reading_overrides(self) -> dict[str, Any]:
-        return {}
+        return readings_from(self._values)
 
 
 class TestReadChokepoint:
@@ -550,7 +554,7 @@ class TestReadChokepoint:
         await source.read("dev1")
 
         assert len(fw.events) == 1
-        assert body_of(fw.events[0])["points"] == {"W": 1500}
+        assert body_of(fw.events[0])["points"] == {KEYS["W"]: 1500}
         assert fw.events[0].payload["direction"] == "upstream"
 
     @pytest.mark.asyncio
@@ -577,7 +581,7 @@ class TestReadChokepoint:
     async def test_without_telemetry_reads_are_unchanged(self):
         source = DirectConnectorSource(lambda _d: _ReadableConnector())
         snapshot = await source.read("dev1")
-        assert snapshot.entries["W"].value == 1500
+        assert snapshot.entries[KEYS["W"]].value == 1500
 
 
 # -- Runner wiring -----------------------------------------------------------
@@ -898,7 +902,7 @@ class TestReadsAreReachableInProduction:
         await manager._source.read("dev1")
 
         assert len(fw.events) == 1
-        assert body_of(fw.events[0])["points"] == {"W": 1500}
+        assert body_of(fw.events[0])["points"] == {KEYS["W"]: 1500}
 
     def test_a_caller_supplied_source_is_left_alone(self):
         """It configures its own; overriding it would be surprising."""
@@ -1014,7 +1018,8 @@ class TestForwarderRetry:
 
             def queue_message(self, frame): ...
             def queue_event(self, event): ...
-            def get_statistics(self): return {}
+            def get_statistics(self):
+                return {}
 
         manager = ForwarderManager()
         flaky = Flaky()
@@ -1067,7 +1072,8 @@ class TestForwarderRetry:
             async def stop(self) -> None: ...
             def queue_message(self, frame): ...
             def queue_event(self, event): ...
-            def get_statistics(self): return {}
+            def get_statistics(self):
+                return {}
 
         manager = ForwarderManager()
         manager.add_forwarder(AlwaysDown())
@@ -1290,7 +1296,8 @@ class TestRunnerDrivesTheRetry:
             async def stop(self) -> None: ...
             def queue_message(self, frame): ...
             def queue_event(self, event): ...
-            def get_statistics(self): return {}
+            def get_statistics(self):
+                return {}
 
         manager = ForwarderManager()
         flaky = Flaky()

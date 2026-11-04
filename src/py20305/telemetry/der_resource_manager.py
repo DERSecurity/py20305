@@ -297,7 +297,7 @@ class DerResourceManager:
                 )
             except ValueError as e:
                 # The connector returned configuration missing a required field
-                # (WMax / setMaxW is mandatory in the IEEE 2030.5 DERSettings
+                # (setMaxW is mandatory in the IEEE 2030.5 DERSettings
                 # schema). This is a connector-contract problem, not an
                 # unexpected crash -- report it as an actionable, deduplicated
                 # warning instead of letting it fall through to the generic
@@ -307,7 +307,7 @@ class DerResourceManager:
                 report(
                     "warnings",
                     f"DERSettings PUT skipped for {lfdi[:8]}: {e}. The connector's "
-                    "fetch_configuration() must return a non-null WMax (nameplate "
+                    "fetch_configuration() must return a non-null setMaxW (maximum "
                     "active power in watts); DERSettings cannot be built without it.",
                     source="der_resource",
                     dedup_key=f"der_put:{lfdi}:settings_config",

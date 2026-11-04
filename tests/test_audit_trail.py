@@ -178,7 +178,9 @@ class Site:
         for lfdi in [edev.lfdi for edev in state.end_devices.values()] + (local or []):
             connector = PrintDemoConnector()
             if lfdi in (failing or set()):
-                connector.update_p_lim = AsyncMock(side_effect=RuntimeError("register locked"))  # type: ignore[method-assign]
+                connector.update_op_mod_max_lim_w = AsyncMock(
+                    side_effect=RuntimeError("register locked")
+                )  # type: ignore[method-assign]
             self.connectors[lfdi.hex()] = connector
         hrefs = {href: edev.lfdi.hex() for href, edev in state.end_devices.items()}
 
@@ -447,7 +449,7 @@ class TestWritesNameTheirCause:
         site = Site(_state([]))
 
         await site.dispatcher.apply_operation(
-            LFDI_1.hex(), "p_lim", {"value": 50}, origin="local_api"
+            LFDI_1.hex(), "op_mod_max_lim_w", {"value": 50}, origin="local_api"
         )
 
         (write,) = site.forwarder.writes()
@@ -830,7 +832,7 @@ class TestLifecycleRecords:
         await site.processor.process_controls("/derp/1")
 
         assert site.forwarder.events == []
-        assert "update_p_lim" in site.connectors[LFDI_1.hex()].last_control
+        assert "update_op_mod_max_lim_w" in site.connectors[LFDI_1.hex()].last_control
         assert site.http.post.await_count == 2
         await site.processor.shutdown()
 
@@ -915,7 +917,7 @@ class TestLifecycleRecords:
         async def slow(params):
             await asyncio.sleep(0.2)
 
-        site.connectors[LFDI_1.hex()].update_p_lim = slow  # type: ignore[method-assign]
+        site.connectors[LFDI_1.hex()].update_op_mod_max_lim_w = slow  # type: ignore[method-assign]
         with patch.object(processor_mod, "ACTIVATION_DISPATCH_DEADLINE", 0.05):
             await site.processor.process_controls("/derp/1")
             active = site.forwarder.audit_records("der_event")[-1]
@@ -943,7 +945,7 @@ class TestLifecycleRecords:
 
         assert site.processor._store.get(derc.m_rid.value).state == EventState.ACTIVE
         assert site.http.post.await_count == 2, "ACK and ACTIVE still posted"
-        assert "update_p_lim" in site.connectors[LFDI_1.hex()].last_control
+        assert "update_op_mod_max_lim_w" in site.connectors[LFDI_1.hex()].last_control
         await site.processor.shutdown()
 
     @pytest.mark.asyncio
@@ -1314,7 +1316,7 @@ class TestIsolation:
         await site.processor.process_controls("/derp/1")
 
         assert site.processor._store.get(derc.m_rid.value).state == EventState.ACTIVE
-        assert "update_p_lim" in site.connectors[LFDI_1.hex()].last_control
+        assert "update_op_mod_max_lim_w" in site.connectors[LFDI_1.hex()].last_control
         assert site.http.post.await_count == 2, "ACK and ACTIVE still posted"
         assert site.audit.emit_failures["der_event"] >= 1
         await site.processor.shutdown()

@@ -4,6 +4,10 @@ Talking to the device underneath.
 
 ::: py20305.connectors.base
 
+::: py20305.connectors.reading
+
+::: py20305.connectors.modes
+
 ::: py20305.connectors.config
 
 ::: py20305.connectors.registry

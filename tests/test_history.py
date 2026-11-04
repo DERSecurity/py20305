@@ -42,6 +42,7 @@ from py20305.history.intervals import IntervalHistory
 from py20305.history.writes import WriteHistory
 from py20305.readings import DirectConnectorSource
 from py20305.telemetry.manager import TelemetryManager
+from tests.legacy_readings import readings_from
 from tests.test_audit_trail import (
     HEX_1,
     LFDI_1,
@@ -86,7 +87,8 @@ def _feed(
 def _interval(history: History, start: float, lfdi: str = DEV) -> dict[str, Any]:
     assert history.intervals is not None
     (row,) = [
-        r for r in history.intervals.query(lfdi=lfdi, since=start, until=start + 1)
+        r
+        for r in history.intervals.query(lfdi=lfdi, since=start, until=start + 1)
         if r["start"] == start
     ]
     return row
@@ -219,9 +221,9 @@ class TestBaseline:
         result = history.baseline(T0, T0 + 900)
 
         assert len(result["days_used"]) == 10
-        assert all(
-            datetime.fromisoformat(d).weekday() < 5 for d in result["days_used"]
-        ), "weekends are left out"
+        assert all(datetime.fromisoformat(d).weekday() < 5 for d in result["days_used"]), (
+            "weekends are left out"
+        )
         assert result["days_used"][0] == "2026-10-13", "most recent day first"
         (slot,) = result["slots"]
         assert slot["baseline_w"] == pytest.approx(1000.0)
@@ -419,12 +421,35 @@ class TestWriteHistory:
         assert writes is not None
         mrid = b"\x01" * 16
         fallback = b"\x20" * 16
-        writes.record("dev1", "p_lim", {"value": 50}, outcome="applied", at=T0,
-                      lfdi=LFDI_1.hex().upper(), applied_mrid=mrid, cause_mrid=mrid)
-        writes.record("dev1", "p_lim", {"value": 100}, outcome="applied", at=T0 + 3600,
-                      lfdi=LFDI_1.hex(), applied_mrid=fallback, cause_mrid=mrid)
-        writes.record("dev1", "p_lim", {"value": 70}, outcome="applied", at=T0 + 7200,
-                      lfdi=LFDI_1.hex(), origin="local_api")
+        writes.record(
+            "dev1",
+            "p_lim",
+            {"value": 50},
+            outcome="applied",
+            at=T0,
+            lfdi=LFDI_1.hex().upper(),
+            applied_mrid=mrid,
+            cause_mrid=mrid,
+        )
+        writes.record(
+            "dev1",
+            "p_lim",
+            {"value": 100},
+            outcome="applied",
+            at=T0 + 3600,
+            lfdi=LFDI_1.hex(),
+            applied_mrid=fallback,
+            cause_mrid=mrid,
+        )
+        writes.record(
+            "dev1",
+            "p_lim",
+            {"value": 70},
+            outcome="applied",
+            at=T0 + 7200,
+            lfdi=LFDI_1.hex(),
+            origin="local_api",
+        )
 
         found = writes.query(event_mrid=HEX_1)
 
@@ -644,7 +669,9 @@ class TestTelemetryFeedsTheIntervals:
         base = time.time()
         times = iter([base, base + 60])
         connector = AsyncMock(spec=BaseConnector)
-        connector.fetch_monitoring = AsyncMock(return_value={"W": 1000.0, "Var": 0.0})
+        connector.fetch_monitoring = AsyncMock(
+            return_value=readings_from({"W": 1000.0, "Var": 0.0})
+        )
         connector.fetch_status = AsyncMock(return_value={"alarmStatus": 0})
         connector.fetch_availability = AsyncMock(
             return_value={"statWAvail": {"value": 4000, "multiplier": 0}}
@@ -952,14 +979,24 @@ class TestReviewFixes:
         assert events is not None
         events.record(
             _transition(
-                HEX_1, "scheduled", "active", T0, T0,
-                applied_lfdis=[LFDI_1.hex()], rejected_lfdis=[LFDI_2.hex()],
+                HEX_1,
+                "scheduled",
+                "active",
+                T0,
+                T0,
+                applied_lfdis=[LFDI_1.hex()],
+                rejected_lfdis=[LFDI_2.hex()],
             )
         )
         events.record(
             _transition(
-                HEX_1, "active", "active", T0 + 600, T0,
-                superseded_by="02" * 16, superseded_lfdis=[LFDI_1.hex()],
+                HEX_1,
+                "active",
+                "active",
+                T0 + 600,
+                T0,
+                superseded_by="02" * 16,
+                superseded_lfdis=[LFDI_1.hex()],
             )
         )
 
@@ -1060,7 +1097,7 @@ class TestReviewFixes:
         base = time.time()
         times = iter([base, base + 120])
         connector = AsyncMock(spec=BaseConnector)
-        connector.fetch_monitoring = AsyncMock(return_value={"W": 1000.0})
+        connector.fetch_monitoring = AsyncMock(return_value=readings_from({"W": 1000.0}))
         connector.fetch_status = AsyncMock(return_value={"alarmStatus": 0})
         failing = {"now": False}
 
@@ -1136,9 +1173,7 @@ def _blocking_table(database: HistoryDatabase) -> dict[str, threading.Event]:
     """
     gates: dict[str, threading.Event] = {"a": threading.Event(), "b": threading.Event()}
     database.register_table("gated", "at", ["CREATE TABLE gated (at REAL, name TEXT)"])
-    database._conn.create_function(
-        "wait_for", 1, lambda name: gates[name].wait(5)
-    )
+    database._conn.create_function("wait_for", 1, lambda name: gates[name].wait(5))
     return gates
 
 

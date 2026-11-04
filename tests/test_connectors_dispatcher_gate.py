@@ -75,7 +75,7 @@ class _Implements(BaseConnector):
     def __init__(self) -> None:
         self.seen: list[dict] = []
 
-    async def update_fixed_w(self, params):
+    async def update_op_mod_fixed_w(self, params):
         self.seen.append(params)
         return None
 
@@ -90,7 +90,7 @@ class _InheritsEverything(BaseConnector):
 
 
 def _fixed_w_control() -> Dercontrol1:
-    """A DERControl that translates to one ``update_fixed_w`` write."""
+    """A DERControl that translates to one ``update_op_mod_fixed_w`` write."""
     return Dercontrol1(
         m_rid=MRidtype(value=b"\x01" * 16),
         creation_time=TimeType(value=900),
@@ -114,14 +114,16 @@ class TestControlSupport:
     """An inherited base implementation is the absence of an implementation."""
 
     def test_an_overridden_mode_is_supported(self) -> None:
-        method, reason = ConnectorDispatcher._control_support(_Implements(), "update_fixed_w")
+        method, reason = ConnectorDispatcher._control_support(
+            _Implements(), "update_op_mod_fixed_w"
+        )
 
         assert method is not None
         assert reason is None
 
     def test_an_inherited_no_op_is_unsupported_by_design(self) -> None:
         method, reason = ConnectorDispatcher._control_support(
-            _InheritsEverything(), "update_fixed_w"
+            _InheritsEverything(), "update_op_mod_fixed_w"
         )
 
         assert method is None
@@ -147,10 +149,10 @@ class TestApplyOperation:
         dispatcher = _dispatcher(connector)
 
         await dispatcher.apply_operation(
-            LFDI, "fixed_w", {"WSetEna": 1, "WSet": 50.0}, origin=REGISTER_SERVER
+            LFDI, "op_mod_fixed_w", {"enabled": True, "value": 5000}, origin=REGISTER_SERVER
         )
 
-        assert connector.seen == [{"WSetEna": 1, "WSet": 50.0}]
+        assert connector.seen == [{"enabled": True, "value": 5000}]
 
     @pytest.mark.asyncio
     async def test_an_inherited_no_op_is_refused_rather_than_acknowledged(self) -> None:
@@ -158,9 +160,9 @@ class TestApplyOperation:
         would be reporting success for a write that reached no device."""
         dispatcher = _dispatcher(_InheritsEverything())
 
-        with pytest.raises(ConnectorError, match="does not implement update_fixed_w"):
+        with pytest.raises(ConnectorError, match="does not implement update_op_mod_fixed_w"):
             await dispatcher.apply_operation(
-                LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER
+                LFDI, "op_mod_fixed_w", {"enabled": True, "value": 5000}, origin=REGISTER_SERVER
             )
 
     @pytest.mark.asyncio
@@ -168,7 +170,9 @@ class TestApplyOperation:
         dispatcher = _dispatcher(_Implements())
 
         with pytest.raises(ConnectorError, match="no connector for LFDI"):
-            await dispatcher.apply_operation("ab" * 20, "fixed_w", {}, origin=REGISTER_SERVER)
+            await dispatcher.apply_operation(
+                "ab" * 20, "op_mod_fixed_w", {}, origin=REGISTER_SERVER
+            )
 
 
 class TestCommandGate:
@@ -185,7 +189,7 @@ class TestCommandGate:
 
         with pytest.raises(CommandNotPermittedError, match="may not command"):
             await dispatcher.apply_operation(
-                LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER
+                LFDI, "op_mod_fixed_w", {"enabled": True, "value": 5000}, origin=REGISTER_SERVER
             )
 
         assert connector.seen == []
@@ -199,7 +203,7 @@ class TestCommandGate:
         gate = _Gate(CommandOrigin.IEEE2030_5)
         dispatcher = _dispatcher(connector, gate)
 
-        with pytest.raises(CommandNotPermittedError, match="fixed_w"):
+        with pytest.raises(CommandNotPermittedError, match="op_mod_fixed_w"):
             await dispatcher.apply_control_by_lfdi(LFDI, _fixed_w_control(), [])
 
         assert connector.seen == []
@@ -229,9 +233,9 @@ class TestCommandGate:
         )
 
         await dispatcher._apply_one(
-            connector.update_fixed_w,
-            "update_fixed_w",
-            {"WSetEna": 1},
+            connector.update_op_mod_fixed_w,
+            "update_op_mod_fixed_w",
+            {"enabled": True, "value": 5000},
             lfdi=None,
             origin=REGISTER_SERVER,
             label="/edev/1",
@@ -245,7 +249,9 @@ class TestCommandGate:
         connector = _Implements()
         dispatcher = _dispatcher(connector, _Gate(CommandOrigin.IEEE2030_5))
 
-        await dispatcher.apply_operation(LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER)
+        await dispatcher.apply_operation(
+            LFDI, "op_mod_fixed_w", {"enabled": True, "value": 5000}, origin=REGISTER_SERVER
+        )
 
         assert len(connector.seen) == 1
 
@@ -264,7 +270,7 @@ class TestCommandGate:
 
         with pytest.raises(CommandNotPermittedError):
             await dispatcher.apply_operation(
-                LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER
+                LFDI, "op_mod_fixed_w", {"enabled": True, "value": 5000}, origin=REGISTER_SERVER
             )
 
         observer.record_command.assert_not_called()
@@ -289,7 +295,9 @@ class TestCommandGate:
         connector = _Implements()
         dispatcher = ConnectorDispatcher(_registry_for(connector), lfdi_resolver=lambda _href: LFDI)
 
-        await dispatcher.apply_operation(LFDI, "fixed_w", {"WSetEna": 1}, origin=REGISTER_SERVER)
+        await dispatcher.apply_operation(
+            LFDI, "op_mod_fixed_w", {"enabled": True, "value": 5000}, origin=REGISTER_SERVER
+        )
 
         assert len(connector.seen) == 1
 
@@ -325,7 +333,9 @@ class TestAnOriginIsALabel:
             command_gate=gate,
         )
 
-        await dispatcher.apply_operation(LFDI, "fixed_w", {"WSetEna": 1}, origin="plant_controller")
+        await dispatcher.apply_operation(
+            LFDI, "op_mod_fixed_w", {"enabled": True, "value": 5000}, origin="plant_controller"
+        )
 
         assert gate.asked == [(LFDI, "plant_controller")]
         assert observer.record_command.call_args.kwargs["origin"] == "plant_controller"
@@ -335,7 +345,7 @@ class TestAnOriginIsALabel:
         dispatcher = _dispatcher(_Implements(), _Gate("plant_controller"))
 
         with pytest.raises(CommandNotPermittedError, match="^plant_controller may not command"):
-            await dispatcher.apply_operation(LFDI, "fixed_w", {}, origin="plant_controller")
+            await dispatcher.apply_operation(LFDI, "op_mod_fixed_w", {}, origin="plant_controller")
 
     @pytest.mark.asyncio
     async def test_a_gate_sees_the_packages_own_origins_as_strings(self) -> None:
@@ -373,7 +383,7 @@ class TestAnOriginIsALabel:
         from py20305.commands import CommandRecord, CommandStatus
 
         record = CommandRecord(
-            control="p_lim",
+            control="op_mod_max_lim_w",
             params={},
             origin="plant_controller",
             commanded_at=1.0,

@@ -31,7 +31,7 @@ class RecordingConnector(BaseConnector):
     def __init__(self) -> None:
         self.controls: list[dict[str, Any]] = []
 
-    async def update_p_lim(self, params: dict[str, Any]) -> None:
+    async def update_op_mod_max_lim_w(self, params: dict[str, Any]) -> None:
         self.controls.append(params)
 
 
@@ -132,8 +132,8 @@ async def test_full_lifecycle_applies_a_control_and_responds(scenario):
     for path in ("/dcap", "/tm", "/edev", "/edev/1/fsa", "/edev/1/fsa/1/derp", "/derp/1/derc"):
         assert path in walked, f"client never fetched {path}; walk was {walked}"
 
-    # opModMaxLimW=8000 hundredths of a percent arrives as 80 percent.
-    assert scenario.connector.controls[0].get("p_lim_w") == pytest.approx(80.0)
+    # opModMaxLimW arrives as IEEE 2030.5 defines it: 8000 hundredths of a percent.
+    assert scenario.connector.controls[0].get("value") == 8000
 
     await _wait_for(lambda: scenario.server.requests_for("/rsps", "POST"))
     response_xml = scenario.server.requests_for("/rsps", "POST")[0].body
@@ -231,18 +231,14 @@ async def test_malformed_xml_is_skipped_not_fatal(scenario):
     # With no readable control list, the DefaultDERControl governs: the
     # connector holds the default's 100%, never the unreadable control.
     assert client.http.server_alive
-    applied = [c.get("p_lim_w") for c in scenario.connector.controls]
-    assert 80.0 not in applied, "an unparseable control must not dispatch"
+    applied = [c.get("value") for c in scenario.connector.controls]
+    assert 8000 not in applied, "an unparseable control must not dispatch"
 
     from tests.scenario.support import SEP_XML, derc_list_xml
 
     scenario.server.responses["/derp/1/derc"] = lambda: (200, SEP_XML, derc_list_xml())
     await client.poll_now()
-    await _wait_for(
-        lambda: any(
-            c.get("p_lim_w") == pytest.approx(80.0) for c in scenario.connector.controls
-        )
-    )
+    await _wait_for(lambda: any(c.get("value") == 8000 for c in scenario.connector.controls))
 
 
 # ---------------------------------------------------------------------------

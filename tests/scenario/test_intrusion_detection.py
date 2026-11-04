@@ -79,7 +79,7 @@ class RecordingInverter(BaseConnector):
     telemetry_protocol = "modbus"
     writes: list[dict] = []
 
-    async def update_p_lim(self, params: dict) -> None:
+    async def update_op_mod_max_lim_w(self, params: dict) -> None:
         RecordingInverter.writes.append(params)
 
 
@@ -386,7 +386,7 @@ async def test_downstream_channel_reports_the_device_write(tmp_path):
         assert modbus_messages, "the write reached the device but never the broker"
         writes = [m for m in modbus_messages if m["direction"] == "downstream"]
         assert writes, "a control written to the device is downstream telemetry"
-        assert any("p_lim" in json.dumps(m["payload"]) for m in writes), (
+        assert any("op_mod_max_lim_w" in json.dumps(m["payload"]) for m in writes), (
             "the reported write must carry the control it wrote"
         )
     finally:

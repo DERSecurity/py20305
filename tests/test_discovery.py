@@ -1693,10 +1693,10 @@ async def test_refresh_clears_stale_dderc_when_link_removed():
 @pytest.mark.asyncio
 async def test_refresh_der_controls_also_refreshes_curves():
     """When the server creates a new DERCurve and DERControl in quick
-    succession (the website's two-step flow), the aggregator's cached
-    curve list must be refreshed alongside the control list. Otherwise
-    ``_find_curve`` in modes.translate_qv returns None and the mode
-    silently falls back to ``qv_mode_enable: 0``. Regression test."""
+    succession, the cached curve list must be refreshed alongside the
+    control list. Otherwise the control names a curve the client does not
+    hold and the element is withdrawn (``{"enabled": False}``) instead of
+    applied. Regression test."""
     from py20305.models.sep.sep import (
         Dercurve1,
         DercurveList,

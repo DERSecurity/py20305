@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from py20305.connectors.base import BaseConnector
+from py20305.connectors.modes import ALL_ELEMENTS
 from py20305.connectors.print_demo import PrintDemoConnector
 
 
@@ -20,23 +21,23 @@ class TestPrintDemoConnector:
     @pytest.mark.asyncio
     async def test_fetch_monitoring_returns_realistic_values(self):
         c = PrintDemoConnector()
-        result = await c.fetch_monitoring()
-        assert result["W"] == 10000
-        assert result["Hz"] == 60
-        assert result["PF"] == 0.98
+        result = {reading.uom: reading.value for reading in await c.fetch_monitoring()}
+        assert result[38] == 10000
+        assert result[33] == 60
+        assert result[65] == 0.98
 
     @pytest.mark.asyncio
     async def test_fetch_nameplate_returns_values(self):
         c = PrintDemoConnector()
         result = await c.fetch_nameplate()
-        assert result["WMaxRtg"] == 15000
-        assert result["VNomRtg"] == 480
+        assert result["rtgMaxW"] == 15000
+        assert result["rtgVNom"] == 480
 
     @pytest.mark.asyncio
     async def test_fetch_configuration_returns_values(self):
         c = PrintDemoConnector()
         result = await c.fetch_configuration()
-        assert result["WMax"] == 10000
+        assert result["setMaxW"] == 10000
 
     @pytest.mark.asyncio
     async def test_fetch_status_returns_values(self):
@@ -48,73 +49,52 @@ class TestPrintDemoConnector:
     @pytest.mark.asyncio
     async def test_update_captures_params(self):
         c = PrintDemoConnector()
-        params = {"qv_mode_enable": 1, "qv_vref": 240}
-        await c.update_qv(params)
-        assert c.last_control["update_qv"] == params
+        params = {"enabled": True, "value": {"curveType": 11}}
+        await c.update_op_mod_volt_var(params)
+        assert c.last_control["update_op_mod_volt_var"] == params
 
     @pytest.mark.asyncio
     async def test_update_records_multiple_methods(self):
         c = PrintDemoConnector()
-        await c.update_pv({"pv_mode_enable": 1})
-        await c.update_pf({"pf_mode_enable": 1})
-        assert "update_pv" in c.last_control
-        assert "update_pf" in c.last_control
+        await c.update_op_mod_volt_watt({"enabled": False})
+        await c.update_op_mod_freq_droop({"enabled": False})
+        assert "update_op_mod_volt_watt" in c.last_control
+        assert "update_op_mod_freq_droop" in c.last_control
 
     @pytest.mark.asyncio
     async def test_all_update_methods_record(self):
         c = PrintDemoConnector()
-        methods = [
-            "update_qv",
-            "update_pv",
-            "update_qp",
-            "update_p_lim",
-            "update_p_lim_inj",
-            "update_p_lim_abs",
-            "update_pf",
-            "update_const_q",
-            "update_const_pf",
-            "update_ov",
-            "update_uv",
-            "update_ov_mc",
-            "update_uv_mc",
-            "update_of",
-            "update_uf",
-            "update_fixed_w",
-            "update_p_ramp",
-            "update_es_permit_service",
-            "update_exp_lim",
-            "update_imp_lim",
-            "update_gen_lim",
-            "update_load_lim",
-            "update_pricing_mode",
-        ]
+        methods = [element.method for element in ALL_ELEMENTS]
         for name in methods:
             await getattr(c, name)({"test": True})
             assert name in c.last_control, f"{name} should be recorded"
 
 
-class TestPrintDemoReadingOverrides:
-    """The demo reading_overrides() and its effect on the posted MUP/readings."""
+class TestPrintDemoReadings:
+    """The demo readings and their effect on the posted MUP and readings."""
 
     @pytest.mark.asyncio
-    async def test_overrides_shape_their_readings(self):
+    async def test_readings_shape_their_reading_types_and_quality(self):
         from py20305.telemetry.mup import create_meter_reading_list, create_mup
 
-        c = PrintDemoConnector()
-        mon = await c.fetch_monitoring()
-        ov = c.reading_overrides()
+        lfdi = "1234567890abcdef1234567890abcdef12345678"
+        readings = await PrintDemoConnector().fetch_monitoring()
 
-        # ReadingType metadata: W overridden to Maximum (8); others default.
-        mup = create_mup("1234567890abcdef1234567890abcdef12345678", mon, 300, overrides=ov)
+        mup = create_mup(lfdi, readings, 300)
         by_desc = {mmr.description: mmr.reading_type for mmr in mup.mirror_meter_reading}
-        assert by_desc["Real Power"].data_qualifier.value == 8  # overridden
-        assert by_desc["Voltage"].data_qualifier.value == 2  # untouched default
+        assert by_desc["Real Power max"].data_qualifier.value == 8
+        assert by_desc["Voltage L1"].phase.value == 129
 
-        # qualityFlags: W=derived (0x20), Hz=questionable (0x10), rest=valid (0x01).
-        mrl = create_meter_reading_list(
-            "1234567890abcdef1234567890abcdef12345678", mon, overrides=ov
-        )
+        mrl = create_meter_reading_list(lfdi, readings)
         qf = {mmr.description: mmr.reading.quality_flags for mmr in mrl.mirror_meter_reading}
-        assert qf["Real Power"] == b"\x00\x20"
+        assert qf["Real Power max"] == b"\x00\x20"
         assert qf["Frequency"] == b"\x00\x10"
-        assert qf["Voltage"] == b"\x00\x01"
+        assert qf["Voltage L1"] == b"\x00\x01"
+
+    def test_every_control_method_is_implemented(self):
+        from py20305.connectors.dispatcher import ConnectorDispatcher
+
+        c = PrintDemoConnector()
+        for element in ALL_ELEMENTS:
+            method, reason = ConnectorDispatcher._control_support(c, element.method)
+            assert method is not None and reason is None, element.method

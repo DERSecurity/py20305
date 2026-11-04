@@ -775,11 +775,10 @@ async def _refresh_curves_for_program(client: Sep2Client, derp_state: DerProgram
 
     Curves are referenced by the DERControl's curve-link fields
     (opModVoltVar.href, opModVoltWatt.href, etc.). When a server creates a
-    new DERControl that references a freshly-created DERCurve, the
-    the client must re-fetch curves alongside controls -- otherwise the
-    cached curve list is stale and ``_find_curve`` in the translation layer
-    returns ``None``, which falls back to ``{<mode>_mode_enable: 0}``
-    (the operator's volt-var write silently disables the mode on the device).
+    new DERControl that references a freshly-created DERCurve, the client
+    must re-fetch curves alongside controls. Otherwise the cached curve list
+    is stale, the control names a curve the client does not hold, and the
+    element is withdrawn (``{"enabled": False}``) instead of applied.
 
     Failures are logged but not raised; the caller continues with whatever
     cached curves are available.

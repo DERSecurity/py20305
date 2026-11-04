@@ -24,6 +24,7 @@ from py20305.telemetry.mup import (
     create_mup,
 )
 from py20305.xml.serialization import to_xml, validate_xml_result
+from tests.legacy_readings import readings_from
 
 SITE_LFDI = "5e" * 20
 METER_LFDI = "3c" * 20
@@ -114,30 +115,40 @@ class TestRoleFlags:
         ],
     )
     def test_the_role_sets_the_role_flags(self, role, revenue_quality, expected):
-        mup = create_mup(METER_LFDI, MONITORING, 300, role=role, revenue_quality=revenue_quality)
+        mup = create_mup(
+            METER_LFDI, readings_from(MONITORING), 300, role=role, revenue_quality=revenue_quality
+        )
 
         assert mup.role_flags.value == expected
 
     def test_a_der_mup_keeps_its_historical_role_flags(self):
-        assert create_mup(DER_LFDI, MONITORING, 300).role_flags.value == b"\x00\x49"
+        assert create_mup(DER_LFDI, readings_from(MONITORING), 300).role_flags.value == b"\x00\x49"
 
 
 class TestPostedUnder:
     def test_the_device_lfdi_is_the_meters_own_by_default(self):
-        mup = create_mup(METER_LFDI, MONITORING, 300, role=DeviceRole.SITE_METER)
+        mup = create_mup(METER_LFDI, readings_from(MONITORING), 300, role=DeviceRole.SITE_METER)
 
         assert mup.device_lfdi == bytes.fromhex(METER_LFDI)
 
     def test_the_device_lfdi_is_the_site_when_mirrored_under_it(self):
         mup = create_mup(
-            METER_LFDI, MONITORING, 300, role=DeviceRole.SITE_METER, device_lfdi=SITE_LFDI
+            METER_LFDI,
+            readings_from(MONITORING),
+            300,
+            role=DeviceRole.SITE_METER,
+            device_lfdi=SITE_LFDI,
         )
 
         assert mup.device_lfdi == bytes.fromhex(SITE_LFDI)
 
     def test_mrids_derive_from_the_meters_lfdi_not_the_site(self):
         mup = create_mup(
-            METER_LFDI, MONITORING, 300, role=DeviceRole.SITE_METER, device_lfdi=SITE_LFDI
+            METER_LFDI,
+            readings_from(MONITORING),
+            300,
+            role=DeviceRole.SITE_METER,
+            device_lfdi=SITE_LFDI,
         )
 
         assert mup.m_rid.value == _slot_mrid(METER_LFDI, 0)
@@ -145,9 +156,13 @@ class TestPostedUnder:
 
     def test_a_site_meter_under_the_site_shares_no_mrid_with_the_sites_der(self):
         """Single-device mode: the DER's LFDI is the site EndDevice's LFDI."""
-        der = create_mup(SITE_LFDI, MONITORING, 300)
+        der = create_mup(SITE_LFDI, readings_from(MONITORING), 300)
         meter = create_mup(
-            METER_LFDI, MONITORING, 300, role=DeviceRole.SITE_METER, device_lfdi=SITE_LFDI
+            METER_LFDI,
+            readings_from(MONITORING),
+            300,
+            role=DeviceRole.SITE_METER,
+            device_lfdi=SITE_LFDI,
         )
 
         def mrids(mup: Any) -> set[bytes]:
@@ -159,7 +174,7 @@ class TestPostedUnder:
     def test_a_site_meter_mup_validates_against_the_schema(self):
         mup = create_mup(
             METER_LFDI,
-            {**MONITORING, "WhFwd": 1000, "WhRev": 20},
+            readings_from({**MONITORING, "WhFwd": 1000, "WhRev": 20}),
             300,
             role=DeviceRole.SITE_METER,
             revenue_quality=True,
@@ -184,7 +199,7 @@ def _by_mrid(mmrs: Any) -> dict[bytes, Any]:
 class TestEnergyReadings:
     @pytest.mark.parametrize(("slot", "key", "flow"), [(61, "WhFwd", 1), (62, "WhRev", 19)])
     def test_an_energy_total_is_a_summation_in_wh_with_a_fixed_direction(self, slot, key, flow):
-        mup = create_mup(METER_LFDI, ENERGY, 300, role=DeviceRole.SITE_METER)
+        mup = create_mup(METER_LFDI, readings_from(ENERGY), 300, role=DeviceRole.SITE_METER)
 
         reading_type = _by_mrid(mup.mirror_meter_reading)[_slot_mrid(METER_LFDI, slot)].reading_type
         assert reading_type.uom.value == 72
@@ -194,7 +209,9 @@ class TestEnergyReadings:
         assert reading_type.power_of_ten_multiplier.value == 0
 
     def test_energy_totals_are_posted_as_whole_watt_hours(self):
-        readings = create_meter_reading_list(METER_LFDI, ENERGY, timestamp=1_800_000_000)
+        readings = create_meter_reading_list(
+            METER_LFDI, readings_from(ENERGY), timestamp=1_800_000_000
+        )
 
         mmrs = _by_mrid(readings.mirror_meter_reading)
         assert mmrs[_slot_mrid(METER_LFDI, 61)].reading.value == 123456
@@ -202,7 +219,9 @@ class TestEnergyReadings:
 
     @pytest.mark.parametrize("direction", list(PowerDirection))
     def test_energy_slots_do_not_collide_with_power_slots(self, direction):
-        mup = create_mup(METER_LFDI, {**ENERGY, "ACType": 2}, 300, power_direction=direction)
+        mup = create_mup(
+            METER_LFDI, readings_from({**ENERGY, "ACType": 2}), 300, power_direction=direction
+        )
 
         mrids = [mmr.m_rid.value for mmr in mup.mirror_meter_reading]
         assert len(mrids) == len(set(mrids))
@@ -210,7 +229,7 @@ class TestEnergyReadings:
         assert _slot_mrid(METER_LFDI, 62) in mrids
 
     def test_no_energy_reading_is_registered_for_a_device_that_supplies_none(self):
-        mup = create_mup(DER_LFDI, MONITORING, 300)
+        mup = create_mup(DER_LFDI, readings_from(MONITORING), 300)
 
         mrids = {mmr.m_rid.value for mmr in mup.mirror_meter_reading}
         assert _slot_mrid(DER_LFDI, 61) not in mrids
@@ -236,7 +255,9 @@ SITE_EXPORTING = NEGATIVE
 
 def _posted(monitoring: dict[str, Any], **kwargs: Any) -> dict[int, int]:
     """Return the posted reading values by slot."""
-    readings = create_meter_reading_list(METER_LFDI, monitoring, timestamp=0, **kwargs)
+    readings = create_meter_reading_list(
+        METER_LFDI, readings_from(monitoring), timestamp=0, **kwargs
+    )
     return {_SLOT_BY_MRID[m.m_rid.value]: m.reading.value for m in readings.mirror_meter_reading}
 
 
@@ -318,5 +339,3 @@ class TestSiteMeterPostedSign:
         )
 
         assert (posted[1], posted[2]) == (-2000, -100), "W and var"
-
-

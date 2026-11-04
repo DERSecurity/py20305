@@ -1,40 +1,48 @@
 """MirrorUsagePoint creation for IEEE 2030.5 telemetry.
 
-Creates MUP resources with system-wide MirrorMeterReadings (7 specs:
-W/Var/Hz/V/PF/VA/A) and, on multi-phase devices, an additional set of
-per-line readings for each phase advertised by the inverter (W/Var/V/PF/
-VA/A per line; Hz is grid-wide and stays system-only).
+A connector returns a list of :class:`~py20305.connectors.reading.Reading`.
+Each reading becomes a MirrorMeterReading whose mRID is derived from the
+reading's identity (its ReadingType fields, see
+:func:`~py20305.connectors.reading.reading_identity`), so a reading whose
+ReadingType differs from another's always has a different mRID. IEEE
+2030.5-2023 §10.11.3 Rule n forbids changing a MirrorMeterReading's ReadingType
+once created, and this keeps that true without special cases.
 
-mRID slot map (the index passed to ``_create_mrid``). A slot is never reused
-for a different ReadingType, because IEEE 2030.5 forbids changing a
-MeterReading's ReadingType once it is created:
+Readings that release 0.16 registered keep the mRID it gave them. A fixed table
+maps each of those identities to its 0.16 slot, and the slot gives the mRID:
 
 - 0: the MirrorUsagePoint itself.
-- 1-7: system W, Var, Hz, V, PF, VA, A.
-- 8: State of Energy (SIGNED_LOAD_CONVENTION only).
-- 10-27: per-line W, Var, V, PF, VA, A, six slots per line.
+- 1-7: system W, var, Hz, V (average), PF, VA, A.
+- 8: state of energy (SIGNED_LOAD_CONVENTION only).
+- 10-27: per-line W, var, V (average, line to neutral), PF, VA, A, six slots
+  per line.
 - 28-30: line-to-line voltage (SIGNED_LOAD_CONVENTION only).
 - 31-38: W and var with flowDirection 4 (``PowerDirection.NET``).
 - 41-48 and 51-58: W and var with flowDirection 1 and 19
   (``PowerDirection.SPLIT``).
-- 61 and 62: energy delivered in the forward and the reverse direction
-  (``WhFwd``, ``WhRev``), DEFAULT profile only.
-- 63 and 64: system voltage and system current whose connector gives them a
-  phase code (``ReadingOverride.phase``), in place of slots 4 and 7, DEFAULT
-  profile only.
+- 61 and 62: energy delivered forward and in reverse, DEFAULT profile only.
+
+Every other identity gets an mRID hashed from the identity, in a layout that
+cannot collide with the slot layout.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
-import re
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
 
+from py20305.connectors.reading import (
+    DEFAULT_MULTIPLIER,
+    Reading,
+    ReadingIdentity,
+    is_valid_reading,
+    reading_identity,
+)
 from py20305.models.sep import (
     AccumulationBehaviourType,
     CommodityType,
@@ -56,24 +64,7 @@ from py20305.models.sep import (
     UomType,
     VersionType,
 )
-from py20305.telemetry.scaling import (
-    FLOW_NET,
-    FLOW_NORMAL,
-    FLOW_NOT_APPLICABLE,
-    FLOW_REVERSE,
-    ScaledReading,
-    scale_a,
-    scale_hz,
-    scale_pf,
-    scale_v,
-    scale_va,
-    scale_var,
-    scale_w,
-    scale_wh,
-)
-
-if TYPE_CHECKING:
-    from py20305.connectors.base import ReadingOverride
+from py20305.telemetry.scaling import FLOW_NET, FLOW_NORMAL, FLOW_NOT_APPLICABLE, FLOW_REVERSE
 
 logger = logging.getLogger(__name__)
 
@@ -152,236 +143,20 @@ QUALITY_FLAGS_VALID = 1
 # is such a check.
 QUALITY_FLAGS_QUESTIONABLE = 1 << 4
 
-# SunSpec model 701 ACType enum -> count of distinct lines.
-# (SunSpec uses 0/1/2 here, NOT IEEE 2030.5 phaseCode bits.)
-_AC_TYPE_LINE_COUNT: dict[int, int] = {
-    0: 1,  # SINGLE_PHASE  -- only system readings (line 1 == system)
-    1: 2,  # SPLIT_PHASE   -- L1 + L2
-    2: 3,  # THREE_PHASE   -- L1 + L2 + L3
-}
-
-# IEEE 2030.5 PhaseCode values per IEC 61968-9 Annex C / sep2 Annex E.
-# Per-line readings use the line-to-neutral encoding for voltage (the
-# neutral bit is set) and the phase-only encoding for everything else.
-# This matches how production EMS and meter-data implementations tag
-# their MirrorMeterReadings.
-_PER_LINE_PHASE_CODES: dict[int, tuple[int, int]] = {
-    # line: (V phase code, non-V phase code)
-    1: (129, 128),  # phase A-N / phase A
-    2: (65, 64),  # phase B-N / phase B
-    3: (33, 32),  # phase C-N / phase C
-}
-
-
-@dataclass(frozen=True, slots=True)
-class ReadingTypeSpec:
-    """Specification for a MirrorMeterReading's ReadingType."""
-
-    key: str  # Metric key in monitoring data (W, Var, Hz, etc.)
-    description: str  # Human-readable description
-    commodity: int
-    data_qualifier: int
-    kind: int
-    uom: int
-    multiplier: int
-    phase: int | None = None
-    scale_func: Callable[[float | None], ScaledReading] | None = None
-    # AccumulationBehaviourType: 12 = Instantaneous, for the point-in-time
-    # samples. The energy totals (Wh) set 9 (Summation).
-    accumulation_behaviour: int = 12
-    # Fixed flowDirection (see PowerDirection and the energy totals). None takes
-    # the direction from the value's sign when the MUP is built, the DEFAULT
-    # encoding.
-    flow_direction: int | None = None
-
-
-# ReadingType specifications per IEEE 2030.5 and spec doc
-# accumulationBehaviour: 12 = Instantaneous (set on every spec via the default)
-# dataQualifier: 12 = Normal, 2 = Average
-# kind: 37 = Power, 12 = Energy, 0 = None
-# uom: 38=W, 63=Var, 33=Hz, 29=V, 65=PF, 61=VA, 5=A
-READING_TYPE_SPECS: tuple[ReadingTypeSpec, ...] = (
-    ReadingTypeSpec(
-        key="W",
-        description="Real Power",
-        commodity=1,
-        data_qualifier=12,
-        kind=37,
-        uom=38,
-        multiplier=0,
-        scale_func=scale_w,
-    ),
-    ReadingTypeSpec(
-        key="Var",
-        description="Reactive Power",
-        commodity=1,
-        data_qualifier=12,
-        kind=37,
-        uom=63,
-        multiplier=0,
-        scale_func=scale_var,
-    ),
-    ReadingTypeSpec(
-        key="Hz",
-        description="Frequency",
-        commodity=1,
-        data_qualifier=12,
-        kind=37,
-        uom=33,
-        multiplier=-3,
-        scale_func=scale_hz,
-    ),
-    ReadingTypeSpec(
-        key="V",
-        description="Voltage",
-        commodity=1,
-        data_qualifier=2,  # average, not instantaneous
-        kind=37,
-        uom=29,
-        multiplier=-1,
-        # No phase tag. SunSpec reads model 701 LLV (line-to-line average),
-        # not LNV, so the historical phase=129 (Phase A-N) value was wrong
-        # regardless of ACType -- a line-to-line measurement was being
-        # advertised as if it were phase-A-to-neutral. The IEEE 2030.5
-        # PhaseCode enum treats an absent attribute as 0 ("Not Applicable,
-        # default if not specified"), which honestly describes an
-        # aggregate-across-conductors measurement.
-        scale_func=scale_v,
-    ),
-    ReadingTypeSpec(
-        key="PF",
-        description="Power Factor",
-        commodity=1,
-        data_qualifier=12,
-        kind=0,  # kind=0 for PF
-        uom=65,
-        multiplier=-3,
-        scale_func=scale_pf,
-    ),
-    ReadingTypeSpec(
-        key="VA",
-        description="Apparent Power",
-        commodity=1,
-        data_qualifier=12,
-        kind=37,
-        uom=61,
-        multiplier=0,
-        scale_func=scale_va,
-    ),
-    ReadingTypeSpec(
-        key="A",
-        description="Current",
-        commodity=1,
-        data_qualifier=12,
-        kind=37,
-        uom=5,
-        multiplier=-1,
-        scale_func=scale_a,
-    ),
-)
-
-
-def _per_line_specs(line: int) -> tuple[ReadingTypeSpec, ...]:
-    """Build the 6 per-line ReadingTypeSpecs for a given line number.
-
-    Per-line monitoring keys follow SunSpec model 701 naming: ``WL{n}``,
-    ``VarL{n}``, ``VL{n}``, ``PFL{n}``, ``VAL{n}``, ``AL{n}``. Voltage
-    carries the line-to-neutral PhaseCode (neutral bit set); the rest
-    carry the phase-only PhaseCode.
-    """
-    v_phase, other_phase = _PER_LINE_PHASE_CODES[line]
-    return (
-        ReadingTypeSpec(
-            key=f"WL{line}",
-            description=f"Real Power L{line}",
-            commodity=1,
-            data_qualifier=12,
-            kind=37,
-            uom=38,
-            multiplier=0,
-            phase=other_phase,
-            scale_func=scale_w,
-        ),
-        ReadingTypeSpec(
-            key=f"VarL{line}",
-            description=f"Reactive Power L{line}",
-            commodity=1,
-            data_qualifier=12,
-            kind=37,
-            uom=63,
-            multiplier=0,
-            phase=other_phase,
-            scale_func=scale_var,
-        ),
-        ReadingTypeSpec(
-            key=f"VL{line}",
-            description=f"Voltage L{line}",
-            commodity=1,
-            data_qualifier=2,
-            kind=37,
-            uom=29,
-            multiplier=-1,
-            phase=v_phase,
-            scale_func=scale_v,
-        ),
-        ReadingTypeSpec(
-            key=f"PFL{line}",
-            description=f"Power Factor L{line}",
-            commodity=1,
-            data_qualifier=12,
-            kind=0,
-            uom=65,
-            multiplier=-3,
-            phase=other_phase,
-            scale_func=scale_pf,
-        ),
-        ReadingTypeSpec(
-            key=f"VAL{line}",
-            description=f"Apparent Power L{line}",
-            commodity=1,
-            data_qualifier=12,
-            kind=37,
-            uom=61,
-            multiplier=0,
-            phase=other_phase,
-            scale_func=scale_va,
-        ),
-        ReadingTypeSpec(
-            key=f"AL{line}",
-            description=f"Current L{line}",
-            commodity=1,
-            data_qualifier=12,
-            kind=37,
-            uom=5,
-            multiplier=-1,
-            phase=other_phase,
-            scale_func=scale_a,
-        ),
-    )
-
-
-# Per-line index allocation: each line gets 6 contiguous indices starting
-# at 10. L1=10..15, L2=16..21, L3=22..27. Indices 0..7 stay system
-# (MUP=0, W=1..A=7); 8 and 9 are reserved so an mRID generated for any
-# new "system reading slot" added in the future also lands in the
-# legacy single-digit encoding band.
-_PER_LINE_INDEX_BASE = 10
-_PER_LINE_SLOT_COUNT = 6
-
-
-def _per_line_index(line: int, slot: int) -> int:
-    return _PER_LINE_INDEX_BASE + (line - 1) * _PER_LINE_SLOT_COUNT + slot
-
 
 class ReadingProfile(StrEnum):
     """How a device's MirrorMeterReadings are encoded.
 
-    ``DEFAULT`` is the historical encoding. ``SIGNED_LOAD_CONVENTION`` carries
-    the sign on every value (flowDirection 0) using the load convention --
-    active power negative on export, reactive power negative on injection --
-    with commodity, dataQualifier and kind left Not Applicable, and adds
-    line-to-line voltage and State of Energy readings when the device supplies
-    them.
+    ``DEFAULT`` posts each reading's ReadingType as the connector states it,
+    with commodity 1 (electricity, secondary metered). A W, var, VA, A or PF
+    reading that sets no flowDirection takes it from the value's sign when the
+    reading is first registered and posts magnitudes.
+
+    ``SIGNED_LOAD_CONVENTION`` carries the sign on every value (flowDirection
+    0) using the load convention -- active power negative on export, reactive
+    power negative on injection -- with commodity, dataQualifier and kind left
+    Not Applicable, and current in whole amperes unless the reading sets a
+    multiplier.
 
     How W and var are signed depends on the device's :class:`DeviceRole`. A
     DER and a DER meter report them positive for the DER's output, which the
@@ -401,18 +176,18 @@ class PowerDirection(StrEnum):
     and its flow directions other than Net carry a positive magnitude. So:
 
     - ``DEFAULT`` sets each reading's flowDirection once, from the value's sign
-      when the MUP is built (1 Forward or 19 Reverse), and posts magnitudes.
-      A value that changes sign later, a battery that registered while
-      discharging and then charges, is posted under the first direction.
+      when the reading is registered (1 Forward or 19 Reverse), and posts
+      magnitudes. A value that changes sign later, a battery that registered
+      while discharging and then charges, is posted under the first direction.
     - ``NET`` posts flowDirection 4 (Net, forward minus reverse) with the
       sign on the value: positive while the DER delivers, negative while it
       absorbs.
     - ``SPLIT`` posts two readings per quantity, flowDirection 1 (Forward)
       and 19 (Reverse), each a magnitude, with the inactive one 0.
 
-    ``NET`` and ``SPLIT`` use mRID slots of their own (31 and up), so a device
-    switched between modes never posts a value under a ReadingType registered
-    for another mode. It applies to W and var, system and per line.
+    It applies to W and var readings that set no flowDirection. ``NET`` and
+    ``SPLIT`` readings have mRIDs of their own, so a device switched between
+    modes never posts a value under a ReadingType registered for another mode.
     """
 
     DEFAULT = "default"
@@ -420,359 +195,199 @@ class PowerDirection(StrEnum):
     SPLIT = "split"
 
 
-#: The readings PowerDirection applies to, in slot order: the offset of each
-#: from a mode's first slot.
-_DIRECTED_KEYS: tuple[str, ...] = ("W", "Var", "WL1", "VarL1", "WL2", "VarL2", "WL3", "VarL3")
-#: First mRID slot of each fixed flowDirection's readings.
-_DIRECTED_SLOT_BASE: dict[int, int] = {FLOW_NET: 31, FLOW_NORMAL: 41, FLOW_REVERSE: 51}
+# ---------------------------------------------------------------------------
+# Units
+# ---------------------------------------------------------------------------
+
+_UOM_W = 38
+_UOM_VAR = 63
+_UOM_VA = 61
+_UOM_V = 29
+_UOM_A = 5
+_UOM_HZ = 33
+_UOM_PF = 65
+_UOM_WH = 72
+
+#: Units whose value is signed in the connector contract. Under DEFAULT a
+#: reading of one of these that sets no flowDirection takes it from the sign.
+_SIGNED_UOMS = frozenset({_UOM_W, _UOM_VAR, _UOM_VA, _UOM_A, _UOM_PF})
+#: Units that PowerDirection applies to.
+_DIRECTED_UOMS = frozenset({_UOM_W, _UOM_VAR})
+
+#: SIGNED_LOAD_CONVENTION posts current in whole amperes by default.
+_SIGNED_LOAD_MULTIPLIER: dict[int, int] = {**DEFAULT_MULTIPLIER, _UOM_A: 0}
+
+_UOM_NAME: dict[int, str] = {
+    _UOM_W: "Real Power",
+    _UOM_VAR: "Reactive Power",
+    _UOM_HZ: "Frequency",
+    _UOM_V: "Voltage",
+    _UOM_PF: "Power Factor",
+    _UOM_VA: "Apparent Power",
+    _UOM_A: "Current",
+    _UOM_WH: "Real Energy",
+}
+
+_PHASE_NAME: dict[int, str] = {
+    128: "A",
+    64: "B",
+    32: "C",
+    129: "AN",
+    65: "BN",
+    33: "CN",
+    132: "AB",
+    66: "BC",
+    40: "CA",
+    224: "ABC",
+    225: "ABCN",
+    136: "S1",
+    16: "S1N",
+    8: "S2N",
+    24: "S12N",
+    134: "S12",
+}
+
+_DATA_QUALIFIER_NAME: dict[int, str] = {2: "avg", 8: "max", 9: "min"}
+
 _DIRECTION_SUFFIX: dict[int, str] = {
     FLOW_NET: "(net)",
     FLOW_NORMAL: "(forward)",
     FLOW_REVERSE: "(reverse)",
 }
 
+#: The line a per-line phase code belongs to; anything else is a total.
+_LINE_OF_PHASE: dict[int, int] = {128: 1, 129: 1, 64: 2, 65: 2, 32: 3, 33: 3}
 
-def _directed_specs(
-    specs: list[tuple[int, ReadingTypeSpec]], power_direction: PowerDirection
-) -> list[tuple[int, ReadingTypeSpec]]:
-    """Replace W and var readings with the ones ``power_direction`` posts."""
-    if power_direction is PowerDirection.DEFAULT:
-        return specs
-    directions = (
-        (FLOW_NET,) if power_direction is PowerDirection.NET else (FLOW_NORMAL, FLOW_REVERSE)
-    )
-    out: list[tuple[int, ReadingTypeSpec]] = []
-    for index, spec in specs:
-        if spec.key not in _DIRECTED_KEYS:
-            out.append((index, spec))
-            continue
-        offset = _DIRECTED_KEYS.index(spec.key)
-        for direction in directions:
-            directed = replace(
-                spec,
-                flow_direction=direction,
-                description=f"{spec.description} {_DIRECTION_SUFFIX[direction]}",
-            )
-            out.append((_DIRECTED_SLOT_BASE[direction] + offset, directed))
-    return out
+#: IEEE 2030.5 descriptions are String32.
+_DESCRIPTION_MAX = 32
 
 
-def _directed_value(spec: ReadingTypeSpec, monitoring_data: dict[str, Any]) -> int:
-    """Return a reading's value under its fixed flowDirection.
-
-    Net carries the sign; Forward and Reverse carry the magnitude of their
-    own direction and 0 otherwise.
-    """
-    scaled = _scaled_for(spec, monitoring_data)
-    signed = -scaled.value if scaled.flow_direction == FLOW_REVERSE else scaled.value
-    if spec.flow_direction == FLOW_NET:
-        return signed
-    if spec.flow_direction == FLOW_REVERSE:
-        return max(-signed, 0)
-    return max(signed, 0)
+# ---------------------------------------------------------------------------
+# The 0.16 slot table
+# ---------------------------------------------------------------------------
 
 
-#: Energy totals, registered when the device supplies them. Each is a Summation
-#: (accumulationBehaviour 9) of real energy (kind 12) in Wh (uom 72) with a fixed
-#: flowDirection: ``WhFwd`` is the energy delivered in the forward direction (1)
-#: and ``WhRev`` in the reverse direction (19), each a positive total in the
-#: device role's frame (see :class:`DeviceRole`).
-_ENERGY_SPECS: tuple[tuple[int, ReadingTypeSpec], ...] = tuple(
-    (
-        slot,
-        ReadingTypeSpec(
-            key=key,
-            description=f"Real Energy {_DIRECTION_SUFFIX[direction]}",
-            commodity=1,
-            data_qualifier=12,
-            kind=12,
-            uom=72,
-            multiplier=0,
-            scale_func=scale_wh,
-            accumulation_behaviour=9,
-            flow_direction=direction,
-        ),
-    )
-    for slot, key, direction in ((61, "WhFwd", FLOW_NORMAL), (62, "WhRev", FLOW_REVERSE))
-)
-
-
-#: DEFAULT-profile system voltage (slot 4) and current (slot 7), and the slot
-#: each moves to when its connector gives it a phase code. Slots 4 and 7 were
-#: registered without a phase, and IEEE 2030.5-2023 §10.11.3 Rule n forbids
-#: modifying a MirrorMeterReading's ReadingType once created, so a phased
-#: reading takes an mRID of its own rather than changing the one a server
-#: already holds.
-PHASED_SLOT_BY_SYSTEM_SLOT: dict[int, int] = {4: 63, 7: 64}
-_SYSTEM_SLOT_KEYS: dict[int, str] = {4: "V", 7: "A"}
-
-
-def _has_phase(override: ReadingOverride | None) -> bool:
-    """Return True when an override sets a phase that applies, one above 0.
-
-    0 is "not applicable", and a negative phase is ignored by
-    :func:`_effective_spec`, so neither moves the reading off its slot.
-    """
-    phase = getattr(override, "phase", None) if override is not None else None
-    return isinstance(phase, int) and not isinstance(phase, bool) and phase > 0
-
-
-def _phased_totals(
-    specs: list[tuple[int, ReadingTypeSpec]], overrides: dict[str, ReadingOverride] | None
-) -> list[tuple[int, ReadingTypeSpec]]:
-    """Move the system voltage and current to their own slots when given a phase."""
-    if not overrides:
-        return specs
-    out: list[tuple[int, ReadingTypeSpec]] = []
-    for index, spec in specs:
-        key = _SYSTEM_SLOT_KEYS.get(index)
-        if key is not None and _has_phase(overrides.get(key)):
-            out.append((PHASED_SLOT_BY_SYSTEM_SLOT[index], spec))
-        else:
-            out.append((index, spec))
-    return out
-
-
-def _default_specs_for(
-    monitoring_data: dict[str, Any],
-    power_direction: PowerDirection,
-    overrides: dict[str, ReadingOverride] | None = None,
-) -> list[tuple[int, ReadingTypeSpec]]:
-    """Return ``(mrid_index, spec)`` for a DEFAULT-profile device.
-
-    The system and per-line readings with W and var as ``power_direction``
-    posts them, then each energy total the device supplies. A system voltage
-    or current whose override sets a phase is at slot 63 or 64 (see
-    :data:`PHASED_SLOT_BY_SYSTEM_SLOT`).
-    """
-    specs = _phased_totals(
-        _directed_specs(_all_specs_for(monitoring_data), power_direction), overrides
-    )
-    specs += [
-        (slot, spec) for slot, spec in _ENERGY_SPECS if monitoring_data.get(spec.key) is not None
-    ]
-    return specs
-
-
-# SIGNED_LOAD_CONVENTION only. The slots sit outside every DEFAULT slot, so a
-# device switched between profiles keeps all of its existing mRIDs.
-_STATE_OF_ENERGY_SPEC: tuple[int, ReadingTypeSpec] = (
-    8,
-    ReadingTypeSpec(
-        key="WHAvail",
-        description="State of Energy",
-        commodity=0,
-        data_qualifier=0,
-        kind=0,
-        uom=72,
-        multiplier=0,
-    ),
-)
-_LINE_TO_LINE_SPECS: tuple[tuple[int, ReadingTypeSpec], ...] = tuple(
-    (
-        slot,
-        ReadingTypeSpec(
-            key=key,
-            description=description,
-            commodity=0,
-            data_qualifier=0,
-            kind=0,
-            uom=29,
-            multiplier=-1,
-            phase=phase,
-        ),
-    )
-    for slot, key, description, phase in (
-        (28, "VL1L2", "Voltage L1-L2", 132),
-        (29, "VL2L3", "Voltage L2-L3", 66),
-        (30, "VL3L1", "Voltage L3-L1", 40),
-    )
-)
-# Line-to-line readings a device can have, by SunSpec ACType: split-phase has
-# only L1-L2.
-_AC_TYPE_LINE_TO_LINE_COUNT: dict[int, int] = {0: 0, 1: 1, 2: 3}
-# Phase code for the aggregate readings, by SunSpec ACType. IEEE 2030.5 has no
-# S1-S2 code, and per-line readings already tag split-phase L2 as phase B, so
-# split-phase totals are AB.
-_AC_TYPE_TOTAL_PHASE: dict[int, int] = {0: 128, 1: 132, 2: 224}
-#: Every slot a SIGNED_LOAD_CONVENTION MUP can register, so a re-POST can
-#: rebuild any slot registered earlier whatever this cycle's data says.
-_SPEC_BY_SLOT: dict[int, ReadingTypeSpec] = {
-    **dict(enumerate(READING_TYPE_SPECS, start=1)),
-    **{
-        _per_line_index(line, slot): spec
-        for line in (1, 2, 3)
-        for slot, spec in enumerate(_per_line_specs(line))
-    },
-    **dict((_STATE_OF_ENERGY_SPEC, *_LINE_TO_LINE_SPECS)),
-}
-_TOTAL_KEYS = frozenset({"W", "Var", "VA", "A", "WHAvail"})
-_PER_LINE_KEY = re.compile(r"^(W|Var|V|PF|VA|A)L[1-3]$")
-#: The quantities whose sign the load convention sets from the device role.
-_POWER_QUANTITIES = frozenset({"W", "Var"})
-#: Roles whose connector reports W and var import positive, which is already
-#: the load convention. Every other role reports them positive for a DER's
-#: output, so their values are negated.
-_IMPORT_POSITIVE_ROLES = frozenset({DeviceRole.SITE_METER})
-
-
-def ac_type_of(monitoring_data: dict[str, Any]) -> int | None:
-    """The SunSpec 701 ``ACType`` in monitoring data, or None if absent or not an int."""
-    ac_type = monitoring_data.get("ACType")
-    if isinstance(ac_type, bool) or not isinstance(ac_type, int):
-        return None
-    return ac_type
-
-
-def _quantity(key: str) -> str:
-    """The system key a per-line key measures (``"VarL2"`` -> ``"Var"``)."""
-    match = _PER_LINE_KEY.match(key)
-    return match.group(1) if match else key
-
-
-def _signed_load_spec(spec: ReadingTypeSpec, ac_type: int | None) -> ReadingTypeSpec:
-    phase = _AC_TYPE_TOTAL_PHASE.get(ac_type) if ac_type is not None else None
-    return replace(
-        spec,
-        commodity=0,
-        data_qualifier=0,
-        kind=0,
-        phase=phase if spec.key in _TOTAL_KEYS else spec.phase,
-        # Whole amperes is part of the profile's specification, not a precision
-        # oversight: 2.5 A posts 3. A connector that needs tenths sets a
-        # multiplier override, which the scaling honors.
-        multiplier=0 if _quantity(spec.key) == "A" else spec.multiplier,
-    )
-
-
-def _signed_load_specs_for(
-    monitoring_data: dict[str, Any], registered: frozenset[int]
-) -> list[tuple[int, ReadingTypeSpec]]:
-    """``(mrid_index, spec)`` for a SIGNED_LOAD_CONVENTION device.
-
-    The DEFAULT set, plus each optional reading the device supplies this cycle,
-    plus every slot registered earlier. Keeping registered slots means a MUP
-    re-POST never drops a reading that is merely absent this cycle -- an
-    optional reading, or a per-line block whose ACType is missing -- since
-    Rule a.4 writes the new MUP over the old one.
-    """
-    ac_type = ac_type_of(monitoring_data)
-    line_to_line = _AC_TYPE_LINE_TO_LINE_COUNT.get(ac_type, 0) if ac_type is not None else 0
-    candidates = [
-        (_STATE_OF_ENERGY_SPEC, True),
-        *((entry, n < line_to_line) for n, entry in enumerate(_LINE_TO_LINE_SPECS)),
-    ]
-    by_slot = dict(_all_specs_for(monitoring_data))
-    by_slot |= {
-        slot: spec
-        for (slot, spec), allowed in candidates
-        if allowed and monitoring_data.get(spec.key) is not None
-    }
-    by_slot |= {slot: _SPEC_BY_SLOT[slot] for slot in registered if slot in _SPEC_BY_SLOT}
-    return [(index, _signed_load_spec(spec, ac_type)) for index, spec in sorted(by_slot.items())]
-
-
-def registration_slots(
-    monitoring_data: dict[str, Any],
-    profile: ReadingProfile,
-    registered: frozenset[int] = frozenset(),
-    power_direction: PowerDirection = PowerDirection.DEFAULT,
-    overrides: dict[str, ReadingOverride] | None = None,
-) -> frozenset[int]:
-    """The mRID slots a MUP built now would register.
-
-    Under SIGNED_LOAD_CONVENTION the set grows when an optional reading first
-    appears, which is the signal to re-POST the MUP so the new mRID arrives
-    with its ReadingType (Rule h.2) instead of meeting Rule h.3.
-    """
-    if profile is ReadingProfile.SIGNED_LOAD_CONVENTION:
-        specs = _signed_load_specs_for(monitoring_data, registered)
-    else:
-        specs = _default_specs_for(monitoring_data, power_direction, overrides)
-    return frozenset(index for index, _ in specs)
-
-
-def _scale_half_away(raw: float, multiplier: int) -> int:
-    """``raw x 10^-multiplier`` rounded half away from zero, in decimal.
-
-    Scaling the float directly misrounds decimal ties: 1.005 is stored as
-    1.00499..., so x100 rounds to 100. ``str`` gives the shortest decimal that
-    round-trips, which is the value the device reported.
-    """
-    scaled = Decimal(str(raw)).scaleb(-multiplier)
-    return int(scaled.to_integral_value(rounding=ROUND_HALF_UP))
-
-
-def _signed_load_value(
-    spec: ReadingTypeSpec,
-    monitoring_data: dict[str, Any],
-    posted: dict[str, int],
+def _identity(
+    uom: int,
     *,
-    role: DeviceRole,
-) -> int:
-    """Scale a SIGNED_LOAD_CONVENTION value from the effective multiplier.
+    phase: int = 0,
+    kind: int = 37,
+    dq: int = 12,
+    acc: int = 12,
+    flow: int | None = None,
+    multiplier: int = 0,
+) -> ReadingIdentity:
+    return ReadingIdentity(uom, phase, kind, dq, acc, flow, multiplier)
 
-    W and var are signed by ``role``. A DER and a DER meter report them
-    positive for the DER's output (generation and reactive injection), so
-    both are negated. A site meter reports them positive for import, which is
-    already the load convention, so both are kept. PF takes the sign of the
-    var posted with it -- negative on reactive injection -- and stays an
-    unsigned magnitude when that var is missing. Everything else is a
-    magnitude.
+
+def _system_entries(total_phases: Iterable[int], amp_multiplier: int) -> list[tuple]:
+    """Return ``(identity, slot, description)`` for the seven system readings.
+
+    ``total_phases`` are the phase codes a W, var, VA or A total was registered
+    with: 0 under DEFAULT, and also the wiring-derived 128, 132 and 224 under
+    SIGNED_LOAD_CONVENTION.
     """
-    scaled = _scale_half_away(monitoring_data[spec.key], spec.multiplier)
-    quantity = _quantity(spec.key)
-    if quantity in _POWER_QUANTITIES:
-        return scaled if role in _IMPORT_POSITIVE_ROLES else -scaled
-    if quantity == "PF":
-        var = posted.get("Var" + spec.key[2:])
-        return -abs(scaled) if var is not None and var < 0 else abs(scaled)
-    return abs(scaled)
+    entries: list[tuple] = []
+    for phase in total_phases:
+        entries += [
+            (_identity(_UOM_W, phase=phase), 1, "Real Power"),
+            (_identity(_UOM_VAR, phase=phase), 2, "Reactive Power"),
+            (_identity(_UOM_VA, phase=phase), 6, "Apparent Power"),
+            (_identity(_UOM_A, phase=phase, multiplier=amp_multiplier), 7, "Current"),
+        ]
+    entries += [
+        (_identity(_UOM_HZ, multiplier=-3), 3, "Frequency"),
+        (_identity(_UOM_V, dq=2, multiplier=-1), 4, "Voltage"),
+        (_identity(_UOM_PF, kind=0, multiplier=-3), 5, "Power Factor"),
+    ]
+    return entries
 
 
-def _line_count_for(monitoring_data: dict[str, Any]) -> int:
-    """How many distinct AC lines does the device advertise?
+def _per_line_entries(amp_multiplier: int) -> list[tuple]:
+    """Return ``(identity, slot, description)`` for the per-line readings, slots 10-27."""
+    entries: list[tuple] = []
+    for line, (phase, v_phase) in enumerate(((128, 129), (64, 65), (32, 33)), start=1):
+        base = 10 + (line - 1) * 6
+        entries += [
+            (_identity(_UOM_W, phase=phase), base, f"Real Power L{line}"),
+            (_identity(_UOM_VAR, phase=phase), base + 1, f"Reactive Power L{line}"),
+            (_identity(_UOM_V, phase=v_phase, dq=2, multiplier=-1), base + 2, f"Voltage L{line}"),
+            (
+                _identity(_UOM_PF, phase=phase, kind=0, multiplier=-3),
+                base + 3,
+                f"Power Factor L{line}",
+            ),
+            (_identity(_UOM_VA, phase=phase), base + 4, f"Apparent Power L{line}"),
+            (
+                _identity(_UOM_A, phase=phase, multiplier=amp_multiplier),
+                base + 5,
+                f"Current L{line}",
+            ),
+        ]
+    return entries
 
-    Reads ``ACType`` from monitoring data (SunSpec model 701 enum). Falls
-    back to 1 (i.e. no per-line readings appended) if the connector
-    didn't supply ``ACType`` -- the historical behaviour. Any value
-    outside the known 0/1/2 range is logged via the same fallback so
-    we don't crash on a forward-compatible device firmware.
-    """
-    ac_type = monitoring_data.get("ACType")
-    if not isinstance(ac_type, int):
-        return 1
-    return _AC_TYPE_LINE_COUNT.get(ac_type, 1)
+
+def _table(entries: Iterable[tuple]) -> dict[ReadingIdentity, tuple[int, str]]:
+    return {identity: (slot, description) for identity, slot, description in entries}
 
 
-def _all_specs_for(monitoring_data: dict[str, Any]) -> list[tuple[int, ReadingTypeSpec]]:
-    """Return the ordered list of ``(mrid_index, spec)`` for this device.
+#: DEFAULT profile: identity -> (0.16 slot, description).
+_DEFAULT_SLOTS: dict[ReadingIdentity, tuple[int, str]] = _table(
+    [
+        *_system_entries((0,), -1),
+        *_per_line_entries(-1),
+        (
+            _identity(_UOM_WH, kind=12, acc=9, flow=FLOW_NORMAL),
+            61,
+            "Real Energy (forward)",
+        ),
+        (
+            _identity(_UOM_WH, kind=12, acc=9, flow=FLOW_REVERSE),
+            62,
+            "Real Energy (reverse)",
+        ),
+    ]
+)
 
-    System readings are always present (indices 1..7). Per-line readings
-    are appended for every line the device advertises: SPLIT_PHASE emits
-    L1+L2, THREE_PHASE emits L1+L2+L3. A SINGLE_PHASE (or ACType-less)
-    device emits none -- there the system readings genuinely *are* L1, so a
-    second copy would just bloat the MUP.
 
-    L1 is NOT folded into the system readings on a multi-phase device: the
-    system readings are aggregates, not phase-A values. ``W``/``Var``/``VA``/
-    ``A`` are totals across phases, and ``V`` is SunSpec 701 ``LLV`` -- a
-    line-to-line *average* carrying no PhaseCode. A consumer keying on
-    PhaseCode 129 (Phase AN, i.e. L1-N voltage) therefore never sees an L1
-    reading unless it is emitted explicitly.
-    """
-    result: list[tuple[int, ReadingTypeSpec]] = []
-    for i, spec in enumerate(READING_TYPE_SPECS, start=1):
-        result.append((i, spec))
+def _signed_load_table(total_phases: tuple[int, ...]) -> dict[ReadingIdentity, tuple[int, str]]:
+    return _table(
+        [
+            *_per_line_entries(0),
+            *_system_entries(total_phases, 0),
+            *(
+                (_identity(_UOM_WH, phase=phase, kind=0), 8, "State of Energy")
+                for phase in total_phases
+            ),
+            (_identity(_UOM_V, phase=132, multiplier=-1), 28, "Voltage L1-L2"),
+            (_identity(_UOM_V, phase=66, multiplier=-1), 29, "Voltage L2-L3"),
+            (_identity(_UOM_V, phase=40, multiplier=-1), 30, "Voltage L3-L1"),
+        ]
+    )
 
-    line_count = _line_count_for(monitoring_data)
-    # Multi-phase: emit L1..N. Single-phase (line_count == 1): emit nothing,
-    # since range(2, 2) is empty and the system readings already are L1.
-    first_line = 1 if line_count >= 2 else 2
-    for line in range(first_line, line_count + 1):
-        for slot, spec in enumerate(_per_line_specs(line)):
-            result.append((_per_line_index(line, slot), spec))
-    return result
+
+#: SIGNED_LOAD_CONVENTION: identity -> (0.16 slot, description). Release 0.16
+#: tagged the W, var, VA, A and state-of-energy totals with a phase code taken
+#: from the device's wiring: 128 on a single-phase device, 132 split phase,
+#: 224 three phase. Phase 128 also marks line 1 of a multi-phase device, so a
+#: device that reports no line 2 or line 3 reading takes the single-phase table.
+_SIGNED_LOAD_SLOTS: dict[ReadingIdentity, tuple[int, str]] = _signed_load_table((0, 132, 224))
+_SIGNED_LOAD_SLOTS_SINGLE_PHASE: dict[ReadingIdentity, tuple[int, str]] = _signed_load_table(
+    (0, 128, 132, 224)
+)
+
+#: Phase codes of lines 2 and 3.
+_LINE_2_3_PHASES = frozenset({64, 65, 32, 33})
+
+#: First slot of each fixed flowDirection's W and var readings, and the
+#: offset of each W or var slot from it.
+_DIRECTED_SLOT_BASE: dict[int, int] = {FLOW_NET: 31, FLOW_NORMAL: 41, FLOW_REVERSE: 51}
+_DIRECTED_OFFSET: dict[int, int] = {1: 0, 2: 1, 10: 2, 11: 3, 16: 4, 17: 5, 22: 6, 23: 7}
+
+
+# ---------------------------------------------------------------------------
+# mRIDs
+# ---------------------------------------------------------------------------
 
 
 def compute_sfdi(lfdi: str) -> int:
@@ -796,33 +411,18 @@ def compute_sfdi(lfdi: str) -> int:
 
 
 def _create_mrid(lfdi: str, index: int = 0, pen: int = DEFAULT_PEN) -> MRidtype:
-    """Create an IEEE 2030.5 mRID stable across calls for the same
-    ``(lfdi, index, pen)`` triple.
+    """Return the mRID of slot ``index`` for ``lfdi``, stable across calls.
 
     IEEE 2030.5-2023 §10.11.3 Rule h matches readings POSTs to existing
-    MeterReadings by mRID:
+    MeterReadings by mRID, and Rule h.3 answers 400 to an unknown mRID that
+    carries no ReadingType, so the same logical reading must always produce the
+    same mRID.
 
-    * h.1: matching mRID -> overwrite the existing MeterReading.
-    * h.2: non-matching mRID + has ReadingType -> create new MeterReading.
-    * h.3: non-matching mRID + no ReadingType -> 400 Bad Request.
+    Two encodings share the 32-hex-char (128-bit) layout, SFDI first as twelve
+    decimal digits:
 
-    Rule n further says ReadingType SHOULD NOT be included in subsequent
-    POSTs. So a readings POST that re-generates mRIDs from the wall clock
-    looks like "all-new mRIDs, no ReadingType" to the server -- which is
-    exactly the Rule h.3 case, and a strict server (Envoy, third-party
-    parsers) will return 400. This version derives the mRID solely from
-    ``(lfdi, index, pen)`` so the same logical reading always produces
-    the same mRID.
-
-    Two encodings share the 32-hex-char (128-bit) layout:
-
-    * Indices 0..9 (MUP + the seven system readings): single-digit slot
-      followed by 11 hex chars of LFDI. This is the legacy encoding;
-      preserved so MUPs already posted to a server under the original
-      7-reading scheme keep matching after the per-line readings ship.
-    * Indices 10+ (per-line readings): two-digit slot followed by 10
-      hex chars of LFDI. One fewer salt char buys the extra index digit
-      without changing the total length.
+    * Slots 0..9: one slot digit followed by 11 hex chars of LFDI.
+    * Slots 10+: two slot digits followed by 10 hex chars of LFDI.
     """
     lfdi_norm = lfdi.lower()
     sfdi = compute_sfdi(lfdi_norm)
@@ -835,165 +435,305 @@ def _create_mrid(lfdi: str, index: int = 0, pen: int = DEFAULT_PEN) -> MRidtype:
     return MRidtype(value=bytes.fromhex(mrid_hex))
 
 
+#: Marks a hashed mRID. The slot layouts hold a decimal slot digit at this
+#: position, so a hex letter there cannot match any slot mRID.
+_HASHED_MARKER = "f"
+
+
+def _hashed_mrid(lfdi: str, identity: ReadingIdentity, pen: int = DEFAULT_PEN) -> MRidtype:
+    """Return the mRID of a reading with no 0.16 slot.
+
+    Layout: SFDI (12 decimal digits), the marker, 11 hex chars of a SHA-256
+    over the LFDI and the identity, and the PEN.
+    """
+    lfdi_norm = lfdi.lower()
+    sfdi = compute_sfdi(lfdi_norm)
+    text = "|".join([lfdi_norm, *("" if v is None else str(v) for v in identity)])
+    digest = hashlib.sha256(text.encode("ascii")).hexdigest()[:11]
+    return MRidtype(value=bytes.fromhex(f"{sfdi:012d}{_HASHED_MARKER}{digest}{pen:08x}"))
+
+
 def mup_mrid(lfdi: str, pen: int = DEFAULT_PEN) -> bytes:
     """Return the mRID of the MirrorUsagePoint :func:`create_mup` builds for ``lfdi``."""
     return _create_mrid(lfdi.lower(), index=0, pen=pen).value
 
 
-# ReadingOverride fields that map onto ReadingTypeSpec attributes. All are
-# non-negative int enum codes EXCEPT ``multiplier`` (powerOfTenMultiplier), which
-# is signed (IEEE 2030.5: -9..9); invalid values are ignored (default kept).
-_OVERRIDABLE_SPEC_FIELDS = (
-    "accumulation_behaviour",
-    "data_qualifier",
-    "kind",
-    "commodity",
-    "multiplier",
-    "uom",
-    "phase",
-)
+# ---------------------------------------------------------------------------
+# Readings to MirrorMeterReadings
+# ---------------------------------------------------------------------------
 
 
-def _effective_spec(spec: ReadingTypeSpec, override: ReadingOverride | None) -> ReadingTypeSpec:
-    """Merge a connector's per-field ReadingType overrides onto the base spec.
+@dataclass(frozen=True, slots=True)
+class RegisteredReading:
+    """A MirrorMeterReading as registered in a MUP: its mRID, description and ReadingType.
 
-    Each overridden field must be an int -- non-negative for the enum codes, and
-    in ``-9..9`` for ``multiplier`` (powerOfTenMultiplier is signed). An invalid
-    value is logged and skipped so the default stays in place (one bad field can't
-    break the MUP).
+    Kept by the caller after a successful MUP POST and passed back, so a re-POST
+    repeats each ReadingType exactly as the server already holds it.
     """
-    if override is None:
-        return spec
-    # dict[str, Any] (not int): dataclasses.replace's typed kwargs reject a
-    # **dict[str, int] spread because some fields (scale_func) aren't ints.
-    changes: dict[str, Any] = {}
-    for field_name in _OVERRIDABLE_SPEC_FIELDS:
-        # getattr default guards against a non-ReadingOverride value. Both
-        # acquisition paths filter these per value through
-        # ``readings.typed_overrides``, so this is a belt-and-braces check
-        # rather than the only one -- it still covers callers that build an
-        # override map and call the builders directly.
-        value = getattr(override, field_name, None)
-        if value is None:
-            continue
-        if isinstance(value, bool) or not isinstance(value, int):
-            logger.warning(
-                "Ignoring invalid %s override %r for reading %s (expected int)",
-                field_name,
-                value,
-                spec.key,
-            )
-            continue
-        # powerOfTenMultiplier is signed (-9..9); the rest are non-negative codes.
-        in_range = (-9 <= value <= 9) if field_name == "multiplier" else (value >= 0)
-        if not in_range:
-            logger.warning(
-                "Ignoring out-of-range %s override %r for reading %s",
-                field_name,
-                value,
-                spec.key,
-            )
-            continue
-        changes[field_name] = value
-    return replace(spec, **changes) if changes else spec
+
+    mrid: bytes
+    description: str
+    reading_type: ReadingType1
+    #: Position in the MUP: 0.16 slot readings first, in slot order.
+    order: tuple[int, int, int]
 
 
-def _resolve_quality_flags(
-    override: ReadingOverride | None, per_cycle: object = None, *, stale: bool = False
-) -> bytes:
-    """qualityFlags (HexBinary16) for a reading.
+@dataclass(frozen=True, slots=True)
+class _Posted:
+    """One MirrorMeterReading built from a reading this cycle."""
 
-    Precedence among *connector-supplied* opinions: a per-cycle value attached
-    to this sample (``"<key>__quality"`` in ``fetch_monitoring``) > the
-    connector's static per-key ``quality_flags`` override > the default
-    ``valid`` bit. Each candidate must be a 16-bit int; an invalid one is logged
-    and the next candidate is tried. The ``getattr`` default and the ``object``
-    annotations guard against non-int / non-ReadingOverride values.
+    mrid: bytes
+    description: str
+    order: tuple[int, int, int]
+    reading: Reading
+    #: Effective ReadingType fields.
+    uom: int
+    phase: int
+    kind: int
+    data_qualifier: int
+    accumulation_behaviour: int
+    multiplier: int
+    commodity: int
+    #: Fixed flowDirection, or None to take it from the sign at registration.
+    flow_direction: int | None
+    #: The line the reading measures, 1 to 3, or 0 for a total.
+    line: int
 
-    ``stale`` is *not* part of that chain. A connector reporting ``valid``
-    is asserting its read succeeded; the client knowing the sample is older
-    than anyone asked for is a different claim, and both can be true. Letting
-    first-wins precedence apply would post ``valid`` on a reading known to be
-    stale, so staleness is OR-ed on top instead: set *questionable*, clear
-    *valid*, leave every other connector-supplied bit intact.
+
+def _description(identity: ReadingIdentity, flow: int | None) -> str:
+    """Return a description for a reading with no 0.16 slot."""
+    if identity.uom == _UOM_WH and identity.kind == 0:
+        name = "State of Energy"
+    else:
+        name = _UOM_NAME.get(identity.uom, f"uom {identity.uom}")
+    parts = [name]
+    if identity.phase:
+        parts.append(_PHASE_NAME.get(identity.phase, f"phase {identity.phase}"))
+    if identity.data_qualifier in _DATA_QUALIFIER_NAME:
+        parts.append(_DATA_QUALIFIER_NAME[identity.data_qualifier])
+    if flow in _DIRECTION_SUFFIX:
+        parts.append(_DIRECTION_SUFFIX[flow])
+    return " ".join(parts)[:_DESCRIPTION_MAX]
+
+
+def valid_readings(readings: Iterable[object]) -> list[Reading]:
+    """Return the readings the library can post, each identity once.
+
+    A connector is third-party code. An entry that is not a valid
+    :class:`Reading` is logged and dropped, and so is a second reading with the
+    identity of an earlier one, which would otherwise post two values under
+    one mRID.
     """
-    candidates: tuple[object, object] = (per_cycle, getattr(override, "quality_flags", None))
-    resolved = QUALITY_FLAGS_VALID
-    for candidate in candidates:
-        if candidate is None:
+    out: list[Reading] = []
+    seen: set[ReadingIdentity] = set()
+    for reading in readings:
+        if not is_valid_reading(reading):
+            logger.warning("Ignoring invalid reading %r", reading)
             continue
-        if (
-            not isinstance(candidate, bool)
-            and isinstance(candidate, int)
-            and 0 <= candidate <= 0xFFFF
-        ):
-            resolved = candidate
-            break
-        logger.warning("Ignoring invalid qualityFlags %r (expected 16-bit int)", candidate)
-
-    if stale:
-        resolved = (resolved | QUALITY_FLAGS_QUESTIONABLE) & ~QUALITY_FLAGS_VALID
-    return resolved.to_bytes(2, "big")
+        assert isinstance(reading, Reading)
+        identity = reading_identity(reading)
+        if identity in seen:
+            logger.warning("Ignoring a second reading with identity %s", identity)
+            continue
+        seen.add(identity)
+        out.append(reading)
+    return out
 
 
-def _create_reading_type(spec: ReadingTypeSpec, flow_direction: int) -> ReadingType1:
-    """Create a ReadingType from a spec with given flow direction."""
+def _legacy_slot(
+    legacy: tuple[int, str] | None, flow: int | None, own_flow: int | None
+) -> int | None:
+    """Return the 0.16 slot of a reading, or of its PowerDirection variant."""
+    if legacy is None:
+        return None
+    if flow == own_flow:
+        return legacy[0]
+    offset = _DIRECTED_OFFSET.get(legacy[0])
+    if offset is None or flow is None:
+        return None
+    return _DIRECTED_SLOT_BASE[flow] + offset
+
+
+def _line_of(reading: Reading, legacy: tuple[int, str] | None) -> int:
+    """Return the line a reading measures, 1 to 3, or 0 for a total.
+
+    A reading in a 0.16 slot takes the line of its slot, so a single-phase
+    total tagged phase A stays a total.
+    """
+    if legacy is not None:
+        slot = legacy[0]
+        return (slot - 10) // 6 + 1 if 10 <= slot <= 27 else 0
+    return _LINE_OF_PHASE.get(reading.phase, 0)
+
+
+def _posted_readings(
+    lfdi: str,
+    readings: Sequence[Reading],
+    profile: ReadingProfile,
+    power_direction: PowerDirection,
+) -> list[_Posted]:
+    """Return the MirrorMeterReadings ``readings`` post, in MUP order."""
+    signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
+    valid = valid_readings(readings)
+    table = _DEFAULT_SLOTS
+    if signed_load:
+        multi_phase = any(r.phase in _LINE_2_3_PHASES for r in valid)
+        table = _SIGNED_LOAD_SLOTS if multi_phase else _SIGNED_LOAD_SLOTS_SINGLE_PHASE
+    defaults = _SIGNED_LOAD_MULTIPLIER if signed_load else DEFAULT_MULTIPLIER
+    directions: tuple[int, ...] = ()
+    if not signed_load and power_direction is PowerDirection.NET:
+        directions = (FLOW_NET,)
+    elif not signed_load and power_direction is PowerDirection.SPLIT:
+        directions = (FLOW_NORMAL, FLOW_REVERSE)
+
+    out: list[_Posted] = []
+    seen: set[bytes] = set()
+    for position, reading in enumerate(valid):
+        identity = reading_identity(reading, defaults)
+        legacy = table.get(identity)
+        variants: list[tuple[int | None, ReadingIdentity]]
+        if directions and reading.uom in _DIRECTED_UOMS and reading.flow_direction is None:
+            variants = [
+                (direction, identity._replace(flow_direction=direction)) for direction in directions
+            ]
+        else:
+            variants = [(reading.flow_direction, identity)]
+        for rank, (flow, variant) in enumerate(variants):
+            slot = _legacy_slot(legacy, flow, identity.flow_direction)
+            if slot is not None and legacy is not None:
+                mrid = _create_mrid(lfdi, index=slot).value
+                description = legacy[1]
+                if flow != identity.flow_direction and flow is not None:
+                    description = f"{description} {_DIRECTION_SUFFIX[flow]}"
+                order = (0, legacy[0], rank)
+            else:
+                mrid = _hashed_mrid(lfdi, variant).value
+                description = _description(variant, flow)
+                order = (1, position, rank)
+            if mrid in seen:
+                continue
+            seen.add(mrid)
+            out.append(
+                _Posted(
+                    mrid=mrid,
+                    description=description,
+                    order=order,
+                    reading=reading,
+                    uom=reading.uom,
+                    phase=reading.phase,
+                    kind=0 if signed_load else reading.kind,
+                    data_qualifier=0 if signed_load else reading.data_qualifier,
+                    accumulation_behaviour=reading.accumulation_behaviour,
+                    multiplier=identity.multiplier,
+                    commodity=0 if signed_load else 1,
+                    flow_direction=(
+                        flow if flow is not None else (FLOW_NOT_APPLICABLE if signed_load else None)
+                    ),
+                    line=_line_of(reading, legacy),
+                )
+            )
+    out.sort(key=lambda p: p.order)
+    return out
+
+
+def _scale_truncated(raw: float, multiplier: int) -> int:
+    """``raw x 10^-multiplier`` truncated toward zero, as release 0.16 scaled DEFAULT values."""
+    if multiplier <= 0:
+        return int(raw * 10**-multiplier)
+    return int(raw / 10**multiplier)
+
+
+def _scale_half_away(raw: float, multiplier: int) -> int:
+    """``raw x 10^-multiplier`` rounded half away from zero, in decimal.
+
+    Scaling the float directly misrounds decimal ties: 1.005 is stored as
+    1.00499..., so x100 rounds to 100. ``str`` gives the shortest decimal that
+    round-trips, which is the value the device reported.
+    """
+    scaled = Decimal(str(raw)).scaleb(-multiplier)
+    return int(scaled.to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def _registration_flow(posted: _Posted) -> int:
+    """Return the flowDirection a reading registers with under DEFAULT."""
+    if posted.flow_direction is not None:
+        return posted.flow_direction
+    if posted.uom in _SIGNED_UOMS and _scale_truncated(posted.reading.value, posted.multiplier) < 0:
+        return FLOW_REVERSE
+    return FLOW_NORMAL
+
+
+def _reading_type(posted: _Posted, flow_direction: int) -> ReadingType1:
     return ReadingType1(
-        accumulation_behaviour=AccumulationBehaviourType(value=spec.accumulation_behaviour),
-        commodity=CommodityType(value=spec.commodity),
-        data_qualifier=DataQualifierType(value=spec.data_qualifier),
+        accumulation_behaviour=AccumulationBehaviourType(value=posted.accumulation_behaviour),
+        commodity=CommodityType(value=posted.commodity),
+        data_qualifier=DataQualifierType(value=posted.data_qualifier),
         flow_direction=FlowDirectionType(value=flow_direction),
-        kind=KindType(value=spec.kind),
-        power_of_ten_multiplier=PowerOfTenMultiplierType(value=spec.multiplier),
-        uom=UomType(value=spec.uom),
-        phase=PhaseCode(value=spec.phase) if spec.phase is not None else None,
+        kind=KindType(value=posted.kind),
+        power_of_ten_multiplier=PowerOfTenMultiplierType(value=posted.multiplier),
+        uom=UomType(value=posted.uom),
+        phase=PhaseCode(value=posted.phase) if posted.phase else None,
     )
 
 
-def _scaled_for(spec: ReadingTypeSpec, monitoring_data: dict[str, Any]) -> ScaledReading:
-    """Pull the raw value for ``spec.key`` and run it through the spec's
-    scaling function. ``scale_func`` is non-None for every spec we
-    publish; the assertion documents the invariant and lets mypy narrow
-    the type.
+def plan_registration(
+    lfdi: str,
+    readings: Sequence[Reading],
+    *,
+    profile: ReadingProfile = ReadingProfile.DEFAULT,
+    power_direction: PowerDirection = PowerDirection.DEFAULT,
+    registered: Mapping[bytes, RegisteredReading] | None = None,
+) -> dict[bytes, RegisteredReading]:
+    """Return the MirrorMeterReadings a MUP built now registers, keyed by mRID.
+
+    Every reading in ``registered`` is kept with its ReadingType unchanged, so a
+    re-POST never drops a reading that is absent this cycle and never changes a
+    ReadingType the server holds (Rule a.4 writes the new MUP over the old one,
+    and Rule n forbids the change). A new reading is added with the ReadingType
+    it has now.
     """
-    raw_value = monitoring_data.get(spec.key)
-    assert spec.scale_func is not None, f"ReadingTypeSpec {spec.key} missing scale_func"
-    return spec.scale_func(raw_value)
+    plan: dict[bytes, RegisteredReading] = dict(registered or {})
+    for posted in _posted_readings(lfdi.lower(), readings, profile, power_direction):
+        if posted.mrid in plan:
+            continue
+        flow = (
+            posted.flow_direction
+            if profile is ReadingProfile.SIGNED_LOAD_CONVENTION
+            else _registration_flow(posted)
+        )
+        assert flow is not None
+        plan[posted.mrid] = RegisteredReading(
+            mrid=posted.mrid,
+            description=posted.description,
+            reading_type=_reading_type(posted, flow),
+            order=posted.order,
+        )
+    return dict(sorted(plan.items(), key=lambda item: item[1].order))
 
 
 def create_mup(
     lfdi: str,
-    monitoring_data: dict[str, Any],
+    readings: Sequence[Reading],
     post_rate: int,
-    overrides: dict[str, ReadingOverride] | None = None,
     *,
     profile: ReadingProfile = ReadingProfile.DEFAULT,
-    registered: frozenset[int] = frozenset(),
+    registered: Mapping[bytes, RegisteredReading] | None = None,
     power_direction: PowerDirection = PowerDirection.DEFAULT,
     role: DeviceRole = DeviceRole.DER,
     revenue_quality: bool = False,
     device_lfdi: str | None = None,
 ) -> MirrorUsagePoint:
-    """Create a MirrorUsagePoint with system + per-line MirrorMeterReadings.
+    """Create a MirrorUsagePoint registering a MirrorMeterReading per reading.
 
     Args:
-        lfdi: Device LFDI (will be normalized to lowercase internally,
-              stored as uppercase in deviceLFDI per spec). Every mRID is
-              derived from it, so two devices mirrored under one
-              ``device_lfdi`` never share an mRID.
-        monitoring_data: Raw monitoring values from connector.fetch_monitoring().
-              May include ``ACType`` (SunSpec 701 enum) and per-line
-              keys (``WL1``, ``VL2`` etc.); on a multi-phase device per-line
-              readings are appended for every line advertised, **including
-              L1** (single-phase emits none -- see ``_all_specs_for``).
-        post_rate: Posting rate in seconds
-        overrides: Optional per-key ReadingType overrides from the connector
-              (see ``BaseConnector.reading_overrides``); fields left unset keep
-              the standard ReadingType metadata.
+        lfdi: Device LFDI. Every mRID is derived from it, so two devices
+              mirrored under one ``device_lfdi`` never share an mRID.
+        readings: The connector's readings this cycle.
+        post_rate: Posting rate in seconds.
         profile: How the readings are encoded (see :class:`ReadingProfile`).
-        registered: Slots registered by an earlier POST of this MUP. Under
-              SIGNED_LOAD_CONVENTION their optional readings are kept even
-              when absent from ``monitoring_data``.
+        registered: What an earlier POST of this MUP registered (see
+              :func:`plan_registration`). Those readings are kept, with their
+              ReadingTypes unchanged, even when absent from ``readings``.
         power_direction: How W and var carry their direction under the
               DEFAULT profile (see :class:`PowerDirection`). Ignored under
               SIGNED_LOAD_CONVENTION, which signs every value.
@@ -1002,201 +742,188 @@ def create_mup(
         revenue_quality: Set isRevenueQuality in roleFlags.
         device_lfdi: LFDI of the EndDevice the MUP is posted under, put in
               deviceLFDI. Defaults to ``lfdi``.
-
-    Returns:
-        MirrorUsagePoint with system + per-line meter readings.
     """
     lfdi_norm = lfdi.lower()
-
-    # Create MUP mRID (index 0)
-    mup_mrid = _create_mrid(lfdi_norm, index=0)
-
-    signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
-    specs = (
-        _signed_load_specs_for(monitoring_data, registered)
-        if signed_load
-        else _default_specs_for(monitoring_data, power_direction, overrides)
+    plan = plan_registration(
+        lfdi_norm,
+        readings,
+        profile=profile,
+        power_direction=power_direction,
+        registered=registered,
     )
-    meter_readings: list[MirrorMeterReading1] = []
-    for mrid_index, spec in specs:
-        override = overrides.get(spec.key) if overrides else None
-        if signed_load:
-            flow_direction = FLOW_NOT_APPLICABLE
-        elif spec.flow_direction is not None:
-            flow_direction = spec.flow_direction
-        else:
-            flow_direction = _scaled_for(spec, monitoring_data).flow_direction
-        reading_type = _create_reading_type(_effective_spec(spec, override), flow_direction)
-        mmr_mrid = _create_mrid(lfdi_norm, index=mrid_index)
-        mmr = MirrorMeterReading1(
-            m_rid=mmr_mrid,
-            description=spec.description,
-            reading_type=reading_type,
+    meter_readings = [
+        MirrorMeterReading1(
+            m_rid=MRidtype(value=entry.mrid),
+            description=entry.description,
+            reading_type=entry.reading_type,
         )
-        meter_readings.append(mmr)
-
-    # deviceLFDI is stored as uppercase hex bytes per spec
-    device_lfdi_bytes = bytes.fromhex((device_lfdi or lfdi_norm).lower())
-
+        for entry in plan.values()
+    ]
     return MirrorUsagePoint(
-        m_rid=mup_mrid,
+        m_rid=_create_mrid(lfdi_norm, index=0),
         description=f"{_ROLE_DESCRIPTION[role]} {lfdi_norm[:8]}",
         version=VersionType(value=1),
         role_flags=RoleFlagsType(value=role_flags_for(role, revenue_quality).to_bytes(2, "big")),
         service_category_kind=ServiceKind(value=SERVICE_CATEGORY_ELECTRICITY),
         status=STATUS_ON,
-        device_lfdi=device_lfdi_bytes,
+        device_lfdi=bytes.fromhex((device_lfdi or lfdi_norm).lower()),
         mirror_meter_reading=meter_readings,
         post_rate=post_rate,
     )
 
 
+def _quality_flags(reading: Reading, *, stale: bool) -> bytes:
+    """Return qualityFlags (HexBinary16) for a reading.
+
+    The connector's flags, or ``valid`` when it gave none. ``stale`` is OR-ed on
+    top rather than replacing them: a connector reporting ``valid`` asserts its
+    read succeeded, and the client knowing the sample is older than anyone
+    asked for is a different claim. Staleness sets *questionable*, clears
+    *valid*, and leaves every other connector bit intact.
+    """
+    resolved = QUALITY_FLAGS_VALID if reading.quality_flags is None else reading.quality_flags
+    if stale:
+        resolved = (resolved | QUALITY_FLAGS_QUESTIONABLE) & ~QUALITY_FLAGS_VALID
+    return resolved.to_bytes(2, "big")
+
+
+def _default_value(posted: _Posted) -> int:
+    """Return a DEFAULT-profile value: a magnitude, or signed under Net."""
+    scaled = _scale_truncated(posted.reading.value, posted.multiplier)
+    flow = posted.flow_direction
+    if flow == FLOW_NET:
+        return scaled
+    if flow == FLOW_NORMAL and posted.reading.flow_direction is None:
+        return max(scaled, 0)
+    if flow == FLOW_REVERSE and posted.reading.flow_direction is None:
+        return max(-scaled, 0)
+    return abs(scaled)
+
+
+def _signed_load_value(posted: _Posted, var_by_line: Mapping[int, int], role: DeviceRole) -> int:
+    """Return a SIGNED_LOAD_CONVENTION value scaled from the effective multiplier.
+
+    W and var are signed by ``role``. A DER and a DER meter report them
+    positive for the DER's output (generation and reactive injection), so both
+    are negated. A site meter reports them positive for import, which is
+    already the load convention, so both are kept. PF takes the sign of the var
+    posted on the same line -- negative on reactive injection -- and stays an
+    unsigned magnitude when that var is missing. A direction-specific reading
+    and everything else is a magnitude.
+    """
+    scaled = _scale_half_away(posted.reading.value, posted.multiplier)
+    if posted.reading.flow_direction is not None:
+        return abs(scaled)
+    if posted.uom in _DIRECTED_UOMS:
+        return scaled if role is DeviceRole.SITE_METER else -scaled
+    if posted.uom == _UOM_PF:
+        var = var_by_line.get(posted.line)
+        return -abs(scaled) if var is not None and var < 0 else abs(scaled)
+    return abs(scaled)
+
+
 def create_meter_reading_list(
     lfdi: str,
-    monitoring_data: dict[str, Any],
+    readings: Sequence[Reading],
     timestamp: int | None = None,
-    overrides: dict[str, ReadingOverride] | None = None,
     *,
     post_rate: int = 300,
     next_update_time: int | None = None,
     stale: bool = False,
     profile: ReadingProfile = ReadingProfile.DEFAULT,
-    registered: frozenset[int] | None = None,
+    registered: Mapping[bytes, RegisteredReading] | None = None,
     power_direction: PowerDirection = PowerDirection.DEFAULT,
     role: DeviceRole = DeviceRole.DER,
 ) -> MirrorMeterReadingList:
-    """Create a MirrorMeterReadingList with current readings.
+    """Create a MirrorMeterReadingList with this cycle's readings.
 
-    This is used when POSTing updated readings to an existing MUP. We post a
-    reading only for quantities the connector actually supplied this cycle: a
-    spec whose key is absent or ``None`` in ``monitoring_data`` is omitted
-    rather than zero-filled, so an un-measured quantity doesn't show up as a
-    misleading ``0`` (e.g. ``0 V``) on the server.
+    Used when POSTing readings to an existing MUP. Only the readings the
+    connector supplied are posted, so an unmeasured quantity never shows up as
+    a misleading ``0``. Posting a subset of the registered MirrorMeterReadings
+    is valid per IEEE 2030.5 §10.11.3, and each mRID is fixed by the reading's
+    identity, so a quantity that resumes reporting matches its registered
+    ReadingType (Rule h.1). The ReadingType itself is not included (Rule n).
 
-    ``overrides`` (see ``BaseConnector.reading_overrides``) supplies a per-key
-    ``qualityFlags`` default; unset keys use the standard ``valid`` flag.
-
-    ``timestamp`` is the instant the values were *acquired*, which since the
-    poll planner is no longer the instant they are posted. It becomes
-    ``timePeriod.start`` and ``lastUpdateTime``; per METER.001 the interval runs
-    forward from ``start``, so the existing duration semantics are unchanged and
-    only the clock supplying ``start`` differs.
-
-    ``next_update_time`` is when this MirrorMeterReading will next be *posted*,
-    not when the device will next be read, letting a server detect a stalled
-    feed without waiting out the 72-hour MUP timeout. Post cadence rather than
-    acquisition cadence because the two differ once the poll planner owns
-    acquisition, and only the former is reliably knowable: a device in backoff
-    has no predictable next read. ``None`` when the caller cannot say.
+    ``timestamp`` is the instant the values were *acquired*. It becomes
+    ``timePeriod.start`` and ``lastUpdateTime``. ``next_update_time`` is when
+    this MirrorMeterReading will next be *posted*, so a server can detect a
+    stalled feed without waiting out the 72-hour MUP timeout; ``None`` when the
+    caller cannot say.
 
     ``stale`` marks the sample older than its consumers asked for, or from an
-    unreachable device. It ORs the *questionable* bit onto whatever quality the
-    connector reported rather than replacing it, so a connector saying ``valid``
-    cannot mask staleness the client knows about.
+    unreachable device (see :func:`_quality_flags`).
 
-    This is a *subset* of what ``create_mup`` registered -- ``create_mup`` always
-    registers the full ReadingType set for the device, so every omitted reading's
-    ReadingType is still registered. Posting a subset of registered
-    MirrorMeterReadings is valid per IEEE 2030.5 §10.11.3 (MirrorMeterReadings are
-    optional in the MUP and updates), and mRIDs are deterministic from
-    ``(lfdi, slot_index, pen)`` so a quantity that resumes reporting later matches
-    its registered ReadingType (Rule h.1).
+    ``registered``, when given, limits the list to readings the MUP has
+    registered, so a reading whose registration has not succeeded yet is held
+    back rather than met with Rule h.3. ``profile``, ``power_direction`` and
+    ``role`` must be the ones the MUP was created with.
 
-    Under ``SIGNED_LOAD_CONVENTION`` every reading is an instantaneous sample, so
-    its duration is 0 whatever the dataQualifier, and its value is scaled from the
-    effective multiplier (see ``_signed_load_value``). ``role`` must be the
-    device's role: it decides whether W and var are negated (see
-    :class:`ReadingProfile`). ``registered``, when given, limits it to slots the
-    MUP has registered, so a reading whose registration has not succeeded yet is
-    held back rather than met with Rule h.3.
-
-    ``power_direction`` must be the one the MUP was created with; it chooses
-    the W and var readings posted and how each carries its sign.
+    An interval reading (Average, Maximum, Minimum) covers a window that
+    CSIP-AUS requires to match the MUP postRate, so its duration is
+    ``post_rate``; an instantaneous reading is a point in time, duration 0.
+    Under SIGNED_LOAD_CONVENTION every reading is an instantaneous sample.
     """
     if timestamp is None:
         timestamp = int(time.time())
 
     lfdi_norm = lfdi.lower()
-
     signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
-    specs = (
-        _signed_load_specs_for(monitoring_data, frozenset())
-        if signed_load
-        else _default_specs_for(monitoring_data, power_direction, overrides)
-    )
-    posted: dict[str, int] = {}
-    meter_readings: list[MirrorMeterReading1] = []
-    for mrid_index, spec in specs:
-        if monitoring_data.get(spec.key) is None:
-            continue
-        if signed_load and registered is not None and mrid_index not in registered:
-            continue
-        mmr_mrid = _create_mrid(lfdi_norm, index=mrid_index)
-        override = overrides.get(spec.key) if overrides else None
-        # Optional per-cycle quality the connector attached to this sample.
-        per_cycle_quality = monitoring_data.get(f"{spec.key}__quality")
+    posted_list = _posted_readings(lfdi_norm, readings, profile, power_direction)
 
+    var_by_line: dict[int, int] = {}
+    if signed_load:
+        for posted in posted_list:
+            if posted.uom == _UOM_VAR and posted.reading.flow_direction is None:
+                var_by_line.setdefault(posted.line, _signed_load_value(posted, {}, role))
+
+    meter_readings: list[MirrorMeterReading1] = []
+    for posted in posted_list:
+        if registered is not None and posted.mrid not in registered:
+            continue
         if signed_load:
-            # Var precedes PF in slot order, system and per-line, so the sign
-            # PF takes from it is already in `posted`.
-            value = _signed_load_value(
-                _effective_spec(spec, override), monitoring_data, posted, role=role
-            )
-            posted[spec.key] = value
+            value = _signed_load_value(posted, var_by_line, role)
             duration = 0
         else:
-            # An energy total also has a fixed flowDirection, but its value is
-            # already the magnitude for that direction.
-            value = (
-                _directed_value(spec, monitoring_data)
-                if spec.flow_direction is not None and spec.key in _DIRECTED_KEYS
-                else _scaled_for(spec, monitoring_data).value
-            )
-            # timePeriod duration: an interval reading (Average/Maximum/Minimum)
-            # covers a window, and CSIP-AUS requires that window to match the MUP
-            # postRate, so its duration is post_rate; an instantaneous reading is a
-            # point in time -> duration 0. Use the effective dataQualifier (a
-            # connector override can change it, e.g. print_demo reports W as
-            # Maximum). getattr guards against a buggy in-process connector
-            # returning a non-ReadingOverride value (the manager only checks the
-            # top-level map).
-            override_dq = (
-                getattr(override, "data_qualifier", None) if override is not None else None
-            )
-            eff_dq = override_dq if override_dq is not None else spec.data_qualifier
-            duration = 0 if eff_dq == _DATA_QUALIFIER_INSTANTANEOUS else post_rate
+            value = _default_value(posted)
+            duration = 0 if posted.data_qualifier == _DATA_QUALIFIER_INSTANTANEOUS else post_rate
         reading = Reading1(
-            quality_flags=_resolve_quality_flags(override, per_cycle_quality, stale=stale),
-            time_period=DateTimeInterval(
-                duration=duration,
-                start=TimeType(value=timestamp),
-            ),
+            quality_flags=_quality_flags(posted.reading, stale=stale),
+            time_period=DateTimeInterval(duration=duration, start=TimeType(value=timestamp)),
             value=value,
         )
-
-        # IEEE 10.11.3 rule n): ReadingType SHALL NOT be included in
-        # subsequent POSTs -- only the initial MUP POST includes it.
-        mmr = MirrorMeterReading1(
-            m_rid=mmr_mrid,
-            description=spec.description,
-            reading=reading,
-            # IEEE 2030.5 Annex B.17.1. Deliberately asymmetric, because the
-            # two answer different questions: lastUpdateTime is when the data
-            # behind this reading was refreshed (which the server cannot
-            # otherwise derive), nextUpdateTime is when the mirror will next be
-            # written (which is what makes a stalled feed detectable). Neither
-            # is governed by a requirement in the conformance matrix; both are
-            # optional and were previously unset, tracked as an IEEE Gap in
-            # docs/spec/07-telemetry.md.
-            last_update_time=TimeType(value=timestamp),
-            next_update_time=(
-                None if next_update_time is None else TimeType(value=next_update_time)
-            ),
+        meter_readings.append(
+            MirrorMeterReading1(
+                m_rid=MRidtype(value=posted.mrid),
+                description=posted.description,
+                reading=reading,
+                # IEEE 2030.5 Annex B.17.1. lastUpdateTime is when the data
+                # behind this reading was refreshed, nextUpdateTime is when the
+                # mirror will next be written.
+                last_update_time=TimeType(value=timestamp),
+                next_update_time=(
+                    None if next_update_time is None else TimeType(value=next_update_time)
+                ),
+            )
         )
-        meter_readings.append(mmr)
 
     return MirrorMeterReadingList(
         mirror_meter_reading=meter_readings,
         all=len(meter_readings),
         results=len(meter_readings),
     )
+
+
+__all__ = [
+    "DEFAULT_PEN",
+    "DeviceRole",
+    "PowerDirection",
+    "ReadingProfile",
+    "RegisteredReading",
+    "compute_sfdi",
+    "create_meter_reading_list",
+    "create_mup",
+    "mup_mrid",
+    "plan_registration",
+    "role_flags_for",
+    "valid_readings",
+]
