@@ -148,8 +148,24 @@ and `Var` is positive for reactive power injection (over-excited) and negative
 for absorption. A meter's connector reports them in its role's frame instead,
 as described above. The `SIGNED_LOAD_CONVENTION` reading profile negates both
 for a DER and a DER meter and posts a site meter's as reported, since import
-positive is already the load convention. A connector that reports another
+positive is already the load convention. The `SIGNED_AS_REPORTED` profile posts
+both as the connector reports them. A connector that reports another
 convention posts the wrong sign.
+
+A connector whose readings are fixed for the device's life can say so with
+`declared_readings()`, returning the monitoring keys it provides:
+
+```python
+def declared_readings(self) -> frozenset[str] | None:
+    return frozenset({"W"})
+```
+
+Under the `SIGNED_AS_REPORTED` profile the MirrorUsagePoint then registers
+exactly those readings from the first cycle, also one with no values, and is
+never re-posted for a reading that appears later. A key `fetch_monitoring`
+returns without declaring it is not posted, and is logged once. Without a
+declaration (the default, `None`) the standard set is registered. The other
+profiles ignore it.
 
 Point a device at it by import path — no registration needed:
 

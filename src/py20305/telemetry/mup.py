@@ -19,6 +19,9 @@ MeterReading's ReadingType once it is created:
   (``PowerDirection.SPLIT``).
 - 61 and 62: energy delivered in the forward and the reverse direction
   (``WhFwd``, ``WhRev``), DEFAULT profile only.
+- 71-77 and 80-97: the system and per-line readings under
+  ``ReadingProfile.SIGNED_AS_REPORTED``, whose ReadingTypes carry no
+  flowDirection (the DEFAULT slot plus 70).
 """
 
 from __future__ import annotations
@@ -385,10 +388,18 @@ class ReadingProfile(StrEnum):
     load convention counts as export, so both are negated. A site meter
     reports them positive for import, from the grid to the premises, which is
     already the load convention, so both are posted as reported.
+
+    ``SIGNED_AS_REPORTED`` posts W, var and PF with the sign the connector
+    reports, whatever the device's role -- for a DER, W positive while it
+    delivers and negative while it absorbs (a battery charging) -- and omits flowDirection
+    from every ReadingType (optional, IEEE 2030.5 ``ReadingType``). Every other
+    field keeps its DEFAULT value. It registers no energy totals, which differ
+    only by flowDirection.
     """
 
     DEFAULT = "default"
     SIGNED_LOAD_CONVENTION = "signed_load_convention"
+    SIGNED_AS_REPORTED = "signed_as_reported"
 
 
 class PowerDirection(StrEnum):
@@ -565,6 +576,10 @@ _TOTAL_KEYS = frozenset({"W", "Var", "VA", "A", "WHAvail"})
 _PER_LINE_KEY = re.compile(r"^(W|Var|V|PF|VA|A)L[1-3]$")
 #: The quantities whose sign the load convention sets from the device role.
 _POWER_QUANTITIES = frozenset({"W", "Var"})
+#: The quantities SIGNED_AS_REPORTED posts with the connector's sign. Their
+#: scaling puts a negative value's sign in flowDirection, which the profile
+#: omits, so the sign is moved back onto the value.
+_AS_REPORTED_SIGNED_QUANTITIES = frozenset({"W", "Var", "PF"})
 #: Roles whose connector reports W and var import positive, which is already
 #: the load convention. Every other role reports them positive for a DER's
 #: output, so their values are negated.
@@ -632,18 +647,87 @@ def registration_slots(
     profile: ReadingProfile,
     registered: frozenset[int] = frozenset(),
     power_direction: PowerDirection = PowerDirection.DEFAULT,
+    declared: frozenset[str] | None = None,
 ) -> frozenset[int]:
     """The mRID slots a MUP built now would register.
 
     Under SIGNED_LOAD_CONVENTION the set grows when an optional reading first
     appears, which is the signal to re-POST the MUP so the new mRID arrives
-    with its ReadingType (Rule h.2) instead of meeting Rule h.3.
+    with its ReadingType (Rule h.2) instead of meeting Rule h.3. Under
+    SIGNED_AS_REPORTED ``declared`` fixes it (see :func:`create_mup`).
     """
-    if profile is ReadingProfile.SIGNED_LOAD_CONVENTION:
-        specs = _signed_load_specs_for(monitoring_data, registered)
-    else:
-        specs = _default_specs_for(monitoring_data, power_direction)
+    specs = _specs_for(profile, monitoring_data, registered, power_direction, declared)
     return frozenset(index for index, _ in specs)
+
+
+#: SIGNED_AS_REPORTED's slots are the DEFAULT slots plus this offset (71-77
+#: system, 80-97 per line). Its ReadingTypes carry no flowDirection and every
+#: DEFAULT one does, so sharing a slot would change a registered ReadingType.
+_AS_REPORTED_SLOT_OFFSET = 70
+
+#: Every reading a connector can declare under SIGNED_AS_REPORTED, by monitoring
+#: key: the system readings and all three lines' per-line readings. A declared
+#: per-line key is registered without ACType, since the declaration says it.
+_DECLARABLE: dict[str, tuple[int, ReadingTypeSpec]] = {
+    **{spec.key: (index, spec) for index, spec in enumerate(READING_TYPE_SPECS, start=1)},
+    **{
+        spec.key: (_per_line_index(line, slot), spec)
+        for line in (1, 2, 3)
+        for slot, spec in enumerate(_per_line_specs(line))
+    },
+}
+
+
+def undeclared_readings(
+    monitoring_data: dict[str, Any], declared: frozenset[str]
+) -> frozenset[str]:
+    """Readings in ``monitoring_data`` that ``declared`` leaves out, so are not posted."""
+    return frozenset(
+        key
+        for key, value in monitoring_data.items()
+        if key in _DECLARABLE and value is not None and key not in declared
+    )
+
+
+def _specs_for(
+    profile: ReadingProfile,
+    monitoring_data: dict[str, Any],
+    registered: frozenset[int],
+    power_direction: PowerDirection,
+    declared: frozenset[str] | None = None,
+) -> list[tuple[int, ReadingTypeSpec]]:
+    """``(mrid_index, spec)`` for a device under ``profile``."""
+    if profile is ReadingProfile.SIGNED_LOAD_CONVENTION:
+        return _signed_load_specs_for(monitoring_data, registered)
+    if profile is ReadingProfile.SIGNED_AS_REPORTED:
+        # No energy totals and no PowerDirection modes: both rely on a fixed
+        # flowDirection, which this profile omits.
+        if declared is None:
+            specs = _all_specs_for(monitoring_data)
+        else:
+            specs = sorted(_DECLARABLE[key] for key in declared if key in _DECLARABLE)
+        return [(slot + _AS_REPORTED_SLOT_OFFSET, spec) for slot, spec in specs]
+    return _default_specs_for(monitoring_data, power_direction)
+
+
+def _as_reported_value(
+    spec: ReadingTypeSpec, effective: ReadingTypeSpec, monitoring_data: dict[str, Any]
+) -> int:
+    """A SIGNED_AS_REPORTED value: W, var and PF keep the connector's sign.
+
+    ``effective`` is ``spec`` after the connector's override. When the override
+    changes the multiplier, the value is scaled from it, so the value and the
+    registered powerOfTenMultiplier agree; otherwise the spec's own scaling is
+    kept.
+    """
+    signed = _quantity(spec.key) in _AS_REPORTED_SIGNED_QUANTITIES
+    if effective.multiplier != spec.multiplier:
+        rescaled = _scale_half_away(monitoring_data[spec.key], effective.multiplier)
+        return rescaled if signed else abs(rescaled)
+    scaled = _scaled_for(spec, monitoring_data)
+    if signed and scaled.flow_direction == FLOW_REVERSE:
+        return -scaled.value
+    return scaled.value
 
 
 def _scale_half_away(raw: float, multiplier: int) -> int:
@@ -890,13 +974,15 @@ def _resolve_quality_flags(
     return resolved.to_bytes(2, "big")
 
 
-def _create_reading_type(spec: ReadingTypeSpec, flow_direction: int) -> ReadingType1:
-    """Create a ReadingType from a spec with given flow direction."""
+def _create_reading_type(spec: ReadingTypeSpec, flow_direction: int | None) -> ReadingType1:
+    """Create a ReadingType from a spec with given flow direction, or none."""
     return ReadingType1(
         accumulation_behaviour=AccumulationBehaviourType(value=spec.accumulation_behaviour),
         commodity=CommodityType(value=spec.commodity),
         data_qualifier=DataQualifierType(value=spec.data_qualifier),
-        flow_direction=FlowDirectionType(value=flow_direction),
+        flow_direction=(
+            FlowDirectionType(value=flow_direction) if flow_direction is not None else None
+        ),
         kind=KindType(value=spec.kind),
         power_of_ten_multiplier=PowerOfTenMultiplierType(value=spec.multiplier),
         uom=UomType(value=spec.uom),
@@ -927,6 +1013,7 @@ def create_mup(
     role: DeviceRole = DeviceRole.DER,
     revenue_quality: bool = False,
     device_lfdi: str | None = None,
+    declared: frozenset[str] | None = None,
 ) -> MirrorUsagePoint:
     """Create a MirrorUsagePoint with system + per-line MirrorMeterReadings.
 
@@ -956,6 +1043,10 @@ def create_mup(
         revenue_quality: Set isRevenueQuality in roleFlags.
         device_lfdi: LFDI of the EndDevice the MUP is posted under, put in
               deviceLFDI. Defaults to ``lfdi``.
+        declared: The connector's ``declared_readings()``. Under
+              SIGNED_AS_REPORTED the MUP registers exactly these readings,
+              whatever ``monitoring_data`` holds; None registers the standard
+              set. Ignored under the other profiles.
 
     Returns:
         MirrorUsagePoint with system + per-line meter readings.
@@ -966,16 +1057,16 @@ def create_mup(
     mup_mrid = _create_mrid(lfdi_norm, index=0)
 
     signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
-    specs = (
-        _signed_load_specs_for(monitoring_data, registered)
-        if signed_load
-        else _default_specs_for(monitoring_data, power_direction)
-    )
+    as_reported = profile is ReadingProfile.SIGNED_AS_REPORTED
+    specs = _specs_for(profile, monitoring_data, registered, power_direction, declared)
     meter_readings: list[MirrorMeterReading1] = []
     for mrid_index, spec in specs:
         override = overrides.get(spec.key) if overrides else None
+        flow_direction: int | None
         if signed_load:
             flow_direction = FLOW_NOT_APPLICABLE
+        elif as_reported:
+            flow_direction = None
         elif spec.flow_direction is not None:
             flow_direction = spec.flow_direction
         else:
@@ -1018,6 +1109,7 @@ def create_meter_reading_list(
     registered: frozenset[int] | None = None,
     power_direction: PowerDirection = PowerDirection.DEFAULT,
     role: DeviceRole = DeviceRole.DER,
+    declared: frozenset[str] | None = None,
 ) -> MirrorMeterReadingList:
     """Create a MirrorMeterReadingList with current readings.
 
@@ -1065,7 +1157,9 @@ def create_meter_reading_list(
     held back rather than met with Rule h.3.
 
     ``power_direction`` must be the one the MUP was created with; it chooses
-    the W and var readings posted and how each carries its sign.
+    the W and var readings posted and how each carries its sign. ``declared``
+    must likewise be the declaration the MUP registered: under
+    SIGNED_AS_REPORTED only declared readings are posted.
     """
     if timestamp is None:
         timestamp = int(time.time())
@@ -1073,11 +1167,8 @@ def create_meter_reading_list(
     lfdi_norm = lfdi.lower()
 
     signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
-    specs = (
-        _signed_load_specs_for(monitoring_data, frozenset())
-        if signed_load
-        else _default_specs_for(monitoring_data, power_direction)
-    )
+    as_reported = profile is ReadingProfile.SIGNED_AS_REPORTED
+    specs = _specs_for(profile, monitoring_data, frozenset(), power_direction, declared)
     posted: dict[str, int] = {}
     meter_readings: list[MirrorMeterReading1] = []
     for mrid_index, spec in specs:
@@ -1101,11 +1192,12 @@ def create_meter_reading_list(
         else:
             # An energy total also has a fixed flowDirection, but its value is
             # already the magnitude for that direction.
-            value = (
-                _directed_value(spec, monitoring_data)
-                if spec.flow_direction is not None and spec.key in _DIRECTED_KEYS
-                else _scaled_for(spec, monitoring_data).value
-            )
+            if as_reported:
+                value = _as_reported_value(spec, _effective_spec(spec, override), monitoring_data)
+            elif spec.flow_direction is not None and spec.key in _DIRECTED_KEYS:
+                value = _directed_value(spec, monitoring_data)
+            else:
+                value = _scaled_for(spec, monitoring_data).value
             # timePeriod duration: an interval reading (Average/Maximum/Minimum)
             # covers a window, and CSIP-AUS requires that window to match the MUP
             # postRate, so its duration is post_rate; an instantaneous reading is a

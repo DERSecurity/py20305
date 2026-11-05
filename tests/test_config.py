@@ -227,6 +227,22 @@ class TestTelemetryDefaults:
 
         assert telemetry.reading_profile == "signed_load_convention"
 
+    def test_the_signed_as_reported_profile_is_accepted(self) -> None:
+        data = {**MINIMAL, "telemetry": {"reading_profile": "signed_as_reported"}}
+
+        telemetry = ClientConfig.model_validate(data).telemetry
+
+        assert telemetry.reading_profile == "signed_as_reported"
+
+    def test_power_direction_is_refused_with_signed_as_reported(self) -> None:
+        data = {
+            **MINIMAL,
+            "telemetry": {"reading_profile": "signed_as_reported", "power_direction": "net"},
+        }
+
+        with pytest.raises(ValidationError, match="power_direction"):
+            ClientConfig.model_validate(data)
+
     def test_an_unknown_reading_profile_is_rejected(self) -> None:
         with pytest.raises(ValidationError):
             ClientConfig.model_validate({**MINIMAL, "telemetry": {"reading_profile": "other"}})

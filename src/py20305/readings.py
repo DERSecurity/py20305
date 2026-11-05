@@ -76,6 +76,37 @@ def typed_overrides(overrides: dict[str, Any] | None) -> dict[str, ReadingOverri
     return {k: v for k, v in overrides.items() if isinstance(v, ReadingOverride)}
 
 
+def typed_declaration(declared: Any) -> frozenset[str] | None:
+    """A connector's ``declared_readings()`` as a set of keys, or None if malformed.
+
+    For the same reason as :func:`typed_overrides`: the value comes from
+    third-party code, and a declaration narrows what the MirrorUsagePoint
+    registers, so anything other than a collection of strings is treated as no
+    declaration rather than guessed at.
+    """
+    if not isinstance(declared, set | frozenset | list | tuple):
+        return None
+    if not all(isinstance(key, str) for key in declared):
+        return None
+    return frozenset(declared)
+
+
+def declared_readings_of(connector: Any) -> frozenset[str] | None:
+    """``connector.declared_readings()``, typed; None when absent or broken.
+
+    Optional on the connector contract, so a connector that predates it, or does
+    not subclass BaseConnector, declares nothing. A declaration that raises is
+    no declaration: it must not turn a good read of the values into a failed one.
+    """
+    declare = getattr(connector, "declared_readings", None)
+    if not callable(declare):
+        return None
+    try:
+        return typed_declaration(declare())
+    except Exception:
+        return None
+
+
 class Quality(Enum):
     """The store's own health model for a value.
 
@@ -145,6 +176,10 @@ class DeviceSnapshot:
     #: identity -- the metering cycle and the management API describe the same
     #: failure differently, and the store has no business choosing between them.
     error: Exception | None = None
+    #: The connector's ``declared_readings()``, or None when it declares none.
+    #: Device-level, like :attr:`reading_overrides`, and kept through a failed
+    #: acquisition because it describes the device rather than a sample.
+    declared_readings: frozenset[str] | None = None
 
 
 def with_freshness(snapshot: DeviceSnapshot, max_age: float | None, now: float) -> DeviceSnapshot:
@@ -183,6 +218,7 @@ def with_freshness(snapshot: DeviceSnapshot, max_age: float | None, now: float) 
         last_success=snapshot.last_success,
         quality=Quality.STALE,
         error=snapshot.error,
+        declared_readings=snapshot.declared_readings,
     )
 
 
@@ -294,6 +330,7 @@ class DirectConnectorSource:
             # there is no reading to salvage from it.
             raw_overrides = connector.reading_overrides()
             overrides = typed_overrides(raw_overrides if isinstance(raw_overrides, dict) else None)
+            declared = declared_readings_of(connector)
             if not isinstance(values, dict):
                 raise TypeError(f"fetch_monitoring returned {type(values).__name__}, expected dict")
         except Exception as exc:
@@ -327,6 +364,7 @@ class DirectConnectorSource:
                 last_success=previous.last_success if previous else None,
                 quality=Quality.COMM_LOST,
                 error=exc,
+                declared_readings=previous.declared_readings if previous else None,
             )
 
         measured, protocol_quality = split_quality(values)
@@ -346,6 +384,7 @@ class DirectConnectorSource:
             last_success=started,
             quality=Quality.GOOD,
             error=None,
+            declared_readings=declared,
         )
         self._last[device] = snapshot
         # After the snapshot, not before: telemetry reports a read that

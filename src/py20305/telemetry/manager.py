@@ -53,6 +53,7 @@ from py20305.telemetry.mup import (
     create_mup,
     mup_mrid,
     registration_slots,
+    undeclared_readings,
 )
 from py20305.xml.serialization import to_xml
 
@@ -112,6 +113,13 @@ class DeviceTelemetryState:
     #: retried until the registration changes again or the process restarts;
     #: a 5xx or a connection error is retried every cycle.
     rejected_registration: tuple[frozenset[int], int | None] | None = None
+    #: The connector's declared readings the last successful MUP POST was built
+    #: from (SIGNED_AS_REPORTED). Readings outside it are not posted, since the
+    #: MUP holds no ReadingType for them (Rule h.3).
+    registered_declaration: frozenset[str] | None = None
+    #: Returned-but-undeclared readings last warned about, so the warning is
+    #: repeated only when that set changes.
+    warned_undeclared: frozenset[str] = frozenset()
     post_rate: int = 300
     #: postRate read back from the created MUP (B.17.1). It outranks the
     #: ``post_rate`` a later ``start_metering`` passes in, since the MUP is
@@ -318,6 +326,8 @@ class TelemetryManager:
                 new_state.mup_posted = existing.mup_posted
                 new_state.mup_href = existing.mup_href
                 new_state.registered_slots = existing.registered_slots
+                new_state.registered_declaration = existing.registered_declaration
+                new_state.warned_undeclared = existing.warned_undeclared
                 new_state.registered_ac_type = existing.registered_ac_type
                 new_state.rejected_registration = existing.rejected_registration
                 if existing.server_post_rate is not None:
@@ -483,8 +493,9 @@ class TelemetryManager:
 
         # Stage 1: MUP creation or meter readings
         if not state.mup_posted:
-            await self._post_mup(state, monitoring, overrides)
+            await self._post_mup(state, monitoring, overrides, snapshot.declared_readings)
         else:
+            self._warn_undeclared(state, monitoring)
             if self._registration_grew(state, monitoring):
                 # A reading first supplied after the MUP was posted needs its
                 # ReadingType registered before readings for it are posted
@@ -593,6 +604,7 @@ class TelemetryManager:
         state: DeviceTelemetryState,
         monitoring_data: dict[str, Any],
         overrides: dict[str, ReadingOverride] | None = None,
+        declared: frozenset[str] | None = None,
     ) -> None:
         """POST MUP to server, track location and server-preferred postRate.
 
@@ -604,7 +616,11 @@ class TelemetryManager:
         posting rate. We read back the created MUP to honour the server's rate.
         """
         slots = registration_slots(
-            monitoring_data, self._reading_profile, state.registered_slots, self._power_direction
+            monitoring_data,
+            self._reading_profile,
+            state.registered_slots,
+            self._power_direction,
+            declared,
         )
         mup = create_mup(
             state.lfdi,
@@ -617,6 +633,7 @@ class TelemetryManager:
             role=state.role,
             revenue_quality=state.revenue_quality,
             device_lfdi=state.posted_under,
+            declared=declared,
         )
         body = to_xml(mup, server_2018_compat=self._client.server_2018_compat)
 
@@ -624,6 +641,7 @@ class TelemetryManager:
             location = await self._client.post_bytes(self._mup_list_href_source(), body)
             state.mup_posted = True
             state.registered_slots = slots
+            state.registered_declaration = declared
             state.registered_ac_type = ac_type_of(monitoring_data)
             state.rejected_registration = None
 
@@ -735,6 +753,28 @@ class TelemetryManager:
             return False
         return ac_type != state.registered_ac_type or slots != state.registered_slots
 
+    def _warn_undeclared(
+        self, state: DeviceTelemetryState, monitoring_data: dict[str, Any]
+    ) -> None:
+        """Warn when the connector returns readings it did not declare.
+
+        They are not posted -- the MUP holds no ReadingType for them -- which a
+        connector author would otherwise discover only from a missing series.
+        Repeated only when the set changes, not every cycle.
+        """
+        declared = state.registered_declaration
+        if self._reading_profile is not ReadingProfile.SIGNED_AS_REPORTED or declared is None:
+            return
+        undeclared = undeclared_readings(monitoring_data, declared)
+        if undeclared and undeclared != state.warned_undeclared:
+            logger.warning(
+                "Readings %s for %s are not declared by its connector and are not posted; "
+                "add them to declared_readings() to register them",
+                ", ".join(sorted(undeclared)),
+                state.lfdi[:8],
+            )
+        state.warned_undeclared = undeclared
+
     def _with_registered_ac_type(
         self, state: DeviceTelemetryState, monitoring_data: dict[str, Any]
     ) -> dict[str, Any]:
@@ -834,7 +874,17 @@ class TelemetryManager:
             registered=state.registered_slots,
             power_direction=self._power_direction,
             role=state.role,
+            declared=state.registered_declaration,
         )
+        if (
+            self._reading_profile is ReadingProfile.SIGNED_AS_REPORTED
+            and not readings.mirror_meter_reading
+        ):
+            # A device with nothing to report this cycle (an EV charger with no
+            # vehicle plugged in, say) sends nothing rather than an empty list
+            # (CSIP G27: data a DER cannot provide SHALL not be sent).
+            logger.debug("No readings for %s this cycle, skipping POST", state.lfdi[:8])
+            return
         body = to_xml(readings, server_2018_compat=self._client.server_2018_compat)
 
         try:

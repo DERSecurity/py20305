@@ -82,6 +82,20 @@ schedule and reported to the server:
 
 A device configured as a meter reports its readings only; see [Meters](#meters).
 
+`der_resource_put_policy: on_change` replaces the two DER resource rates. It
+PUTs DERCapability and DERSettings once each, at startup, and then only when
+the content changes. A changed DERCapability also resends DERSettings. A
+rediscovery does not resend unchanged content, but a reconnect after a
+sustained loss of contact resends both, since the server may have lost them
+(CSIP G29). The default, `periodic`, keeps the rates in the table.
+
+With `subscription.enabled`, `subscription.renewal_method: put` renews each
+subscription with a PUT to its own href (IEEE 2030.5 Annex A.2.7.2), and posts
+a new one to the list when the server answers 404 or 405; the default, `post`,
+re-POSTs it to the list. `subscription.backstop_poll_seconds` (default 900)
+sets how often a subscribed resource is still polled, in case notifications
+stop; it is never faster than the resource's pollRate.
+
 The server has the final say on the posting rate: an `EndDevice.postRate` above
 zero replaces `post_rate_seconds` for that device, which is what IEEE 2030.5
 specifies. A server exposing no MirrorUsagePointList stops the readings only —
@@ -99,6 +113,17 @@ meter, export is the DER's output, so generation posts negative W. For a site
 meter, export is power from the premises to the grid: import posts positive
 W and var, and export negative (see [Meters](#meters)).
 
+`signed_as_reported` posts W, var and power factor with the sign the connector
+reports, for every role: for a DER, positive while it delivers power and negative while it
+absorbs it, so a charging battery posts negative W. It omits flowDirection from
+every ReadingType, keeps the `default` values of every other field, and
+registers no energy totals, since `WhFwd` and `WhRev` differ only by
+flowDirection. A cycle with no reading to post, such as a charger with no
+vehicle plugged in, sends no readings POST at all; the MirrorUsagePoint stays.
+A connector that declares its readings (see
+[Connectors](connectors.md)) gets a MirrorUsagePoint of exactly those, posted
+once.
+
 `power_direction` sets how real and reactive power carry their direction under
 the `default` profile. IEEE 2030.5 does not let a MeterReading's ReadingType
 change once it is created, so the choice matters for a device whose power
@@ -113,8 +138,8 @@ changes direction, such as a battery:
 `net` and `split` post their readings under new mRIDs, so switching between
 modes never posts a value under a ReadingType registered for another mode. They
 apply to total and per-line W and var. `power_direction` is refused with
-`signed_load_convention`, which already signs every value. Like the profile, it
-is read at startup.
+`signed_load_convention` and `signed_as_reported`, which already sign every
+value. Like the profile, it is read at startup.
 
 Rediscovery re-reads every path. A server that moves its resources, or that
 brings the MirrorUsagePoint function set online only after the client
