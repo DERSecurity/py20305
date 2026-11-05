@@ -77,7 +77,14 @@ def _end_device(lfdi: str, *, post_rate: int | None = None) -> EndDeviceState:
     )
 
 
-def _client(tmp_path: Path, *, mup: str | None = "/mup", devices=(LFDI_A,), post_rate=None):
+def _client(
+    tmp_path: Path,
+    *,
+    mup: str | None = "/mup",
+    devices=(LFDI_A,),
+    post_rate=None,
+    telemetry: dict[str, object] | None = None,
+):
     from py20305.cli import build_client
     from py20305.config import ClientConfig
 
@@ -87,7 +94,7 @@ def _client(tmp_path: Path, *, mup: str | None = "/mup", devices=(LFDI_A,), post
             "server": {"url": "https://server.example.com:8443"},
             "tls": {"client_cert": str(cert), "client_key": str(cert), "ca_cert": str(cert)},
             "devices": [{"type": "print_demo", "lfdi": lfdi} for lfdi in devices],
-            "telemetry": {"enabled": True, "post_rate_seconds": 60},
+            "telemetry": {"enabled": True, "post_rate_seconds": 60, **(telemetry or {})},
         }
     )
     client, _ = build_client(config)
@@ -541,6 +548,64 @@ class TestRunnerWiring:
             assert client._on_rediscovered is not None
         finally:
             await coordinator.shutdown()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("policy", ["periodic", "on_change"])
+    async def test_the_configured_der_resource_put_policy_is_used(self, tmp_path, policy):
+        from py20305.cli import _start_telemetry
+
+        client, config = _client(tmp_path, telemetry={"der_resource_put_policy": policy})
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None
+        try:
+            assert coordinator.der_resources is not None
+            assert coordinator.der_resources._put_policy == policy
+        finally:
+            await coordinator.shutdown()
+
+
+class TestReconnectUnderOnChange:
+    """After a sustained outage the server may have lost DERCapability and
+    DERSettings, so on_change resends both; periodic resends on its own."""
+
+    @staticmethod
+    async def _reconnect(client) -> None:
+        from unittest.mock import patch
+
+        with patch.object(client, "trigger_rediscovery", new_callable=AsyncMock):
+            client._poll_failure_count = 3
+            await client._note_successful_contact()
+
+    @pytest.mark.asyncio
+    async def test_a_reconnect_forgets_what_was_sent(self, tmp_path):
+        client, config = _client(tmp_path)
+        coordinator = _coordinator(client, config, der_resource_put_policy="on_change")
+        coordinator.setup()
+        try:
+            resources = coordinator.der_resources
+            assert resources is not None
+            resources._sent_capability[LFDI_A] = ("/der/1/dercap", b"<DERCapability/>")
+            resources._sent_settings[LFDI_A] = ("/der/1/derg", {"setMaxW": 5000})
+
+            await self._reconnect(client)
+
+            assert resources._sent_capability == {}
+            assert resources._sent_settings == {}
+        finally:
+            await coordinator.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_reconnect_before_setup_is_harmless(self, tmp_path):
+        client, config = _client(tmp_path)
+        _coordinator(client, config, der_resource_put_policy="on_change")
+
+        await self._reconnect(client)
+
+    def test_periodic_registers_no_listener(self, tmp_path):
+        client, config = _client(tmp_path)
+        _coordinator(client, config)
+
+        assert client._reconnect_listeners == []
 
 
 def _client_with_roles(tmp_path: Path, devices: list[dict[str, object]]):

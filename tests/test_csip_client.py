@@ -194,6 +194,42 @@ async def test_a_raising_reconnect_callback_still_rediscovers():
 
 
 @pytest.mark.asyncio
+async def test_reconnect_listeners_run_before_on_reconnect_and_rediscovery():
+    order: list[str] = []
+    client = CsipClient("https://example.com", on_reconnect=lambda: order.append("host"))
+    client.add_reconnect_listener(lambda: order.append("first"))
+    client.add_reconnect_listener(lambda: order.append("second"))
+
+    async def rediscover() -> bool:
+        order.append("rediscovery")
+        return True
+
+    with patch.object(client, "trigger_rediscovery", side_effect=rediscover):
+        client._poll_failure_count = 3
+        await client._note_successful_contact()
+
+    assert order == ["first", "second", "host", "rediscovery"]
+
+
+@pytest.mark.asyncio
+async def test_a_raising_reconnect_listener_does_not_stop_the_rest():
+    order: list[str] = []
+
+    def broken() -> None:
+        raise RuntimeError("listener bug")
+
+    client = CsipClient("https://example.com", on_reconnect=lambda: order.append("host"))
+    client.add_reconnect_listener(broken)
+
+    with patch.object(client, "trigger_rediscovery", new_callable=AsyncMock) as rediscover:
+        client._poll_failure_count = 3
+        await client._note_successful_contact()
+
+    assert order == ["host"]
+    rediscover.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_brief_failure_recovery_does_not_report_reconnect():
     reconnects: list[None] = []
     client = CsipClient("https://example.com", on_reconnect=lambda: reconnects.append(None))

@@ -82,6 +82,20 @@ schedule and reported to the server:
 
 A device configured as a meter reports its readings only; see [Meters](#meters).
 
+`der_resource_put_policy: on_change` replaces the two DER resource rates. It
+PUTs DERCapability and DERSettings once each, at startup, and then only when
+the content changes. A changed DERCapability also resends DERSettings. A
+rediscovery does not resend unchanged content, but a reconnect after a
+sustained loss of contact resends both, since the server may have lost them
+(CSIP G29). The default, `periodic`, keeps the rates in the table.
+
+With `subscription.enabled`, `subscription.renewal_method: put` renews each
+subscription with a PUT to its own href (IEEE 2030.5 Annex A.2.7.2), and posts
+a new one to the list when the server answers 404 or 405; the default, `post`,
+re-POSTs it to the list. `subscription.backstop_poll_seconds` (default 900)
+sets how often a subscribed resource is still polled, in case notifications
+stop; it is never faster than the resource's pollRate.
+
 The server has the final say on the posting rate: an `EndDevice.postRate` above
 zero replaces `post_rate_seconds` for that device, which is what IEEE 2030.5
 specifies. A server exposing no MirrorUsagePointList stops the readings only —
@@ -99,8 +113,8 @@ meter, export is the DER's output, so generation posts negative W. For a site
 meter, export is power from the premises to the grid: import posts positive
 W and var, and export negative (see [Meters](#meters)).
 
-`signed_as_reported` posts W and var with the sign the connector reports, for
-every role: for a DER, positive while it delivers power and negative while it
+`signed_as_reported` posts W, var and power factor with the sign the connector
+reports, for every role: for a DER, positive while it delivers power and negative while it
 absorbs it, so a charging battery posts negative W. It omits flowDirection from
 every ReadingType, keeps the `default` values of every other field, and
 registers no energy totals, since `WhFwd` and `WhRev` differ only by

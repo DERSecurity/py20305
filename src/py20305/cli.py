@@ -327,6 +327,7 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
         server_2018_compat=config.server.server_2018_compat,
         use_server_time=config.server.use_server_time,
         fsa_stale_seconds=config.server.fsa_stale_seconds,
+        heartbeat_seconds=config.subscription.backstop_poll_seconds,
     )
     # The transport reads this to publish each exchange, and `run` reads it
     # back to start and stop the transport -- so the manager needs no second
@@ -398,6 +399,7 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
             client=client.http,
             notification_uri=notification_server.build_notification_uri(external_host),
             server_2018_compat=config.server.server_2018_compat,
+            renewal_method=config.subscription.renewal_method,
             # A renewal answered 401/404 means the server has forgotten us;
             # rediscovery re-subscribes against its current state. Wrapped to
             # drop the bool trigger_rediscovery returns, which the manager's
@@ -1076,6 +1078,7 @@ def _start_telemetry(
             for device in config.devices
         },
         site_interval_history=history.site_intervals if history is not None else None,
+        der_resource_put_policy=config.telemetry.der_resource_put_policy,
     )
     coordinator.setup()
     coordinator.start_device_telemetry()

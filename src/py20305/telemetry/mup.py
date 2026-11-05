@@ -389,9 +389,9 @@ class ReadingProfile(StrEnum):
     reports them positive for import, from the grid to the premises, which is
     already the load convention, so both are posted as reported.
 
-    ``SIGNED_AS_REPORTED`` posts W and var with the sign the connector reports,
-    whatever the device's role -- for a DER, positive while it delivers and
-    negative while it absorbs (a battery charging) -- and omits flowDirection
+    ``SIGNED_AS_REPORTED`` posts W, var and PF with the sign the connector
+    reports, whatever the device's role -- for a DER, W positive while it
+    delivers and negative while it absorbs (a battery charging) -- and omits flowDirection
     from every ReadingType (optional, IEEE 2030.5 ``ReadingType``). Every other
     field keeps its DEFAULT value. It registers no energy totals, which differ
     only by flowDirection.
@@ -576,6 +576,10 @@ _TOTAL_KEYS = frozenset({"W", "Var", "VA", "A", "WHAvail"})
 _PER_LINE_KEY = re.compile(r"^(W|Var|V|PF|VA|A)L[1-3]$")
 #: The quantities whose sign the load convention sets from the device role.
 _POWER_QUANTITIES = frozenset({"W", "Var"})
+#: The quantities SIGNED_AS_REPORTED posts with the connector's sign. Their
+#: scaling puts a negative value's sign in flowDirection, which the profile
+#: omits, so the sign is moved back onto the value.
+_AS_REPORTED_SIGNED_QUANTITIES = frozenset({"W", "Var", "PF"})
 #: Roles whose connector reports W and var import positive, which is already
 #: the load convention. Every other role reports them positive for a DER's
 #: output, so their values are negated.
@@ -709,18 +713,19 @@ def _specs_for(
 def _as_reported_value(
     spec: ReadingTypeSpec, effective: ReadingTypeSpec, monitoring_data: dict[str, Any]
 ) -> int:
-    """A SIGNED_AS_REPORTED value: W and var keep the connector's sign.
+    """A SIGNED_AS_REPORTED value: W, var and PF keep the connector's sign.
 
     ``effective`` is ``spec`` after the connector's override. When the override
     changes the multiplier, the value is scaled from it, so the value and the
     registered powerOfTenMultiplier agree; otherwise the spec's own scaling is
     kept.
     """
+    signed = _quantity(spec.key) in _AS_REPORTED_SIGNED_QUANTITIES
     if effective.multiplier != spec.multiplier:
         rescaled = _scale_half_away(monitoring_data[spec.key], effective.multiplier)
-        return rescaled if _quantity(spec.key) in _POWER_QUANTITIES else abs(rescaled)
+        return rescaled if signed else abs(rescaled)
     scaled = _scaled_for(spec, monitoring_data)
-    if _quantity(spec.key) in _POWER_QUANTITIES and scaled.flow_direction == FLOW_REVERSE:
+    if signed and scaled.flow_direction == FLOW_REVERSE:
         return -scaled.value
     return scaled.value
 

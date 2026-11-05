@@ -21,6 +21,8 @@ AS_REPORTED = ReadingProfile.SIGNED_AS_REPORTED
 _SLOT_BY_MRID = {_create_mrid(LFDI, index=i).value: i for i in range(1, 100)}
 #: SIGNED_AS_REPORTED's own slot for system W, outside every DEFAULT slot.
 W_SLOT = 71
+PF_SLOT = 75
+PF_LINE_SLOTS = (83, 89, 95)
 
 
 def _values(monitoring: dict[str, Any], **kwargs: Any) -> dict[int, int]:
@@ -70,6 +72,16 @@ class TestValues:
     def test_sign_follows_each_cycle(self) -> None:
         assert _values({"W": 5000.0})[W_SLOT] == 5000
         assert _values({"W": -3000.0})[W_SLOT] == -3000
+
+    def test_power_factor_keeps_its_sign(self) -> None:
+        """With no flowDirection to carry it, the sign must stay on the value."""
+        assert _values({"PF": -0.9})[PF_SLOT] == -900
+        assert _values({"PF": 0.9})[PF_SLOT] == 900
+
+    def test_per_line_power_factor_keeps_its_sign(self) -> None:
+        values = _values({"ACType": 2, "PFL1": -0.95, "PFL2": 0.9, "PFL3": -0.85})
+
+        assert [values[slot] for slot in PF_LINE_SLOTS] == [-950, 900, -850]
 
     def test_site_meter_is_posted_as_reported(self) -> None:
         """No role-based negation: the value is the connector's own."""
@@ -201,6 +213,13 @@ class TestMultiplierOverride:
         overrides = {"W": ReadingOverride(multiplier=3)}
 
         assert _values({"W": -5400.0}, overrides=overrides)[W_SLOT] == -5
+
+    def test_an_overridden_power_factor_multiplier_keeps_the_sign(self) -> None:
+        from py20305.connectors.base import ReadingOverride
+
+        overrides = {"PF": ReadingOverride(multiplier=-2)}
+
+        assert _values({"PF": -0.87}, overrides=overrides)[PF_SLOT] == -87
 
     def test_an_unchanged_multiplier_keeps_the_existing_scaling(self) -> None:
         from py20305.connectors.base import ReadingOverride

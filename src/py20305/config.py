@@ -332,6 +332,23 @@ class SubscriptionConfig(_Strict):
         default="warn",
         description="How strictly the listener checks the notifying server's client certificate",
     )
+    renewal_method: Literal["post", "put"] = Field(
+        default="post",
+        description=(
+            "How a subscription is renewed. 'post' re-POSTs it to its SubscriptionList. "
+            "'put' PUTs it to its own href (IEEE 2030.5 Annex A.2.7.2), and POSTs a new "
+            "one to the list when the server answers 404 or 405."
+        ),
+    )
+    backstop_poll_seconds: float = Field(
+        default=900.0,
+        gt=0,
+        description=(
+            "How often a resource with an active subscription is still polled, in case "
+            "the server stops notifying while it still lists the subscription. Never "
+            "faster than the resource's pollRate."
+        ),
+    )
 
     @model_validator(mode="after")
     def _external_host_when_enabled(self) -> SubscriptionConfig:
@@ -381,14 +398,24 @@ class TelemetryConfig(_Strict):
         gt=0,
         description="How often DERSettings is PUT, when it has changed",
     )
+    der_resource_put_policy: Literal["periodic", "on_change"] = Field(
+        default="periodic",
+        description=(
+            "When DERCapability and DERSettings are PUT. 'periodic' PUTs them on their "
+            "poll rates. 'on_change' PUTs each once, then only when its content changes "
+            "(a changed DERCapability also resends DERSettings), and again after a "
+            "reconnect from a sustained loss of contact (CSIP G29)."
+        ),
+    )
     reading_profile: Literal["default", "signed_load_convention", "signed_as_reported"] = Field(
         default="default",
         description=(
             "How MirrorMeterReadings are encoded. 'signed_load_convention' carries the "
             "sign on each value (flowDirection 0) with export and reactive power "
             "injection negative, and adds line-to-line voltage and State of Energy "
-            "readings when the device supplies them. 'signed_as_reported' posts real and "
-            "reactive power with the sign the connector reports, omits flowDirection, "
+            "readings when the device supplies them. 'signed_as_reported' posts real power, "
+            "reactive power and power factor with the sign the connector reports, in "
+            "mRIDs of its own, omits flowDirection, "
             "registers no energy totals, and sends no readings on a cycle with none. "
             "Applied at startup."
         ),

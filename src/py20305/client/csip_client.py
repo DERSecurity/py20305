@@ -201,6 +201,9 @@ class CsipClient:
         #: contact, before the rediscovery that follows, so the host can treat
         #: what it sent before the outage as possibly lost.
         self._on_reconnect = on_reconnect
+        #: Library components told the same, ahead of ``on_reconnect``; see
+        #: ``add_reconnect_listener``.
+        self._reconnect_listeners: list[Callable[[], None]] = []
         self._connection_heartbeat_seconds = connection_heartbeat_seconds
         self._reconcile_enabled = reconcile_enabled
         self._reconcile_interval_seconds = reconcile_interval_seconds
@@ -371,6 +374,16 @@ class CsipClient:
         one calls it on completion.
         """
         self._on_rediscovered = callback
+
+    def add_reconnect_listener(self, callback: Callable[[], None]) -> None:
+        """Also call ``callback`` when ``on_reconnect`` would be called.
+
+        For a component built after this client, such as the telemetry
+        coordinator, that has to treat what it sent before an outage as lost.
+        Listeners run in the order added, before ``on_reconnect``, and one that
+        raises is logged without stopping the others or the rediscovery.
+        """
+        self._reconnect_listeners.append(callback)
 
     @property
     def http(self) -> Sep2Client:
@@ -1267,14 +1280,17 @@ class CsipClient:
             # suppression is cleared -- not on every rediscovery.
             if self._subscription_manager is not None:
                 self._subscription_manager.clear_resubscribe_suppression()
+            callbacks = [*self._reconnect_listeners]
             if self._on_reconnect is not None:
-                # Host code. The failure streak is already cleared, so letting
-                # it raise past here would skip the rediscovery for good.
+                callbacks.append(self._on_reconnect)
+            for callback in callbacks:
+                # The failure streak is already cleared, so letting one raise
+                # past here would skip the rediscovery for good.
                 try:
-                    self._on_reconnect()
+                    callback()
                 except Exception:
                     logger.warning(
-                        "on_reconnect callback raised; continuing with rediscovery",
+                        "reconnect callback raised; continuing with rediscovery",
                         exc_info=True,
                     )
             await self.trigger_rediscovery()
