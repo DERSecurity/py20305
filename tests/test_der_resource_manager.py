@@ -432,6 +432,97 @@ class TestCapabilityOnChange:
             )
 
 
+def _register_both(manager: DerResourceManager, lfdi: str = "ab") -> None:
+    """Register capability and settings hrefs without scheduling their cycles."""
+    manager.start_device(lfdi, None, None, None)
+    manager._devices[lfdi].capability_href = "/cap"
+    manager._devices[lfdi].settings_href = "/set"
+
+
+def _puts_to(client: AsyncMock, href: str) -> int:
+    return sum(1 for call in client.put_bytes.call_args_list if call.args[0] == href)
+
+
+class TestSettingsOnChange:
+    """Under ``on_change`` DERSettings is PUT at start, and again when DERSettings
+    or DERCapability content changes."""
+
+    @pytest.mark.asyncio
+    async def test_unchanged_settings_are_put_once_across_a_restart(self) -> None:
+        manager, client = _on_change_manager(_make_connector(configuration={"WMax": 10000}))
+        _register_both(manager)
+        await manager._settings_cycle("ab")
+
+        _register_both(manager)
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 1
+
+    @pytest.mark.asyncio
+    async def test_changed_settings_are_put_again(self) -> None:
+        connector = _make_connector(configuration={"WMax": 10000})
+        manager, client = _on_change_manager(connector)
+        _register_both(manager)
+
+        await manager._settings_cycle("ab")
+        connector.fetch_configuration = AsyncMock(return_value={"WMax": 8000})
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 2
+
+    @pytest.mark.asyncio
+    async def test_a_changed_capability_puts_unchanged_settings_again(self) -> None:
+        connector = _make_connector(nameplate={"WMaxRtg": 15000}, configuration={"WMax": 10000})
+        manager, client = _on_change_manager(connector)
+        _register_both(manager)
+        await manager._capability_cycle("ab")
+        await manager._settings_cycle("ab")
+
+        connector.fetch_nameplate = AsyncMock(return_value={"WMaxRtg": 12000})
+        await manager._capability_cycle("ab")
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 2
+
+    @pytest.mark.asyncio
+    async def test_the_first_capability_does_not_put_settings_twice(self) -> None:
+        manager, client = _on_change_manager(
+            _make_connector(nameplate={"WMaxRtg": 15000}, configuration={"WMax": 10000})
+        )
+        _register_both(manager)
+
+        await manager._settings_cycle("ab")
+        await manager._capability_cycle("ab")
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 1
+
+    @pytest.mark.asyncio
+    async def test_forget_sent_puts_settings_again(self) -> None:
+        manager, client = _on_change_manager(_make_connector(configuration={"WMax": 10000}))
+        _register_both(manager)
+        await manager._settings_cycle("ab")
+
+        manager.forget_sent()
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 2
+
+    @pytest.mark.asyncio
+    async def test_periodic_settings_are_put_again_after_a_restart(self) -> None:
+        """Today's behavior: change detection lives in the per-device state."""
+        client = AsyncMock()
+        client.put_bytes = AsyncMock(return_value=204)
+        manager = DerResourceManager(client, _aresolver(_make_connector()))
+        _register_both(manager)
+        await manager._settings_cycle("ab")
+
+        _register_both(manager)
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 2
+
+
 class TestDerResourceManagerPerResourceRates:
     """Tests for per-resource poll rates."""
 

@@ -106,6 +106,9 @@ every ReadingType, keeps the `default` values of every other field, and
 registers no energy totals, since `WhFwd` and `WhRev` differ only by
 flowDirection. A cycle with no reading to post, such as a charger with no
 vehicle plugged in, sends no readings POST at all; the MirrorUsagePoint stays.
+A connector that declares its readings (see
+[Connectors](connectors.md)) gets a MirrorUsagePoint of exactly those, posted
+once.
 
 `power_direction` sets how real and reactive power carry their direction under
 the `default` profile. IEEE 2030.5 does not let a MeterReading's ReadingType

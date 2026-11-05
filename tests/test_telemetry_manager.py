@@ -1604,6 +1604,32 @@ class TestRunsWithoutAStore:
         assert lost.last_success == good.last_success
         assert isinstance(lost.error, ConnectorConnectionError)
 
+    async def test_direct_source_carries_the_declared_readings(self) -> None:
+        """Kept through a failed read, like the overrides: it describes the device."""
+        connector = AsyncMock(spec=BaseConnector)
+        connector.fetch_monitoring = AsyncMock(return_value={})
+        connector.reading_overrides = MagicMock(return_value=None)
+        connector.declared_readings = MagicMock(return_value={"W"})
+        source = DirectConnectorSource(lambda _lfdi: connector)
+
+        good = await source.read(SAMPLE_LFDI)
+        connector.fetch_monitoring = AsyncMock(side_effect=ConnectorConnectionError("down"))
+        lost = await source.read(SAMPLE_LFDI)
+
+        assert good.declared_readings == frozenset({"W"})
+        assert lost.declared_readings == frozenset({"W"})
+
+    @pytest.mark.parametrize("raw", [None, "W", 7, {"W": True}, ["W", 1], MagicMock()])
+    async def test_a_malformed_declaration_is_no_declaration(self, raw) -> None:
+        connector = AsyncMock(spec=BaseConnector)
+        connector.fetch_monitoring = AsyncMock(return_value={"W": 1})
+        connector.reading_overrides = MagicMock(return_value=None)
+        connector.declared_readings = MagicMock(return_value=raw)
+
+        snapshot = await DirectConnectorSource(lambda _lfdi: connector).read(SAMPLE_LFDI)
+
+        assert snapshot.declared_readings is None
+
     async def test_comm_lost_entries_carry_comm_lost_quality(self) -> None:
         """A retained value must not still claim GOOD under a COMM_LOST snapshot.
 
@@ -1844,6 +1870,68 @@ class TestPowerDirection:
             for m in readings.mirror_meter_reading
         )
         await manager.shutdown()
+
+
+class TestDeclaredReadings:
+    """Under SIGNED_AS_REPORTED a connector's declared readings shape the MUP from
+    the first cycle, and that MUP is the only one posted."""
+
+    @pytest.fixture
+    def declaring_connector(self, mock_connector):
+        mock_connector.declared_readings = MagicMock(return_value=frozenset({"W"}))
+        mock_connector.reading_overrides = MagicMock(return_value=None)
+        mock_connector.fetch_monitoring.return_value = {}
+        return mock_connector
+
+    @pytest.fixture
+    def as_reported(self, mock_client, connector_resolver):
+        from py20305.telemetry.mup import ReadingProfile
+
+        return TelemetryManager(
+            mock_client,
+            MUP_LIST_HREF,
+            connector_resolver,
+            reading_profile=ReadingProfile.SIGNED_AS_REPORTED,
+        )
+
+    @staticmethod
+    def _posts(mock_client, href):
+        return [c.args[1] for c in mock_client.post_bytes.call_args_list if c.args[0] == href]
+
+    @pytest.mark.asyncio
+    async def test_unplugged_start_posts_one_mup_with_the_declared_reading(
+        self, mock_client, declaring_connector, as_reported
+    ):
+        from py20305.models.sep import MirrorMeterReadingList, MirrorUsagePoint
+        from py20305.xml.serialization import from_xml
+
+        as_reported.start_metering(SAMPLE_LFDI, post_rate=300)
+        await as_reported._metering_cycle(SAMPLE_LFDI.lower())  # unplugged: MUP only
+        await as_reported._metering_cycle(SAMPLE_LFDI.lower())  # still unplugged
+        declaring_connector.fetch_monitoring.return_value = {"W": -7000.0, "Var": 50.0}
+        await as_reported._metering_cycle(SAMPLE_LFDI.lower())  # plugged in
+
+        (mup_body,) = self._posts(mock_client, MUP_LIST_HREF)
+        mup = from_xml(mup_body, MirrorUsagePoint)
+        assert [m.description for m in mup.mirror_meter_reading] == ["Real Power"]
+        (readings_body,) = self._posts(mock_client, "/mup/device1")
+        readings = from_xml(readings_body, MirrorMeterReadingList)
+        assert [m.reading.value for m in readings.mirror_meter_reading] == [-7000]
+
+    @pytest.mark.asyncio
+    async def test_an_undeclared_reading_is_warned_about_once(
+        self, mock_client, declaring_connector, as_reported, caplog
+    ):
+        declaring_connector.fetch_monitoring.return_value = {"W": 1000.0, "Var": 50.0}
+        as_reported.start_metering(SAMPLE_LFDI, post_rate=300)
+
+        with caplog.at_level(logging.WARNING, logger="py20305.telemetry.manager"):
+            for _ in range(3):
+                await as_reported._metering_cycle(SAMPLE_LFDI.lower())
+
+        warnings = [r for r in caplog.records if "not declared" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "Var" in warnings[0].getMessage()
 
 
 class TestEmptyCycle:

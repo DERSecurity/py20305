@@ -640,15 +640,41 @@ def registration_slots(
     profile: ReadingProfile,
     registered: frozenset[int] = frozenset(),
     power_direction: PowerDirection = PowerDirection.DEFAULT,
+    declared: frozenset[str] | None = None,
 ) -> frozenset[int]:
     """The mRID slots a MUP built now would register.
 
     Under SIGNED_LOAD_CONVENTION the set grows when an optional reading first
     appears, which is the signal to re-POST the MUP so the new mRID arrives
-    with its ReadingType (Rule h.2) instead of meeting Rule h.3.
+    with its ReadingType (Rule h.2) instead of meeting Rule h.3. Under
+    SIGNED_AS_REPORTED ``declared`` fixes it (see :func:`create_mup`).
     """
-    specs = _specs_for(profile, monitoring_data, registered, power_direction)
+    specs = _specs_for(profile, monitoring_data, registered, power_direction, declared)
     return frozenset(index for index, _ in specs)
+
+
+#: Every reading a connector can declare under SIGNED_AS_REPORTED, by monitoring
+#: key: the system readings and all three lines' per-line readings. A declared
+#: per-line key is registered without ACType, since the declaration says it.
+_DECLARABLE: dict[str, tuple[int, ReadingTypeSpec]] = {
+    **{spec.key: (index, spec) for index, spec in enumerate(READING_TYPE_SPECS, start=1)},
+    **{
+        spec.key: (_per_line_index(line, slot), spec)
+        for line in (1, 2, 3)
+        for slot, spec in enumerate(_per_line_specs(line))
+    },
+}
+
+
+def undeclared_readings(
+    monitoring_data: dict[str, Any], declared: frozenset[str]
+) -> frozenset[str]:
+    """Readings in ``monitoring_data`` that ``declared`` leaves out, so are not posted."""
+    return frozenset(
+        key
+        for key, value in monitoring_data.items()
+        if key in _DECLARABLE and value is not None and key not in declared
+    )
 
 
 def _specs_for(
@@ -656,6 +682,7 @@ def _specs_for(
     monitoring_data: dict[str, Any],
     registered: frozenset[int],
     power_direction: PowerDirection,
+    declared: frozenset[str] | None = None,
 ) -> list[tuple[int, ReadingTypeSpec]]:
     """``(mrid_index, spec)`` for a device under ``profile``."""
     if profile is ReadingProfile.SIGNED_LOAD_CONVENTION:
@@ -663,7 +690,9 @@ def _specs_for(
     if profile is ReadingProfile.SIGNED_AS_REPORTED:
         # No energy totals and no PowerDirection modes: both rely on a fixed
         # flowDirection, which this profile omits.
-        return _all_specs_for(monitoring_data)
+        if declared is None:
+            return _all_specs_for(monitoring_data)
+        return sorted(_DECLARABLE[key] for key in declared if key in _DECLARABLE)
     return _default_specs_for(monitoring_data, power_direction)
 
 
@@ -958,6 +987,7 @@ def create_mup(
     role: DeviceRole = DeviceRole.DER,
     revenue_quality: bool = False,
     device_lfdi: str | None = None,
+    declared: frozenset[str] | None = None,
 ) -> MirrorUsagePoint:
     """Create a MirrorUsagePoint with system + per-line MirrorMeterReadings.
 
@@ -987,6 +1017,10 @@ def create_mup(
         revenue_quality: Set isRevenueQuality in roleFlags.
         device_lfdi: LFDI of the EndDevice the MUP is posted under, put in
               deviceLFDI. Defaults to ``lfdi``.
+        declared: The connector's ``declared_readings()``. Under
+              SIGNED_AS_REPORTED the MUP registers exactly these readings,
+              whatever ``monitoring_data`` holds; None registers the standard
+              set. Ignored under the other profiles.
 
     Returns:
         MirrorUsagePoint with system + per-line meter readings.
@@ -998,7 +1032,7 @@ def create_mup(
 
     signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
     as_reported = profile is ReadingProfile.SIGNED_AS_REPORTED
-    specs = _specs_for(profile, monitoring_data, registered, power_direction)
+    specs = _specs_for(profile, monitoring_data, registered, power_direction, declared)
     meter_readings: list[MirrorMeterReading1] = []
     for mrid_index, spec in specs:
         override = overrides.get(spec.key) if overrides else None
@@ -1049,6 +1083,7 @@ def create_meter_reading_list(
     registered: frozenset[int] | None = None,
     power_direction: PowerDirection = PowerDirection.DEFAULT,
     role: DeviceRole = DeviceRole.DER,
+    declared: frozenset[str] | None = None,
 ) -> MirrorMeterReadingList:
     """Create a MirrorMeterReadingList with current readings.
 
@@ -1096,7 +1131,9 @@ def create_meter_reading_list(
     held back rather than met with Rule h.3.
 
     ``power_direction`` must be the one the MUP was created with; it chooses
-    the W and var readings posted and how each carries its sign.
+    the W and var readings posted and how each carries its sign. ``declared``
+    must likewise be the declaration the MUP registered: under
+    SIGNED_AS_REPORTED only declared readings are posted.
     """
     if timestamp is None:
         timestamp = int(time.time())
@@ -1105,7 +1142,7 @@ def create_meter_reading_list(
 
     signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
     as_reported = profile is ReadingProfile.SIGNED_AS_REPORTED
-    specs = _specs_for(profile, monitoring_data, frozenset(), power_direction)
+    specs = _specs_for(profile, monitoring_data, frozenset(), power_direction, declared)
     posted: dict[str, int] = {}
     meter_readings: list[MirrorMeterReading1] = []
     for mrid_index, spec in specs:

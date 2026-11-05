@@ -177,6 +177,18 @@ class BaseConnector:
         """
         return None
 
+    def declared_readings(self) -> frozenset[str] | None:
+        """Optional: the monitoring keys this device provides, fixed for its life.
+
+        Under the ``SIGNED_AS_REPORTED`` reading profile the MirrorUsagePoint
+        registers exactly these readings, from the first cycle, even one with no
+        values (a charger with no vehicle plugged in), so it is posted once and
+        never re-posted for a reading that appears later. A key returned by
+        ``fetch_monitoring`` but not declared is not posted. Return ``None`` (the
+        default) to register the standard set. Other profiles ignore it.
+        """
+        return None
+
     async def fetch_nameplate(self) -> dict[str, Any]:
         """Return DER nameplate ratings."""
         return {
