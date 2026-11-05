@@ -17,6 +17,7 @@ Needs the ``sunspec`` extra (``pip install py20305[sunspec]``).
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from typing import Any
 
@@ -65,6 +66,8 @@ class SunSpecConnector(BaseConnector):
 
         self._core = SunSpecModbusConnector(report=report, **kwargs)
         self._controls = convert.Controls()
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
         self.der_type = int(kwargs.get("der_type", 83))
         self._line_to_line_voltage = kwargs.get("role", "der") == "der"
         self._phased_totals = reading_profile is ReadingProfile.SIGNED_LOAD_CONVENTION
@@ -94,16 +97,28 @@ class SunSpecConnector(BaseConnector):
     async def fetch_status(self) -> dict[str, Any]:
         return convert.status(await self._core.fetch_status())
 
+    def _controls_lock(self) -> asyncio.Lock:
+        """Return the lock that serializes control writes, bound to the running loop."""
+        loop = asyncio.get_running_loop()
+        lock = getattr(self, "_lock", None)
+        if lock is None or self._lock_loop is not loop:
+            lock = asyncio.Lock()
+            self._lock = lock
+            self._lock_loop = loop
+        return lock
+
     async def _apply(self, element: str, params: dict[str, Any]) -> ConnectorPayload:
-        # A write the device or the core refuses must not stay in the merged
-        # state, or the next write of a shared function would send it again.
-        before = copy.deepcopy(self._controls)
-        method, core_params = self._controls.translate(element, params)
-        try:
-            await getattr(self._core, method)(core_params)
-        except BaseException:
-            self._controls = before
-            raise
+        # One write at a time, from merging the element to the write's result:
+        # a refused write puts the merged state back, and that must not undo
+        # an element another call merged in the meantime.
+        async with self._controls_lock():
+            before = copy.deepcopy(self._controls)
+            method, core_params = self._controls.translate(element, params)
+            try:
+                await getattr(self._core, method)(core_params)
+            except BaseException:
+                self._controls = before
+                raise
         return None
 
 

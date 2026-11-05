@@ -319,3 +319,42 @@ async def test_a_refused_power_factor_is_not_sent_again() -> None:
     assert sent == [
         {"inj": {"mode": 0}, "abs": {"pf": 0.95, "excitation": False, "mode": 1}},
     ]
+
+
+async def test_a_refused_write_does_not_undo_a_write_made_while_it_ran() -> None:
+    """Control writes are serialized, so a rollback cannot erase a later element."""
+    import asyncio
+
+    connector = object.__new__(SunSpecConnector)
+    connector._controls = convert.Controls()
+    connector._lock = None
+    sent: list[dict[str, Any]] = []
+    release = asyncio.Event()
+
+    class _Core:
+        calls = 0
+
+        async def update_connect(self, params: dict[str, Any]) -> None:
+            _Core.calls += 1
+            if _Core.calls == 1:
+                await release.wait()
+                raise ConnectionError("device did not answer")
+            sent.append(params)
+
+    connector._core = _Core()
+
+    disconnect = asyncio.create_task(
+        connector.update_op_mod_connect({"enabled": True, "value": False})
+    )
+    await asyncio.sleep(0)
+    deenergize = asyncio.create_task(
+        connector.update_op_mod_energize({"enabled": True, "value": False})
+    )
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(ConnectionError):
+        await disconnect
+    await deenergize
+    await connector.update_op_mod_connect({"enabled": True, "value": True})
+
+    assert sent == [{"connected": False}, {"connected": False}], "still de-energized"
