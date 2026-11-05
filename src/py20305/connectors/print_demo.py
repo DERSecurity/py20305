@@ -113,6 +113,8 @@ class PrintDemoConnector(BaseConnector):
         return {
             "alarmStatus": 1,
             "connectStatus": {"dateTime": now, "value": 1},
+            # The 2030.5-2018 bitmap for a 2018 server: bit 0, connected.
+            "genConnectStatus": {"dateTime": now, "value": 1},
             # IEEE 2030.5 InverterStatusType 4: running.
             "inverterStatus": {"dateTime": now, "value": 4},
             "localControlModeStatus": None,

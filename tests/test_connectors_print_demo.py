@@ -45,6 +45,27 @@ class TestPrintDemoConnector:
         result = await c.fetch_status()
         assert result["alarmStatus"] == 1
         assert result["connectStatus"]["value"] == 1
+        assert result["genConnectStatus"]["value"] == 1
+
+    @pytest.mark.asyncio
+    async def test_each_edition_gets_its_own_connect_status(self):
+        from xml.etree.ElementTree import fromstring
+
+        from py20305.telemetry.der_status import build_der_status
+        from py20305.xml.serialization import to_xml
+
+        status = await PrintDemoConnector().fetch_status()
+        ns = "{urn:ieee:std:2030.5:ns}"
+
+        new = fromstring(to_xml(build_der_status(status)))
+        old = fromstring(
+            to_xml(build_der_status(status, server_2018_compat=True), server_2018_compat=True)
+        )
+
+        assert new.find(ns + "connectStatus") is not None
+        assert new.find(ns + "genConnectStatus") is None
+        assert old.find(ns + "genConnectStatus") is not None
+        assert old.find(ns + "connectStatus") is None
 
     @pytest.mark.asyncio
     async def test_update_captures_params(self):
