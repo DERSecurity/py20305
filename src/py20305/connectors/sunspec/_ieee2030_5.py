@@ -93,7 +93,11 @@ def total_phase(ac_type: Any) -> int | None:
 
 
 def readings(
-    values: Mapping[str, Any], *, line_to_line_voltage: bool, phased_totals: bool = False
+    values: Mapping[str, Any],
+    *,
+    line_to_line_voltage: bool,
+    phased_totals: bool = False,
+    wiring: int | None = None,
 ) -> list[Reading]:
     """Return the IEEE 2030.5 readings for the monitoring values the core read.
 
@@ -102,10 +106,14 @@ def readings(
     average voltage. ``phased_totals`` gives the real, reactive and apparent
     power totals and the state of energy the wiring's PhaseCode, as the
     signed-load reading profile registers them. Per-line readings are kept
-    for the lines the wiring has. A value that is missing or not a number
-    gives no reading.
+    for the lines the wiring has. ``wiring`` is the ``ACType`` the device last
+    stated, used when this read did not return one, so a read that loses it
+    does not turn a three-phase device into a single-phase one. A value that is
+    missing or not a number gives no reading.
     """
     ac_type = _as_int(values.get("ACType"))
+    if ac_type is None:
+        ac_type = _as_int(wiring)
     lines = _AC_TYPE_LINES.get(ac_type, 1) if ac_type is not None else 1
     pairs = set(list(_LINE_TO_LINE)[: _AC_TYPE_LINE_TO_LINE.get(ac_type, 0)]) if ac_type else set()
     voltage_phase = line_to_line_phase(ac_type) if line_to_line_voltage else None

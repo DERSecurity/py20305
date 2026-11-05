@@ -378,6 +378,12 @@ _SIGNED_LOAD_SLOTS_SINGLE_PHASE: dict[ReadingIdentity, tuple[int, str]] = _signe
 
 #: Phase codes of lines 2 and 3.
 _LINE_2_3_PHASES = frozenset({64, 65, 32, 33})
+#: Phase codes a multi-phase device tags its totals with (split phase, three phase).
+_MULTI_PHASE_TOTAL_PHASES = frozenset({132, 224})
+#: The quantities the signed-load profile tags with the wiring's phase code.
+_TOTAL_UOMS = frozenset({_UOM_W, _UOM_VAR, _UOM_VA, _UOM_A, _UOM_WH})
+#: Slots only the multi-phase table gives a reading: the real power of lines 1, 2 and 3.
+_MULTI_PHASE_ONLY_SLOTS = (10, 16, 22)
 
 #: First slot of each fixed flowDirection's W and var readings, and the
 #: offset of each W or var slot from it.
@@ -566,18 +572,59 @@ def _line_of(reading: Reading, legacy: tuple[int, str] | None) -> int:
     return _LINE_OF_PHASE.get(reading.phase, 0)
 
 
+def _is_multi_phase(
+    lfdi: str,
+    readings: Sequence[Reading],
+    registered: Mapping[bytes, RegisteredReading] | None,
+) -> bool:
+    """Return whether the device is wired for more than one phase.
+
+    Phase 128 is line 1 of a multi-phase device and the total of a single-phase
+    one, so which it is has to come from something that does not change when a
+    value fails to read. A device is multi-phase once its MirrorUsagePoint has
+    registered a reading only a multi-phase device has: line 2 or 3, line 1's
+    real power, or a total tagged with a split- or three-phase code. A poll
+    that shows any of those says the same. Only a device that has shown none
+    is single phase, so a poll that loses lines 2 and 3 never turns a
+    three-phase device into a single-phase one.
+    """
+    for reading in readings:
+        if reading.phase in _LINE_2_3_PHASES:
+            return True
+        if reading.phase in _MULTI_PHASE_TOTAL_PHASES and reading.uom in _TOTAL_UOMS:
+            return True
+    if not registered:
+        return False
+    if any(_create_mrid(lfdi, index=slot).value in registered for slot in _MULTI_PHASE_ONLY_SLOTS):
+        return True
+    for entry in registered.values():
+        phase = entry.reading_type.phase.value if entry.reading_type.phase is not None else 0
+        if phase in _LINE_2_3_PHASES:
+            return True
+        uom = entry.reading_type.uom.value if entry.reading_type.uom is not None else 0
+        if phase in _MULTI_PHASE_TOTAL_PHASES and uom in _TOTAL_UOMS:
+            return True
+    return False
+
+
 def _posted_readings(
     lfdi: str,
     readings: Sequence[Reading],
     profile: ReadingProfile,
     power_direction: PowerDirection,
+    registered: Mapping[bytes, RegisteredReading] | None = None,
 ) -> list[_Posted]:
-    """Return the MirrorMeterReadings ``readings`` post, in MUP order."""
+    """Return the MirrorMeterReadings ``readings`` post, in MUP order.
+
+    ``registered`` is what the MirrorUsagePoint has registered; under
+    SIGNED_LOAD_CONVENTION it, with the readings, says whether the device is
+    single or multi-phase (see :func:`_is_multi_phase`).
+    """
     signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
     valid = valid_readings(readings)
     table = _DEFAULT_SLOTS
     if signed_load:
-        multi_phase = any(r.phase in _LINE_2_3_PHASES for r in valid)
+        multi_phase = _is_multi_phase(lfdi, valid, registered)
         table = _SIGNED_LOAD_SLOTS if multi_phase else _SIGNED_LOAD_SLOTS_SINGLE_PHASE
     defaults = _SIGNED_LOAD_MULTIPLIER if signed_load else DEFAULT_MULTIPLIER
     directions: tuple[int, ...] = ()
@@ -611,6 +658,13 @@ def _posted_readings(
                 description = _description(variant, flow)
                 order = (1, position, rank)
             if mrid in seen:
+                logger.warning(
+                    "Reading %s for %s has the same mRID as one already posted this cycle; "
+                    "its value %s is not posted",
+                    description,
+                    lfdi[:8],
+                    reading.value,
+                )
                 continue
             seen.add(mrid)
             out.append(
@@ -693,7 +747,7 @@ def plan_registration(
     it has now.
     """
     plan: dict[bytes, RegisteredReading] = dict(registered or {})
-    for posted in _posted_readings(lfdi.lower(), readings, profile, power_direction):
+    for posted in _posted_readings(lfdi.lower(), readings, profile, power_direction, registered):
         if posted.mrid in plan:
             continue
         flow = (
@@ -868,7 +922,7 @@ def create_meter_reading_list(
 
     lfdi_norm = lfdi.lower()
     signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
-    posted_list = _posted_readings(lfdi_norm, readings, profile, power_direction)
+    posted_list = _posted_readings(lfdi_norm, readings, profile, power_direction, registered)
 
     var_by_line: dict[int, int] = {}
     if signed_load:

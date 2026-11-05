@@ -71,6 +71,8 @@ class SunSpecConnector(BaseConnector):
         self.der_type = int(kwargs.get("der_type", 83))
         self._line_to_line_voltage = kwargs.get("role", "der") == "der"
         self._phased_totals = reading_profile is ReadingProfile.SIGNED_LOAD_CONVENTION
+        #: The wiring (``ACType``) the device last stated.
+        self._wiring: int | None = None
 
     @property
     def endpoint_id(self) -> str:
@@ -79,10 +81,14 @@ class SunSpecConnector(BaseConnector):
 
     async def fetch_monitoring(self) -> list[Reading]:
         values = await self._core.fetch_monitoring()
+        stated = values.get("ACType")
+        if isinstance(stated, int) and not isinstance(stated, bool):
+            self._wiring = stated
         return convert.readings(
             values,
             line_to_line_voltage=self._line_to_line_voltage,
             phased_totals=self._phased_totals,
+            wiring=self._wiring,
         )
 
     async def fetch_nameplate(self) -> dict[str, Any]:

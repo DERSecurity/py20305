@@ -358,3 +358,38 @@ async def test_a_refused_write_does_not_undo_a_write_made_while_it_ran() -> None
     await connector.update_op_mod_connect({"enabled": True, "value": True})
 
     assert sent == [{"connected": False}, {"connected": False}], "still de-energized"
+
+
+def test_a_read_without_the_wiring_uses_the_one_the_device_last_stated() -> None:
+    values = {"W": 3000.0, "V": 480.0, "A": 6.0, "WL1": 1000.0, "WL2": 1000.0, "WL3": 1000.0}
+
+    stated = convert.readings({**values, "ACType": 2}, line_to_line_voltage=True)
+    lost = convert.readings(values, line_to_line_voltage=True, wiring=2)
+    unknown = convert.readings(values, line_to_line_voltage=True)
+
+    assert _phases(lost) == _phases(stated)
+    assert (29, 224) in _phases(lost), "the system voltage keeps its three-phase code"
+    assert (29, 224) not in _phases(unknown), "a device that never stated its wiring has none"
+
+
+async def test_the_connector_remembers_the_wiring_between_reads() -> None:
+    connector = object.__new__(SunSpecConnector)
+    connector._line_to_line_voltage = True
+    connector._phased_totals = False
+    connector._wiring = None
+    reads = [
+        {"W": 3000.0, "V": 480.0, "ACType": 2, "WL1": 1000.0, "WL2": 1000.0, "WL3": 1000.0},
+        {"W": 3000.0, "V": 480.0},
+    ]
+
+    class _Core:
+        async def fetch_monitoring(self) -> dict[str, Any]:
+            return reads.pop(0)
+
+    connector._core = _Core()
+
+    first = await connector.fetch_monitoring()
+    second = await connector.fetch_monitoring()
+
+    assert (29, 224) in _phases(first)
+    assert (29, 224) in _phases(second)

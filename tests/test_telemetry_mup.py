@@ -333,3 +333,88 @@ class TestPowerDirection:
         flows = [m.reading_type.flow_direction.value for m in mup.mirror_meter_reading]
         mrids = {m.m_rid.value for m in mup.mirror_meter_reading}
         assert flows == [1, 19] and len(mrids) == 2
+
+
+class TestSignedLoadWiringIsStable:
+    """A three-phase device stays three-phase when a poll loses some of its readings."""
+
+    def _registered(self, **values: float) -> Any:
+        readings = readings_from(_three_phase(**values), wiring="three")
+        return plan_registration(LFDI, readings, profile=SIGNED)
+
+    def test_a_poll_with_only_line_1_never_posts_it_as_the_total(self) -> None:
+        registered = self._registered()
+        readings = readings_from({"WL1": 333.0}, wiring="three")
+
+        reading_list = create_meter_reading_list(
+            LFDI, readings, profile=SIGNED, registered=registered
+        )
+
+        assert set(_slot_values(reading_list)) == {10}
+
+    def test_the_total_and_line_1_post_apart_when_lines_2_and_3_are_missing(self) -> None:
+        registered = self._registered()
+        readings = readings_from({"W": 1000.0, "WL1": 333.0}, wiring="three")
+
+        reading_list = create_meter_reading_list(
+            LFDI, readings, profile=SIGNED, registered=registered
+        )
+
+        slots = _slot_values(reading_list)
+        assert set(slots) == {1, 10}
+        assert slots[1] != slots[10]
+
+    def test_the_total_states_the_wiring_before_anything_is_registered(self) -> None:
+        readings = readings_from({"W": 1000.0, "WL1": 333.0}, wiring="three")
+
+        mup = create_mup(LFDI, readings, 300, profile=SIGNED)
+
+        assert {_SLOT_BY_MRID[m.m_rid.value] for m in mup.mirror_meter_reading} == {1, 10}
+
+    def test_a_total_that_was_registered_is_not_taken_over_by_line_1(self) -> None:
+        registered = plan_registration(
+            LFDI, readings_from({"W": 1000.0}, wiring="three"), profile=SIGNED
+        )
+        readings = readings_from({"WL1": 333.0}, wiring="three")
+
+        reading_list = create_meter_reading_list(
+            LFDI, readings, profile=SIGNED, registered=registered
+        )
+
+        assert 1 not in _slot_values(reading_list)
+
+    def test_a_split_phase_device_keeps_its_wiring_too(self) -> None:
+        healthy = readings_from({"W": 1000.0, "WL1": 500.0, "WL2": 500.0}, wiring="split")
+        registered = plan_registration(LFDI, healthy, profile=SIGNED)
+
+        reading_list = create_meter_reading_list(
+            LFDI,
+            readings_from({"WL1": 500.0}, wiring="split"),
+            profile=SIGNED,
+            registered=registered,
+        )
+
+        assert set(_slot_values(reading_list)) == {10}
+
+    def test_a_single_phase_device_still_posts_phase_a_as_its_total(self) -> None:
+        readings = readings_from({"W": 1000.0}, wiring="single")
+        registered = plan_registration(LFDI, readings, profile=SIGNED)
+
+        reading_list = create_meter_reading_list(
+            LFDI, readings, profile=SIGNED, registered=registered
+        )
+
+        assert set(_slot_values(reading_list)) == {1}
+
+    def test_two_readings_with_one_mrid_are_logged_and_the_first_is_posted(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # In the single-phase table both spellings of the total are slot 1.
+        total = Reading(uom=38, value=100.0, phase=0, kind=37, data_qualifier=12)
+        phase_a = Reading(uom=38, value=200.0, phase=128, kind=37, data_qualifier=12)
+
+        with caplog.at_level("WARNING", logger="py20305.telemetry.mup"):
+            reading_list = create_meter_reading_list(LFDI, [total, phase_a], profile=SIGNED)
+
+        assert [m.reading.value for m in reading_list.mirror_meter_reading] == [-100]
+        assert any("same mRID" in record.getMessage() for record in caplog.records)
