@@ -294,3 +294,28 @@ def test_no_sunspec_names_reach_the_rest_of_the_package() -> None:
     ]
 
     assert not leaks
+
+
+async def test_a_refused_power_factor_is_not_sent_again() -> None:
+    """A write the core refuses leaves the merged power factor state as it was."""
+    connector = object.__new__(SunSpecConnector)
+    connector._controls = convert.Controls()
+    sent: list[dict[str, Any]] = []
+
+    class _Core:
+        async def update_const_pf(self, params: dict[str, Any]) -> None:
+            if params["inj"].get("pf", 0) > 1:
+                raise ValueError("power factor out of range")
+            sent.append(params)
+
+    connector._core = _Core()
+    bad = {"displacement": 150, "multiplier": -2, "excitation": False}
+    good = {"displacement": 95, "multiplier": -2, "excitation": False}
+
+    with pytest.raises(ValueError):
+        await connector.update_op_mod_fixed_pf_inject_w({"enabled": True, "value": bad})
+    await connector.update_op_mod_fixed_pf_absorb_w({"enabled": True, "value": good})
+
+    assert sent == [
+        {"inj": {"mode": 0}, "abs": {"pf": 0.95, "excitation": False, "mode": 1}},
+    ]

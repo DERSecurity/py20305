@@ -17,6 +17,7 @@ Needs the ``sunspec`` extra (``pip install py20305[sunspec]``).
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from py20305.connectors.base import BaseConnector, ConnectorPayload
@@ -94,8 +95,15 @@ class SunSpecConnector(BaseConnector):
         return convert.status(await self._core.fetch_status())
 
     async def _apply(self, element: str, params: dict[str, Any]) -> ConnectorPayload:
+        # A write the device or the core refuses must not stay in the merged
+        # state, or the next write of a shared function would send it again.
+        before = copy.deepcopy(self._controls)
         method, core_params = self._controls.translate(element, params)
-        await getattr(self._core, method)(core_params)
+        try:
+            await getattr(self._core, method)(core_params)
+        except BaseException:
+            self._controls = before
+            raise
         return None
 
 
