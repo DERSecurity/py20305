@@ -318,6 +318,230 @@ class TestDerResourceManagerChangeDetection:
         assert client.put_bytes.call_count == 2
 
 
+def _on_change_manager(connector: MagicMock) -> tuple[DerResourceManager, AsyncMock]:
+    client = AsyncMock()
+    client.put_bytes = AsyncMock(return_value=204)
+    manager = DerResourceManager(client, _aresolver(connector), put_policy="on_change")
+    return manager, client
+
+
+def _register(manager: DerResourceManager, lfdi: str = "ab") -> None:
+    """Register a device with a capability href, without scheduling its cycles."""
+    manager.start_device(lfdi, None, None, None)
+    manager._devices[lfdi].capability_href = "/cap"
+
+
+class TestCapabilityOnChange:
+    """Under ``on_change`` DERCapability is PUT once, then only when it changes
+    (CSIP: nameplate ratings SHOULD be reported once at start-up and whenever a
+    value changes)."""
+
+    @pytest.mark.asyncio
+    async def test_unchanged_capability_is_put_once(self) -> None:
+        manager, client = _on_change_manager(_make_connector(nameplate={"rtgMaxW": 15000}))
+        _register(manager)
+
+        await manager._capability_cycle("ab")
+        await manager._capability_cycle("ab")
+
+        assert client.put_bytes.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_changed_capability_is_put_again(self) -> None:
+        connector = _make_connector(nameplate={"rtgMaxW": 15000})
+        manager, client = _on_change_manager(connector)
+        _register(manager)
+
+        await manager._capability_cycle("ab")
+        connector.fetch_nameplate = AsyncMock(return_value={"rtgMaxW": 12000})
+        await manager._capability_cycle("ab")
+
+        assert client.put_bytes.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_restarting_a_device_does_not_put_again(self) -> None:
+        """A rediscovery restarts every device; an unchanged capability stays sent."""
+        manager, client = _on_change_manager(_make_connector(nameplate={"rtgMaxW": 15000}))
+        _register(manager)
+        await manager._capability_cycle("ab")
+
+        _register(manager)
+        await manager._capability_cycle("ab")
+
+        assert client.put_bytes.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_put_is_retried_next_cycle(self) -> None:
+        from py20305.client.errors import Sep2ProtocolError
+
+        manager, client = _on_change_manager(_make_connector(nameplate={"rtgMaxW": 15000}))
+        client.put_bytes = AsyncMock(side_effect=[Sep2ProtocolError("Server Error", 500), 204])
+        _register(manager)
+
+        await manager._capability_cycle("ab")
+        await manager._capability_cycle("ab")
+
+        assert client.put_bytes.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_forget_sent_puts_every_device_again(self) -> None:
+        """After an outage the server may no longer hold what was sent."""
+        manager, client = _on_change_manager(_make_connector(nameplate={"rtgMaxW": 15000}))
+        _register(manager, "ab")
+        _register(manager, "cd")
+        await manager._capability_cycle("ab")
+        await manager._capability_cycle("cd")
+
+        manager.forget_sent()
+        await manager._capability_cycle("ab")
+        await manager._capability_cycle("cd")
+
+        assert client.put_bytes.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_stopped_device_is_put_again_when_it_returns(self) -> None:
+        manager, client = _on_change_manager(_make_connector(nameplate={"rtgMaxW": 15000}))
+        _register(manager)
+        await manager._capability_cycle("ab")
+
+        manager.stop_device("ab")
+        _register(manager)
+        await manager._capability_cycle("ab")
+
+        assert client.put_bytes.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_periodic_is_the_default(self) -> None:
+        """The default keeps the every-cycle PUT certification relies on."""
+        client = AsyncMock()
+        client.put_bytes = AsyncMock(return_value=204)
+        manager = DerResourceManager(client, _aresolver(_make_connector()))
+        _register(manager)
+
+        await manager._capability_cycle("ab")
+        await manager._capability_cycle("ab")
+
+        assert client.put_bytes.call_count == 2
+
+    def test_unknown_put_policy_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="put_policy"):
+            DerResourceManager(
+                AsyncMock(),
+                _aresolver(_make_connector()),
+                put_policy="sometimes",  # type: ignore[arg-type]
+            )
+
+
+def _register_both(manager: DerResourceManager, lfdi: str = "ab") -> None:
+    """Register capability and settings hrefs without scheduling their cycles."""
+    manager.start_device(lfdi, None, None, None)
+    manager._devices[lfdi].capability_href = "/cap"
+    manager._devices[lfdi].settings_href = "/set"
+
+
+def _puts_to(client: AsyncMock, href: str) -> int:
+    return sum(1 for call in client.put_bytes.call_args_list if call.args[0] == href)
+
+
+class TestSettingsOnChange:
+    """Under ``on_change`` DERSettings is PUT at start, and again when DERSettings
+    or DERCapability content changes."""
+
+    @pytest.mark.asyncio
+    async def test_unchanged_settings_are_put_once_across_a_restart(self) -> None:
+        manager, client = _on_change_manager(_make_connector(configuration={"setMaxW": 10000}))
+        _register_both(manager)
+        await manager._settings_cycle("ab")
+
+        _register_both(manager)
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 1
+
+    @pytest.mark.asyncio
+    async def test_changed_settings_are_put_again(self) -> None:
+        connector = _make_connector(configuration={"setMaxW": 10000})
+        manager, client = _on_change_manager(connector)
+        _register_both(manager)
+
+        await manager._settings_cycle("ab")
+        connector.fetch_configuration = AsyncMock(return_value={"setMaxW": 8000})
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 2
+
+    @pytest.mark.asyncio
+    async def test_new_hrefs_after_a_rediscovery_are_populated(self) -> None:
+        """What was sent to the old resources says nothing about the new ones."""
+        manager, client = _on_change_manager(
+            _make_connector(nameplate={"rtgMaxW": 15000}, configuration={"setMaxW": 10000})
+        )
+        _register_both(manager)
+        await manager._capability_cycle("ab")
+        await manager._settings_cycle("ab")
+
+        manager.start_device("ab", None, None, None)
+        manager._devices["ab"].capability_href = "/cap2"
+        manager._devices["ab"].settings_href = "/set2"
+        await manager._capability_cycle("ab")
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/cap2") == 1
+        assert _puts_to(client, "/set2") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_changed_capability_puts_unchanged_settings_again(self) -> None:
+        connector = _make_connector(nameplate={"rtgMaxW": 15000}, configuration={"setMaxW": 10000})
+        manager, client = _on_change_manager(connector)
+        _register_both(manager)
+        await manager._capability_cycle("ab")
+        await manager._settings_cycle("ab")
+
+        connector.fetch_nameplate = AsyncMock(return_value={"rtgMaxW": 12000})
+        await manager._capability_cycle("ab")
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 2
+
+    @pytest.mark.asyncio
+    async def test_the_first_capability_does_not_put_settings_twice(self) -> None:
+        manager, client = _on_change_manager(
+            _make_connector(nameplate={"rtgMaxW": 15000}, configuration={"setMaxW": 10000})
+        )
+        _register_both(manager)
+
+        await manager._settings_cycle("ab")
+        await manager._capability_cycle("ab")
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 1
+
+    @pytest.mark.asyncio
+    async def test_forget_sent_puts_settings_again(self) -> None:
+        manager, client = _on_change_manager(_make_connector(configuration={"setMaxW": 10000}))
+        _register_both(manager)
+        await manager._settings_cycle("ab")
+
+        manager.forget_sent()
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 2
+
+    @pytest.mark.asyncio
+    async def test_periodic_settings_are_put_again_after_a_restart(self) -> None:
+        """Today's behavior: change detection lives in the per-device state."""
+        client = AsyncMock()
+        client.put_bytes = AsyncMock(return_value=204)
+        manager = DerResourceManager(client, _aresolver(_make_connector()))
+        _register_both(manager)
+        await manager._settings_cycle("ab")
+
+        _register_both(manager)
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/set") == 2
+
+
 class TestDerResourceManagerPerResourceRates:
     """Tests for per-resource poll rates."""
 

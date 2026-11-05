@@ -197,8 +197,8 @@ supplies a reading the MirrorUsagePoint did not register, the client posts the
 MirrorUsagePoint again with every earlier ReadingType unchanged plus the new
 one, before posting readings for it.
 
-The reading profile (`default`, `signed_load_convention`) and
-`power_direction` apply to the readings with `uom` 38 and 63.
+The reading profile (`default`, `signed_load_convention`, `signed_as_reported`)
+and `power_direction` apply to the readings with `uom` 38 and 63.
 
 ### Signs
 
@@ -214,8 +214,9 @@ Real and reactive power are signed in the frame of the device's role:
 A power factor carries the sign of its reactive power. The default profile
 posts the sign as flowDirection; the `SIGNED_LOAD_CONVENTION` profile negates a
 DER's and a DER meter's power and posts a site meter's as reported, since
-import positive is already the load convention. A connector that reports
-another convention posts the wrong sign.
+import positive is already the load convention. The `SIGNED_AS_REPORTED`
+profile posts the sign the connector reports, for every role. A connector that
+reports another convention posts the wrong sign.
 
 ### Ratings and settings
 
@@ -320,6 +321,24 @@ DefaultDERControl does not carry, except connect, energize and the permits:
 ending an event that disconnected a device is not an order to reconnect it.
 
 ### Configuring a device
+
+A connector whose readings are fixed for the device's life can say so with
+`declared_readings()`, returning the readings it provides as their IEEE 2030.5
+identities (a `ReadingIdentity`, or a `Reading` standing for its identity):
+
+```python
+from py20305.connectors.reading import Reading
+
+def declared_readings(self) -> frozenset[ReadingIdentity] | None:
+    return frozenset({reading_identity(Reading(value=0.0, uom=38))})  # real power
+```
+
+Under the `SIGNED_AS_REPORTED` profile the MirrorUsagePoint then registers
+exactly those readings from the first cycle, also one with no values, and is
+never re-posted for a reading that appears later. A reading `fetch_monitoring`
+returns without declaring it is not posted, and is logged once. Without a
+declaration (the default, `None`) the readings register as they appear. The
+other profiles ignore it.
 
 Point a device at it by import path — no registration needed:
 

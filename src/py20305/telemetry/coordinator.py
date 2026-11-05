@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
     from py20305.history.intervals import IntervalHistory
     from py20305.readings import MeasurementSource
-    from py20305.telemetry.der_resource_manager import DerResourceManager
+    from py20305.telemetry.der_resource_manager import DerResourceManager, PutPolicy
     from py20305.telemetry.manager import TelemetryManager
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,10 @@ class TelemetryCoordinator:
             LFDI, the EndDevice it registers for itself.
         site_interval_history: Integrates site meter readings into the site
             series of the operations history.
+        der_resource_put_policy: When DERCapability and DERSettings are PUT;
+            see :data:`~py20305.telemetry.der_resource_manager.PutPolicy`.
+            Under ``on_change``, a reconnect after a sustained loss of contact
+            resends both, since the server may have lost them.
     """
 
     def __init__(
@@ -118,8 +122,12 @@ class TelemetryCoordinator:
         roles: Mapping[str, DeviceRoleConfig] | None = None,
         site_lfdi: str | None = None,
         site_interval_history: IntervalHistory | None = None,
+        der_resource_put_policy: PutPolicy = "periodic",
     ) -> None:
         self._client = client
+        self._der_resource_put_policy: PutPolicy = der_resource_put_policy
+        if der_resource_put_policy == "on_change":
+            client.add_reconnect_listener(self._forget_sent_der_resources)
         self._roles = {lfdi.lower(): role for lfdi, role in (roles or {}).items()}
         self._site_lfdi = site_lfdi.lower() if site_lfdi else None
         self._site_interval_history = site_interval_history
@@ -223,7 +231,12 @@ class TelemetryCoordinator:
             client=self._client.http,
             connector_resolver=self._resolve_connector,
             command_observer=self._command_observer,
+            put_policy=self._der_resource_put_policy,
         )
+
+    def _forget_sent_der_resources(self) -> None:
+        if self._der_resources is not None:
+            self._der_resources.forget_sent()
 
     def _mup_list_href(self) -> str:
         current = self._client.state.mup_list_href

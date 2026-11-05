@@ -13,7 +13,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from py20305.client.errors import (
     Sep2ConnectionError,
@@ -35,6 +35,15 @@ if TYPE_CHECKING:
     from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
 
 logger = logging.getLogger(__name__)
+
+#: When DERCapability and DERSettings are PUT. ``periodic`` PUTs DERCapability
+#: on every capability cycle, so a server that cleared it (a certification
+#: server resets resources between tests) gets it back, and DERSettings when it
+#: changes. ``on_change`` PUTs each once, then only when it changes or after
+#: :meth:`DerResourceManager.forget_sent`, and a changed DERCapability also
+#: resends DERSettings (CSIP G29: nameplate ratings and adjusted settings
+#: SHOULD be reported once at start-up and whenever a value changes).
+PutPolicy = Literal["periodic", "on_change"]
 
 
 @dataclass
@@ -68,6 +77,7 @@ class DerResourceManager:
         connector_resolver: Callable[[str], BaseConnector | Awaitable[BaseConnector]],
         command_observer: CommandObserver | None = None,
         device_telemetry: DeviceTelemetryEmitter | None = None,
+        put_policy: PutPolicy = "periodic",
     ) -> None:
         """Initialize the DerResourceManager.
 
@@ -92,7 +102,25 @@ class DerResourceManager:
                 reads this manager issues to the monitoring system. These
                 reads do not pass through a measurement source, so no other
                 seam covers them. Optional and disabled by default.
+            put_policy: When DERCapability and DERSettings are PUT (see
+                :data:`PutPolicy`).
+
+        Raises:
+            ValueError: ``put_policy`` is not ``periodic`` or ``on_change``.
         """
+        if put_policy not in get_args(PutPolicy):
+            raise ValueError(f"put_policy must be 'periodic' or 'on_change', got {put_policy!r}")
+        self._put_policy = put_policy
+        # The href and DERCapability body last PUT for each device, under
+        # on_change. Kept outside the per-device state so a rediscovery, which
+        # restarts every device, does not resend an unchanged capability; the
+        # href is kept with it because a rediscovery may hand out a new one,
+        # which nothing has been sent to.
+        self._sent_capability: dict[str, tuple[str, bytes]] = {}
+        # Likewise the href and configuration DERSettings was last PUT from.
+        # Compared as the connector's data, not the body, which carries
+        # updatedTime.
+        self._sent_settings: dict[str, tuple[str, dict[str, Any]]] = {}
         self._client = client
         # Server timebase for telemetry timestamp defaults. isinstance guard
         # keeps AsyncMock clients in tests (whose .timebase is a Mock)
@@ -215,9 +243,10 @@ class DerResourceManager:
     async def _capability_cycle(self, lfdi: str) -> None:
         """Single capability PUT cycle.
 
-        Always PUTs regardless of whether the data changed since last cycle.
-        DERCapability is a small, idempotent payload, and the server may have
-        cleared it (e.g. between certification test runs).
+        Under ``periodic`` it PUTs whether or not the data changed since the
+        last cycle: DERCapability is a small, idempotent payload, and the server
+        may have cleared it (e.g. between certification test runs). Under
+        ``on_change`` it PUTs only a body that differs from the last one sent.
         """
         state = self._devices.get(lfdi)
         if state is None or state.capability_href is None:
@@ -231,15 +260,25 @@ class DerResourceManager:
                 der_type=connector.der_type,
                 csip_aus_mode=self._client.csip_aus_mode,
             )
-            await self._client.put_bytes(
-                state.capability_href,
-                to_xml(
-                    model,
-                    server_2018_compat=self._client.server_2018_compat,
-                    include_csipaus=self._client.csip_aus_mode,
-                    csipaus_namespace=self._client.csipaus_namespace,
-                ),
+            body = to_xml(
+                model,
+                server_2018_compat=self._client.server_2018_compat,
+                include_csipaus=self._client.csip_aus_mode,
+                csipaus_namespace=self._client.csipaus_namespace,
             )
+            sent = (state.capability_href, body)
+            previous = self._sent_capability.get(lfdi)
+            if self._put_policy == "on_change" and previous == sent:
+                logger.debug("DERCapability unchanged for %s, skipping PUT", lfdi[:8])
+                return
+            await self._client.put_bytes(state.capability_href, body)
+            if self._put_policy == "on_change":
+                self._sent_capability[lfdi] = sent
+                if previous is not None and previous[1] != body:
+                    # A changed capability resends the settings on their next
+                    # cycle, whether or not they changed too. A new href alone
+                    # does not: the settings cycle checks its own href.
+                    self._sent_settings.pop(lfdi, None)
             logger.debug("DERCapability PUT for %s", lfdi[:8])
         except Sep2ProtocolError as e:
             from py20305.diagnostics import report
@@ -288,7 +327,11 @@ class DerResourceManager:
         try:
             connector = await self._resolve_connector_async(lfdi)
             configuration = await self._read(connector, "fetch_configuration", lfdi)
-            if configuration == state.last_settings_data:
+            if self._put_policy == "on_change":
+                unchanged = self._sent_settings.get(lfdi) == (state.settings_href, configuration)
+            else:
+                unchanged = configuration == state.last_settings_data
+            if unchanged:
                 logger.debug("DERSettings unchanged for %s, skipping PUT", lfdi[:8])
                 return
             try:
@@ -326,6 +369,8 @@ class DerResourceManager:
                 ),
             )
             state.last_settings_data = configuration
+            if self._put_policy == "on_change":
+                self._sent_settings[lfdi] = (state.settings_href, configuration)
             logger.debug("DERSettings PUT for %s", lfdi[:8])
         except Sep2ProtocolError as e:
             from py20305.diagnostics import report
@@ -438,6 +483,19 @@ class DerResourceManager:
             lfdi: Device LFDI.
         """
         self._devices.pop(lfdi.lower(), None)
+        # A device that returns is a new registration on the server.
+        self._sent_capability.pop(lfdi.lower(), None)
+        self._sent_settings.pop(lfdi.lower(), None)
+
+    def forget_sent(self) -> None:
+        """Treat every DERCapability and DERSettings as unsent, so each is PUT again.
+
+        For when the server may no longer hold what was sent, such as after a
+        sustained loss of contact. Only affects the ``on_change`` policy; under
+        ``periodic`` every capability cycle PUTs anyway.
+        """
+        self._sent_capability.clear()
+        self._sent_settings.clear()
 
     @property
     def active_devices(self) -> list[str]:

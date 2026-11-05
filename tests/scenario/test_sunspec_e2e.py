@@ -114,7 +114,8 @@ def _mmrs(readings: list[Any], profile: ReadingProfile) -> dict[str, dict[str, A
 # -- Reads -------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("profile", list(ReadingProfile))
+#: The profiles release 0.16 had; the fixture records its mRIDs for these.
+@pytest.mark.parametrize("profile", [ReadingProfile.DEFAULT, ReadingProfile.SIGNED_LOAD_CONVENTION])
 async def test_readings_register_under_the_mrids_0_16_used(served, profile) -> None:
     connector = await _connect(served[0], profile)
     expected = json.loads(FIXTURE.read_text(encoding="utf-8"))[profile.value]

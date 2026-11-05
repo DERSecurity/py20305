@@ -21,9 +21,15 @@ maps each of those identities to its 0.16 slot, and the slot gives the mRID:
 - 41-48 and 51-58: W and var with flowDirection 1 and 19
   (``PowerDirection.SPLIT``).
 - 61 and 62: energy delivered forward and in reverse, DEFAULT profile only.
+- 71-77 and 80-97: the system and per-line readings under
+  ``ReadingProfile.SIGNED_AS_REPORTED``, whose ReadingTypes carry no
+  flowDirection (the DEFAULT slot plus 70).
 
 Every other identity gets an mRID hashed from the identity, in a layout that
-cannot collide with the slot layout.
+cannot collide with the slot layout: a slot is two decimal digits and the hash
+layout puts a hex letter at the same position. Under SIGNED_AS_REPORTED the
+hash also covers the profile, since a reading that omits flowDirection has a
+different ReadingType from the same identity under DEFAULT.
 """
 
 from __future__ import annotations
@@ -163,10 +169,19 @@ class ReadingProfile(StrEnum):
     load convention counts as export, so both are negated. A site meter
     reports them positive for import, from the grid to the premises, which is
     already the load convention, so both are posted as reported.
+
+    ``SIGNED_AS_REPORTED`` posts W, var and PF with the sign the connector
+    reports, whatever the device's role -- for a DER, W positive while it
+    delivers and negative while it absorbs -- and omits flowDirection from a
+    ReadingType that does not state one (optional in IEEE 2030.5
+    ``ReadingType``). Every other field keeps its DEFAULT value, and the other
+    quantities post as magnitudes. A connector can fix the registered set with
+    ``declared_readings()``.
     """
 
     DEFAULT = "default"
     SIGNED_LOAD_CONVENTION = "signed_load_convention"
+    SIGNED_AS_REPORTED = "signed_as_reported"
 
 
 class PowerDirection(StrEnum):
@@ -376,6 +391,21 @@ _SIGNED_LOAD_SLOTS_SINGLE_PHASE: dict[ReadingIdentity, tuple[int, str]] = _signe
     (0, 128, 132, 224)
 )
 
+#: SIGNED_AS_REPORTED's slots are the DEFAULT slots of the system and per-line
+#: readings plus this offset (71-77 system, 80-97 per line). Its ReadingTypes
+#: carry no flowDirection and every DEFAULT one does, so sharing a slot would
+#: change a registered ReadingType.
+_AS_REPORTED_SLOT_OFFSET = 70
+_AS_REPORTED_SLOTS: dict[ReadingIdentity, tuple[int, str]] = {
+    identity: (slot + _AS_REPORTED_SLOT_OFFSET, description)
+    for identity, (slot, description) in _DEFAULT_SLOTS.items()
+    if slot <= 27
+}
+#: The quantities SIGNED_AS_REPORTED posts with the connector's sign.
+_AS_REPORTED_SIGNED_UOMS = frozenset({_UOM_W, _UOM_VAR, _UOM_PF})
+#: Mixed into a SIGNED_AS_REPORTED hashed mRID.
+_AS_REPORTED_SALT = "signed_as_reported"
+
 #: Phase codes of lines 2 and 3.
 _LINE_2_3_PHASES = frozenset({64, 65, 32, 33})
 #: Phase codes a multi-phase device tags its totals with (split phase, three phase).
@@ -446,15 +476,20 @@ def _create_mrid(lfdi: str, index: int = 0, pen: int = DEFAULT_PEN) -> MRidtype:
 _HASHED_MARKER = "f"
 
 
-def _hashed_mrid(lfdi: str, identity: ReadingIdentity, pen: int = DEFAULT_PEN) -> MRidtype:
+def _hashed_mrid(
+    lfdi: str, identity: ReadingIdentity, pen: int = DEFAULT_PEN, salt: str = ""
+) -> MRidtype:
     """Return the mRID of a reading with no 0.16 slot.
 
     Layout: SFDI (12 decimal digits), the marker, 11 hex chars of a SHA-256
-    over the LFDI and the identity, and the PEN.
+    over the LFDI, the identity and the optional ``salt``, and the PEN.
     """
     lfdi_norm = lfdi.lower()
     sfdi = compute_sfdi(lfdi_norm)
-    text = "|".join([lfdi_norm, *("" if v is None else str(v) for v in identity)])
+    parts = [lfdi_norm, *("" if v is None else str(v) for v in identity)]
+    if salt:
+        parts.append(salt)
+    text = "|".join(parts)
     digest = hashlib.sha256(text.encode("ascii")).hexdigest()[:11]
     return MRidtype(value=bytes.fromhex(f"{sfdi:012d}{_HASHED_MARKER}{digest}{pen:08x}"))
 
@@ -613,24 +648,31 @@ def _posted_readings(
     profile: ReadingProfile,
     power_direction: PowerDirection,
     registered: Mapping[bytes, RegisteredReading] | None = None,
+    declared: frozenset[ReadingIdentity] | None = None,
 ) -> list[_Posted]:
     """Return the MirrorMeterReadings ``readings`` post, in MUP order.
 
     ``registered`` is what the MirrorUsagePoint has registered; under
     SIGNED_LOAD_CONVENTION it, with the readings, says whether the device is
-    single or multi-phase (see :func:`_is_multi_phase`).
+    single or multi-phase (see :func:`_is_multi_phase`). Under
+    SIGNED_AS_REPORTED, ``declared`` limits the readings to the declared ones.
     """
     signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
+    as_reported = profile is ReadingProfile.SIGNED_AS_REPORTED
     valid = valid_readings(readings)
-    table = _DEFAULT_SLOTS
+    table = _AS_REPORTED_SLOTS if as_reported else _DEFAULT_SLOTS
+    if as_reported and declared is not None:
+        valid = [r for r in valid if reading_identity(r) in declared]
     if signed_load:
         multi_phase = _is_multi_phase(lfdi, valid, registered)
         table = _SIGNED_LOAD_SLOTS if multi_phase else _SIGNED_LOAD_SLOTS_SINGLE_PHASE
     defaults = _SIGNED_LOAD_MULTIPLIER if signed_load else DEFAULT_MULTIPLIER
     directions: tuple[int, ...] = ()
-    if not signed_load and power_direction is PowerDirection.NET:
+    if signed_load or as_reported:
+        pass
+    elif power_direction is PowerDirection.NET:
         directions = (FLOW_NET,)
-    elif not signed_load and power_direction is PowerDirection.SPLIT:
+    elif power_direction is PowerDirection.SPLIT:
         directions = (FLOW_NORMAL, FLOW_REVERSE)
 
     out: list[_Posted] = []
@@ -654,7 +696,9 @@ def _posted_readings(
                     description = f"{description} {_DIRECTION_SUFFIX[flow]}"
                 order = (0, legacy[0], rank)
             else:
-                mrid = _hashed_mrid(lfdi, variant).value
+                mrid = _hashed_mrid(
+                    lfdi, variant, salt=_AS_REPORTED_SALT if as_reported else ""
+                ).value
                 description = _description(variant, flow)
                 order = (1, position, rank)
             if mrid in seen:
@@ -683,7 +727,12 @@ def _posted_readings(
                     flow_direction=(
                         flow if flow is not None else (FLOW_NOT_APPLICABLE if signed_load else None)
                     ),
-                    line=_line_of(reading, legacy),
+                    line=_line_of(
+                        reading,
+                        (legacy[0] - _AS_REPORTED_SLOT_OFFSET, legacy[1])
+                        if as_reported and legacy is not None
+                        else legacy,
+                    ),
                 )
             )
     out.sort(key=lambda p: p.order)
@@ -717,16 +766,53 @@ def _registration_flow(posted: _Posted) -> int:
     return FLOW_NORMAL
 
 
-def _reading_type(posted: _Posted, flow_direction: int) -> ReadingType1:
+def _reading_type(posted: _Posted, flow_direction: int | None) -> ReadingType1:
     return ReadingType1(
         accumulation_behaviour=AccumulationBehaviourType(value=posted.accumulation_behaviour),
         commodity=CommodityType(value=posted.commodity),
         data_qualifier=DataQualifierType(value=posted.data_qualifier),
-        flow_direction=FlowDirectionType(value=flow_direction),
+        flow_direction=(
+            FlowDirectionType(value=flow_direction) if flow_direction is not None else None
+        ),
         kind=KindType(value=posted.kind),
         power_of_ten_multiplier=PowerOfTenMultiplierType(value=posted.multiplier),
         uom=UomType(value=posted.uom),
         phase=PhaseCode(value=posted.phase) if posted.phase else None,
+    )
+
+
+def _placeholders(declared: Iterable[ReadingIdentity], present: Sequence[Reading]) -> list[Reading]:
+    """Return a valueless reading for each declared identity the cycle does not supply."""
+    have = {reading_identity(reading) for reading in present}
+    out: list[Reading] = []
+    for identity in sorted(declared, key=repr):
+        if identity in have:
+            continue
+        reading = Reading(
+            value=0.0,
+            uom=identity.uom,
+            phase=identity.phase,
+            kind=identity.kind,
+            data_qualifier=identity.data_qualifier,
+            accumulation_behaviour=identity.accumulation_behaviour,
+            flow_direction=identity.flow_direction,
+            multiplier=identity.multiplier,
+        )
+        if is_valid_reading(reading):
+            out.append(reading)
+        else:
+            logger.warning("Ignoring an invalid declared reading %s", identity)
+    return out
+
+
+def undeclared_readings(
+    readings: Iterable[object], declared: frozenset[ReadingIdentity]
+) -> frozenset[ReadingIdentity]:
+    """Return the identities in ``readings`` that ``declared`` leaves out, so are not posted."""
+    return frozenset(
+        identity
+        for identity in (reading_identity(r) for r in valid_readings(readings))
+        if identity not in declared
     )
 
 
@@ -737,6 +823,7 @@ def plan_registration(
     profile: ReadingProfile = ReadingProfile.DEFAULT,
     power_direction: PowerDirection = PowerDirection.DEFAULT,
     registered: Mapping[bytes, RegisteredReading] | None = None,
+    declared: frozenset[ReadingIdentity] | None = None,
 ) -> dict[bytes, RegisteredReading]:
     """Return the MirrorMeterReadings a MUP built now registers, keyed by mRID.
 
@@ -745,17 +832,28 @@ def plan_registration(
     ReadingType the server holds (Rule a.4 writes the new MUP over the old one,
     and Rule n forbids the change). A new reading is added with the ReadingType
     it has now.
+
+    Under SIGNED_AS_REPORTED with ``declared``, the declared readings are
+    registered whether or not this cycle supplies a value, and no other.
     """
     plan: dict[bytes, RegisteredReading] = dict(registered or {})
-    for posted in _posted_readings(lfdi.lower(), readings, profile, power_direction, registered):
+    as_reported = profile is ReadingProfile.SIGNED_AS_REPORTED
+    candidates = list(readings)
+    if as_reported and declared is not None:
+        candidates += _placeholders(declared, valid_readings(readings))
+    for posted in _posted_readings(
+        lfdi.lower(), candidates, profile, power_direction, registered, declared
+    ):
         if posted.mrid in plan:
             continue
-        flow = (
-            posted.flow_direction
-            if profile is ReadingProfile.SIGNED_LOAD_CONVENTION
-            else _registration_flow(posted)
-        )
-        assert flow is not None
+        flow: int | None
+        if as_reported:
+            flow = posted.flow_direction
+        elif profile is ReadingProfile.SIGNED_LOAD_CONVENTION:
+            flow = posted.flow_direction
+            assert flow is not None
+        else:
+            flow = _registration_flow(posted)
         plan[posted.mrid] = RegisteredReading(
             mrid=posted.mrid,
             description=posted.description,
@@ -776,6 +874,7 @@ def create_mup(
     role: DeviceRole = DeviceRole.DER,
     revenue_quality: bool = False,
     device_lfdi: str | None = None,
+    declared: frozenset[ReadingIdentity] | None = None,
 ) -> MirrorUsagePoint:
     """Create a MirrorUsagePoint registering a MirrorMeterReading per reading.
 
@@ -796,6 +895,10 @@ def create_mup(
         revenue_quality: Set isRevenueQuality in roleFlags.
         device_lfdi: LFDI of the EndDevice the MUP is posted under, put in
               deviceLFDI. Defaults to ``lfdi``.
+        declared: The connector's ``declared_readings()``. Under
+              SIGNED_AS_REPORTED the MUP registers exactly these readings,
+              whatever ``readings`` holds; None registers the readings as they
+              appear. Ignored under the other profiles.
     """
     lfdi_norm = lfdi.lower()
     plan = plan_registration(
@@ -804,6 +907,7 @@ def create_mup(
         profile=profile,
         power_direction=power_direction,
         registered=registered,
+        declared=declared,
     )
     meter_readings = [
         MirrorMeterReading1(
@@ -876,6 +980,18 @@ def _signed_load_value(posted: _Posted, var_by_line: Mapping[int, int], role: De
     return abs(scaled)
 
 
+def _as_reported_value(posted: _Posted) -> int:
+    """Return a SIGNED_AS_REPORTED value: W, var and PF keep the connector's sign.
+
+    The sign is not moved to flowDirection, which this profile omits. A
+    direction-specific reading and every other quantity is a magnitude.
+    """
+    scaled = _scale_half_away(posted.reading.value, posted.multiplier)
+    if posted.reading.flow_direction is None and posted.uom in _AS_REPORTED_SIGNED_UOMS:
+        return scaled
+    return abs(scaled)
+
+
 def create_meter_reading_list(
     lfdi: str,
     readings: Sequence[Reading],
@@ -888,6 +1004,7 @@ def create_meter_reading_list(
     registered: Mapping[bytes, RegisteredReading] | None = None,
     power_direction: PowerDirection = PowerDirection.DEFAULT,
     role: DeviceRole = DeviceRole.DER,
+    declared: frozenset[ReadingIdentity] | None = None,
 ) -> MirrorMeterReadingList:
     """Create a MirrorMeterReadingList with this cycle's readings.
 
@@ -909,8 +1026,9 @@ def create_meter_reading_list(
 
     ``registered``, when given, limits the list to readings the MUP has
     registered, so a reading whose registration has not succeeded yet is held
-    back rather than met with Rule h.3. ``profile``, ``power_direction`` and
-    ``role`` must be the ones the MUP was created with.
+    back rather than met with Rule h.3. ``profile``, ``power_direction``,
+    ``role`` and ``declared`` must be the ones the MUP was created with; under
+    SIGNED_AS_REPORTED only declared readings are posted.
 
     An interval reading (Average, Maximum, Minimum) covers a window that
     CSIP-AUS requires to match the MUP postRate, so its duration is
@@ -922,7 +1040,10 @@ def create_meter_reading_list(
 
     lfdi_norm = lfdi.lower()
     signed_load = profile is ReadingProfile.SIGNED_LOAD_CONVENTION
-    posted_list = _posted_readings(lfdi_norm, readings, profile, power_direction, registered)
+    as_reported = profile is ReadingProfile.SIGNED_AS_REPORTED
+    posted_list = _posted_readings(
+        lfdi_norm, readings, profile, power_direction, registered, declared
+    )
 
     var_by_line: dict[int, int] = {}
     if signed_load:
@@ -938,7 +1059,7 @@ def create_meter_reading_list(
             value = _signed_load_value(posted, var_by_line, role)
             duration = 0
         else:
-            value = _default_value(posted)
+            value = _as_reported_value(posted) if as_reported else _default_value(posted)
             duration = 0 if posted.data_qualifier == _DATA_QUALIFIER_INSTANTANEOUS else post_rate
         reading = Reading1(
             quality_flags=_quality_flags(posted.reading, stale=stale),
@@ -979,5 +1100,6 @@ __all__ = [
     "mup_mrid",
     "plan_registration",
     "role_flags_for",
+    "undeclared_readings",
     "valid_readings",
 ]

@@ -27,7 +27,7 @@ from py20305.connectors.errors import (
     ConnectorValueError,
     ConnectorWriteError,
 )
-from py20305.connectors.reading import Reading
+from py20305.connectors.reading import Reading, ReadingIdentity
 
 ConnectorPayload = dict[str, Any] | None
 
@@ -119,6 +119,22 @@ class BaseConnector:
         second reading with the same one is dropped.
         """
         return []
+
+    def declared_readings(self) -> frozenset[ReadingIdentity] | None:
+        """Optional: the readings this device provides, fixed for its life.
+
+        Each is a :class:`~py20305.connectors.reading.ReadingIdentity` (uom,
+        phase, kind, data qualifier, accumulation behaviour, flow direction and
+        multiplier), or a :class:`~py20305.connectors.reading.Reading` standing
+        for its identity. Under the ``SIGNED_AS_REPORTED`` reading profile the
+        MirrorUsagePoint registers exactly these readings, from the first
+        cycle, even one with no values (a charger with no vehicle plugged in),
+        so it is posted once and never re-posted for a reading that appears
+        later. A reading returned by ``fetch_monitoring`` but not declared is
+        not posted. Return ``None`` (the default) to register the readings as
+        they appear. Other profiles ignore it.
+        """
+        return None
 
     async def fetch_nameplate(self) -> dict[str, Any]:
         """Return DER ratings keyed by IEEE 2030.5 DERCapability element name.

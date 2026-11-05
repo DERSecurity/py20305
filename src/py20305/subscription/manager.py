@@ -13,7 +13,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from py20305.client.errors import Sep2ProtocolError
 from py20305.models.sep.sep import Subscription
@@ -31,6 +31,15 @@ logger = logging.getLogger(__name__)
 # the subscription against the server's current resource layout.
 _SUBSCRIPTION_LOST_STATUSES: frozenset[int] = frozenset({401, 404})
 
+# HTTP statuses on a renewal PUT that mean the server holds no subscription at
+# that href. A server may move a subscription to a new href on its own, so the
+# client creates a new one on the list rather than rediscovering. 405 is not a
+# compliant answer (PUT is Mandatory on a Subscription, IEEE 2030.5 Annex
+# A.2.7.2) and is handled the same way so such a server still renews.
+_PUT_RENEWAL_FALLBACK_STATUSES: frozenset[int] = frozenset({404, 405})
+
+RenewalMethod = Literal["post", "put"]
+
 
 @dataclass
 class SubscriptionState:
@@ -44,6 +53,9 @@ class SubscriptionState:
     created_at: float = field(default_factory=time.time)
     is_list_subscription: bool = False
     unmanaged: bool = False
+    #: The SubscriptionList the subscription was POSTed to. The server may give
+    #: the subscription an href outside it, so it is kept rather than derived.
+    sub_list_href: str | None = None
 
 
 @dataclass
@@ -84,7 +96,19 @@ class SubscriptionManager:
         max_notifications: int = 1000,
         server_2018_compat: bool = False,
         on_subscription_lost: Callable[[], Awaitable[None]] | None = None,
+        renewal_method: RenewalMethod = "post",
     ) -> None:
+        """
+        Args:
+            renewal_method: ``post`` re-POSTs a subscription to its list to
+                renew it; ``put`` PUTs it to its own href (see :meth:`renew`).
+
+        Raises:
+            ValueError: ``renewal_method`` is not ``post`` or ``put``.
+        """
+        if renewal_method not in get_args(RenewalMethod):
+            raise ValueError(f"renewal_method must be 'post' or 'put', got {renewal_method!r}")
+        self._renewal_method = renewal_method
         self._client = client
         self._notification_uri = notification_uri
         self._subscriptions: dict[str, SubscriptionState] = {}
@@ -244,6 +268,7 @@ class SubscriptionManager:
             notification_uri=self._notification_uri,
             resource_type=resource_type,
             is_list_subscription=resource_type.endswith("List"),
+            sub_list_href=sub_list_href,
         )
         self._subscriptions[location] = state
         logger.info("Subscribed to %s (%s) -> %s", subscribed_resource, resource_type, location)
@@ -591,6 +616,7 @@ class SubscriptionManager:
                     "status": s.status,
                     "created_at": s.created_at,
                     "unmanaged": s.unmanaged,
+                    "sub_list_href": s.sub_list_href,
                 }
                 for s in self._subscriptions.values()
             ],
@@ -609,6 +635,7 @@ class SubscriptionManager:
                 created_at=entry.get("created_at", 0.0),
                 is_list_subscription=entry.get("is_list_subscription", False),
                 unmanaged=entry.get("unmanaged", False),
+                sub_list_href=entry.get("sub_list_href"),
             )
             self._subscriptions[state.subscription_uri] = state
 
@@ -647,7 +674,15 @@ class SubscriptionManager:
         level: str | None = None,
         limit: int | None = None,
     ) -> bool:
-        """Renew a single subscription by re-POSTing to the server.
+        """Renew a single subscription.
+
+        Under the ``post`` renewal method the Subscription is re-POSTed to its
+        SubscriptionList, which the server matches by notificationURI (IEEE
+        2030.5 Annex C.9). Under ``put`` it is PUT to the subscription's own
+        href (Annex A.2.7.2: PUT is Mandatory on a Subscription); a 404 or 405
+        there means the server no longer holds that href, so a new
+        subscription is POSTed to the list it was created on, without a
+        rediscovery.
 
         Optional parameter overrides allow changing encoding, level, or limit
         during renewal (WP4c).
@@ -671,60 +706,37 @@ class SubscriptionManager:
             notification_uri=state.notification_uri,
         )
 
-        # POST to the SubscriptionList (parent), not the individual subscription.
-        # The server matches by notificationURI to treat this as a renewal.
-        sub_list_href = subscription_uri.rsplit("/", 1)[0]
+        # A subscription restored from a checkpoint written before the list
+        # href was recorded falls back to its parent path.
+        sub_list_href = state.sub_list_href or subscription_uri.rsplit("/", 1)[0]
+
+        if self._renewal_method == "put":
+            try:
+                await self._client.put(subscription_uri, sub)
+            except Sep2ProtocolError as exc:
+                if exc.status_code not in _PUT_RENEWAL_FALLBACK_STATUSES:
+                    return self._renewal_rejected(subscription_uri, exc)
+                logger.info(
+                    "PUT renewal of %s returned HTTP %d; creating a new subscription on %s",
+                    subscription_uri,
+                    exc.status_code,
+                    sub_list_href,
+                )
+            except Exception as exc:
+                return self._renewal_failed(subscription_uri, exc)
+            else:
+                state.created_at = time.time()
+                logger.info(
+                    "Renewed subscription %s (%s) by PUT", subscription_uri, state.resource_type
+                )
+                return True
 
         try:
             location = await self._client.post(sub_list_href, sub)
         except Sep2ProtocolError as exc:
-            from py20305.diagnostics import report
-
-            report(
-                "warnings",
-                f"Server rejected renewal of {subscription_uri}: HTTP {exc.status_code}",
-                source="subscription",
-                dedup_key=f"sub_renewal:{subscription_uri}",
-                details={
-                    "subscription_uri": subscription_uri,
-                    "status_code": exc.status_code,
-                },
-            )
-            if exc.status_code in _SUBSCRIPTION_LOST_STATUSES and self._on_subscription_lost:
-                # Server forgot about this subscription (typical after a
-                # server restart drops the in-memory subscription store).
-                # Trigger rediscovery so a fresh subscribe cycle runs
-                # against the server's current state; the rediscovery
-                # primitive coalesces concurrent calls, so multiple
-                # renewals firing this at once is safe.
-                logger.info(
-                    "Renewal of %s returned HTTP %d -- server appears to have "
-                    "forgotten our subscription; triggering rediscovery",
-                    subscription_uri,
-                    exc.status_code,
-                )
-                callback = self._on_subscription_lost
-
-                async def _fire() -> None:
-                    await callback()
-
-                asyncio.create_task(  # noqa: RUF006 -- fire-and-forget by design
-                    _fire(),
-                    name="subscription-lost-rediscovery",
-                )
-            return False
+            return self._renewal_rejected(subscription_uri, exc)
         except Exception as exc:
-            from py20305.diagnostics import report
-
-            report(
-                "warnings",
-                f"Failed to renew subscription {subscription_uri}: {exc}",
-                source="subscription",
-                dedup_key=f"sub_renewal:{subscription_uri}",
-                details={"subscription_uri": subscription_uri, "error": str(exc)},
-                exc_info=True,
-            )
-            return False
+            return self._renewal_failed(subscription_uri, exc)
 
         if location and location != subscription_uri:
             # Server returned a new URI on renewal
@@ -735,6 +747,58 @@ class SubscriptionManager:
         state.created_at = time.time()
         logger.info("Renewed subscription %s (%s)", subscription_uri, state.resource_type)
         return True
+
+    def _renewal_rejected(self, subscription_uri: str, exc: Sep2ProtocolError) -> bool:
+        """Report a renewal the server refused; returns False for ``renew``."""
+        from py20305.diagnostics import report
+
+        report(
+            "warnings",
+            f"Server rejected renewal of {subscription_uri}: HTTP {exc.status_code}",
+            source="subscription",
+            dedup_key=f"sub_renewal:{subscription_uri}",
+            details={
+                "subscription_uri": subscription_uri,
+                "status_code": exc.status_code,
+            },
+        )
+        if exc.status_code in _SUBSCRIPTION_LOST_STATUSES and self._on_subscription_lost:
+            # Server forgot about this subscription (typical after a
+            # server restart drops the in-memory subscription store).
+            # Trigger rediscovery so a fresh subscribe cycle runs
+            # against the server's current state; the rediscovery
+            # primitive coalesces concurrent calls, so multiple
+            # renewals firing this at once is safe.
+            logger.info(
+                "Renewal of %s returned HTTP %d -- server appears to have "
+                "forgotten our subscription; triggering rediscovery",
+                subscription_uri,
+                exc.status_code,
+            )
+            callback = self._on_subscription_lost
+
+            async def _fire() -> None:
+                await callback()
+
+            asyncio.create_task(  # noqa: RUF006 -- fire-and-forget by design
+                _fire(),
+                name="subscription-lost-rediscovery",
+            )
+        return False
+
+    def _renewal_failed(self, subscription_uri: str, exc: Exception) -> bool:
+        """Report a renewal that did not reach a server answer; returns False."""
+        from py20305.diagnostics import report
+
+        report(
+            "warnings",
+            f"Failed to renew subscription {subscription_uri}: {exc}",
+            source="subscription",
+            dedup_key=f"sub_renewal:{subscription_uri}",
+            details={"subscription_uri": subscription_uri, "error": str(exc)},
+            exc_info=True,
+        )
+        return False
 
     async def renew_all(self) -> int:
         """Renew all active subscriptions. Returns count of successful renewals."""

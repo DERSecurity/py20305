@@ -53,7 +53,11 @@ _SKIP_LOG_THROTTLE = 30.0  # seconds between "skip" log messages per key
 # Rule (f) is handled by SubscriptionManager.renew's on_subscription_lost
 # callback -- a 401/404 on renewal triggers rediscovery.
 #
-# Formula: `max(_HEARTBEAT_CEILING_S, configured_interval)`.
+# Formula: `max(heartbeat_seconds, configured_interval)`, where
+# `heartbeat_seconds` defaults to `_HEARTBEAT_CEILING_S`. A deployment may
+# set a shorter backstop when its server is known to drop notifications
+# while still listing the subscription; the clamp below still keeps it
+# from polling faster than the server's pollRate.
 #
 # - `_HEARTBEAT_CEILING_S = 900` (15 min) is the spec's own threshold
 #   for the non-subscriber case: §10.2.2.3 rule (a) p.101 says
@@ -77,7 +81,24 @@ _HEARTBEAT_CEILING_S = 900.0
 class PollScheduler:
     """Schedule periodic async callbacks with per-key mutual exclusion."""
 
-    def __init__(self, *, heartbeat_enabled: bool = True) -> None:
+    def __init__(
+        self, *, heartbeat_enabled: bool = True, heartbeat_seconds: float | None = None
+    ) -> None:
+        """
+        Args:
+            heartbeat_enabled: Poll a suppressed key as a backstop for missed
+                notifications. Off means no polling of subscribed resources at
+                all (IEEE 2030.5 §8.9.3.4 rule (r)).
+            heartbeat_seconds: The backstop interval for a suppressed key. A key
+                is still never polled faster than its own interval. ``None``
+                uses the 900 s default.
+
+        Raises:
+            ValueError: ``heartbeat_seconds`` is not positive.
+        """
+        if heartbeat_seconds is not None and heartbeat_seconds <= 0:
+            raise ValueError(f"heartbeat_seconds must be positive, got {heartbeat_seconds}")
+        self._heartbeat_seconds = heartbeat_seconds
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._shutdown = asyncio.Event()
@@ -166,15 +187,20 @@ class PollScheduler:
     def _heartbeat_due(self, key: str, interval: int) -> bool:
         """Return True if a suppressed key is overdue for its heartbeat poll.
 
-        Heartbeat threshold is ``max(_HEARTBEAT_CEILING_S, interval)`` --
+        Heartbeat threshold is ``max(heartbeat_seconds, interval)`` --
         never faster than the configured rate, never slower than the
-        ceiling. See module-level comment for spec rationale.
+        backstop. See module-level comment for spec rationale.
         """
         if not self._heartbeat_enabled:
             return False
         last = self._last_run.get(key, 0.0)
         age = time.monotonic() - last
-        threshold = max(_HEARTBEAT_CEILING_S, float(interval))
+        # Read at call time rather than bound as a default, so the module
+        # constant stays the one place the default lives.
+        backstop = (
+            _HEARTBEAT_CEILING_S if self._heartbeat_seconds is None else self._heartbeat_seconds
+        )
+        threshold = max(backstop, float(interval))
         return age >= threshold
 
     async def _poll_loop(

@@ -24,10 +24,16 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from py20305.connectors.base import BaseConnector
-from py20305.connectors.reading import Reading, reading_key
+from py20305.connectors.reading import (
+    Reading,
+    ReadingIdentity,
+    is_valid_reading,
+    reading_identity,
+    reading_key,
+)
 
 if TYPE_CHECKING:
     from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
@@ -50,6 +56,45 @@ def index_readings(readings: object) -> dict[str, Reading]:
     from py20305.telemetry.mup import valid_readings
 
     return {reading_key(r): r for r in valid_readings(readings)}
+
+
+def typed_declaration(declared: Any) -> frozenset[ReadingIdentity] | None:
+    """A connector's ``declared_readings()`` as a set of identities, or None if malformed.
+
+    The value comes from third-party code, and a declaration narrows what the
+    MirrorUsagePoint registers, so anything other than a collection of
+    :class:`~py20305.connectors.reading.ReadingIdentity` or
+    :class:`~py20305.connectors.reading.Reading` is treated as no declaration
+    rather than guessed at. A ``Reading`` stands for its identity; its value is
+    ignored.
+    """
+    if not isinstance(declared, set | frozenset | list | tuple):
+        return None
+    identities: set[ReadingIdentity] = set()
+    for item in declared:
+        if isinstance(item, ReadingIdentity):
+            identities.add(item)
+        elif is_valid_reading(item):
+            identities.add(reading_identity(item))
+        else:
+            return None
+    return frozenset(identities)
+
+
+def declared_readings_of(connector: Any) -> frozenset[ReadingIdentity] | None:
+    """``connector.declared_readings()``, typed; None when absent or broken.
+
+    Optional on the connector contract, so a connector that predates it, or does
+    not subclass BaseConnector, declares nothing. A declaration that raises is
+    no declaration: it must not turn a good read of the values into a failed one.
+    """
+    declare = getattr(connector, "declared_readings", None)
+    if not callable(declare):
+        return None
+    try:
+        return typed_declaration(declare())
+    except Exception:
+        return None
 
 
 class Quality(Enum):
@@ -120,6 +165,10 @@ class DeviceSnapshot:
     #: identity -- the metering cycle and the management API describe the same
     #: failure differently, and the store has no business choosing between them.
     error: Exception | None = None
+    #: The connector's ``declared_readings()``, or None when it declares none.
+    #: Device-level, like :attr:`reading_overrides`, and kept through a failed
+    #: acquisition because it describes the device rather than a sample.
+    declared_readings: frozenset[ReadingIdentity] | None = None
 
 
 def with_freshness(snapshot: DeviceSnapshot, max_age: float | None, now: float) -> DeviceSnapshot:
@@ -156,6 +205,7 @@ def with_freshness(snapshot: DeviceSnapshot, max_age: float | None, now: float) 
         last_success=snapshot.last_success,
         quality=Quality.STALE,
         error=snapshot.error,
+        declared_readings=snapshot.declared_readings,
     )
 
 
@@ -260,6 +310,7 @@ class DirectConnectorSource:
             # dangerous direction for a field that drives staleness.
             started = self._clock()
             readings = index_readings(await connector.fetch_monitoring())
+            declared = declared_readings_of(connector)
         except Exception as exc:
             # Broad by intent. A connector is third-party code, including
             # out-of-process connectors, so any failure has to degrade to
@@ -289,6 +340,7 @@ class DirectConnectorSource:
                 last_success=previous.last_success if previous else None,
                 quality=Quality.COMM_LOST,
                 error=exc,
+                declared_readings=previous.declared_readings if previous else None,
             )
 
         entries = {
@@ -301,6 +353,7 @@ class DirectConnectorSource:
             last_success=started,
             quality=Quality.GOOD,
             error=None,
+            declared_readings=declared,
         )
         self._last[device] = snapshot
         # After the snapshot, not before: telemetry reports a read that

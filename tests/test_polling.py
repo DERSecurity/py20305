@@ -466,6 +466,54 @@ async def test_heartbeat_disabled_by_config_suppresses_callback_entirely():
     assert len(calls) == 0, f"expected zero polls with heartbeat_enabled=False, got {len(calls)}"
 
 
+def test_heartbeat_seconds_sets_the_threshold_for_a_suppressed_key():
+    """A configured heartbeat of 300s makes a suppressed key polled every 300s
+    instead of the 900s default, when its interval is 300s."""
+    import py20305.client.polling as polling_mod
+
+    scheduler = PollScheduler(heartbeat_seconds=300)
+
+    scheduler._last_run["k"] = polling_mod.time.monotonic() - 299
+    assert not scheduler._heartbeat_due("k", 300)
+
+    scheduler._last_run["k"] = polling_mod.time.monotonic() - 301
+    assert scheduler._heartbeat_due("k", 300)
+
+
+def test_heartbeat_seconds_never_polls_faster_than_the_interval():
+    """A heartbeat shorter than the key's interval still waits the interval: the
+    server's pollRate bounds the backstop from below."""
+    import py20305.client.polling as polling_mod
+
+    scheduler = PollScheduler(heartbeat_seconds=300)
+
+    scheduler._last_run["k"] = polling_mod.time.monotonic() - 301
+    assert not scheduler._heartbeat_due("k", 900)
+
+    scheduler._last_run["k"] = polling_mod.time.monotonic() - 901
+    assert scheduler._heartbeat_due("k", 900)
+
+
+def test_heartbeat_seconds_defaults_to_900():
+    """Without a configured heartbeat, a suppressed key at a 300s interval waits
+    the 900s default."""
+    import py20305.client.polling as polling_mod
+
+    scheduler = PollScheduler()
+
+    scheduler._last_run["k"] = polling_mod.time.monotonic() - 899
+    assert not scheduler._heartbeat_due("k", 300)
+
+    scheduler._last_run["k"] = polling_mod.time.monotonic() - 901
+    assert scheduler._heartbeat_due("k", 300)
+
+
+@pytest.mark.parametrize("seconds", [0, -1])
+def test_heartbeat_seconds_must_be_positive(seconds: int):
+    with pytest.raises(ValueError, match="heartbeat_seconds"):
+        PollScheduler(heartbeat_seconds=seconds)
+
+
 @pytest.mark.asyncio
 async def test_unsuppressed_key_resets_heartbeat_tracker():
     """Verify the poll loop updates _last_run on every successful run.

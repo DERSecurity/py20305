@@ -24,7 +24,7 @@ from py20305.client.errors import Sep2ConnectionError, Sep2ProtocolError
 from py20305.client.polling import PollScheduler
 from py20305.client.timebase import ServerTimebase
 from py20305.connectors.base import ConnectorError
-from py20305.connectors.reading import Reading
+from py20305.connectors.reading import Reading, ReadingIdentity
 from py20305.models.sep import MirrorUsagePoint, MirrorUsagePointList
 from py20305.readings import (
     DeviceSnapshot,
@@ -53,6 +53,7 @@ from py20305.telemetry.mup import (
     create_mup,
     mup_mrid,
     plan_registration,
+    undeclared_readings,
 )
 from py20305.xml.serialization import to_xml
 
@@ -108,6 +109,13 @@ class DeviceTelemetryState:
     #: registration changes again or the process restarts; a 5xx or a
     #: connection error is retried every cycle.
     rejected_registration: frozenset[bytes] | None = None
+    #: The connector's declared readings the last successful MUP POST was built
+    #: from (SIGNED_AS_REPORTED). Readings outside it are not posted, since the
+    #: MUP holds no ReadingType for them (Rule h.3).
+    registered_declaration: frozenset[ReadingIdentity] | None = None
+    #: Returned-but-undeclared readings last warned about, so the warning is
+    #: repeated only when that set changes.
+    warned_undeclared: frozenset[ReadingIdentity] = frozenset()
     post_rate: int = 300
     #: postRate read back from the created MUP (B.17.1). It outranks the
     #: ``post_rate`` a later ``start_metering`` passes in, since the MUP is
@@ -314,6 +322,8 @@ class TelemetryManager:
                 new_state.mup_posted = existing.mup_posted
                 new_state.mup_href = existing.mup_href
                 new_state.registered = existing.registered
+                new_state.registered_declaration = existing.registered_declaration
+                new_state.warned_undeclared = existing.warned_undeclared
                 new_state.rejected_registration = existing.rejected_registration
                 if existing.server_post_rate is not None:
                     new_state.server_post_rate = existing.server_post_rate
@@ -477,8 +487,9 @@ class TelemetryManager:
 
         # Stage 1: MUP creation or meter readings
         if not state.mup_posted:
-            await self._post_mup(state, readings)
+            await self._post_mup(state, readings, snapshot.declared_readings)
         else:
+            self._warn_undeclared(state, readings)
             if self._registration_grew(state, readings):
                 # A reading first supplied after the MUP was posted needs its
                 # ReadingType registered before readings for it are posted
@@ -579,7 +590,12 @@ class TelemetryManager:
                 exc_info=error,
             )
 
-    async def _post_mup(self, state: DeviceTelemetryState, readings: list[Reading]) -> None:
+    async def _post_mup(
+        self,
+        state: DeviceTelemetryState,
+        readings: list[Reading],
+        declared: frozenset[ReadingIdentity] | None = None,
+    ) -> None:
         """POST MUP to server, track location and server-preferred postRate.
 
         The first POST of a device's MUP posts no readings that cycle; they
@@ -595,6 +611,7 @@ class TelemetryManager:
             profile=self._reading_profile,
             power_direction=self._power_direction,
             registered=state.registered,
+            declared=declared,
         )
         mup = create_mup(
             state.lfdi,
@@ -606,6 +623,7 @@ class TelemetryManager:
             role=state.role,
             revenue_quality=state.revenue_quality,
             device_lfdi=state.posted_under,
+            declared=declared,
         )
         body = to_xml(mup, server_2018_compat=self._client.server_2018_compat)
 
@@ -613,6 +631,7 @@ class TelemetryManager:
             location = await self._client.post_bytes(self._mup_list_href_source(), body)
             state.mup_posted = True
             state.registered = plan
+            state.registered_declaration = declared
             state.rejected_registration = None
 
             if location:
@@ -716,10 +735,31 @@ class TelemetryManager:
             profile=self._reading_profile,
             power_direction=self._power_direction,
             registered=state.registered,
+            declared=state.registered_declaration,
         )
         if frozenset(plan) == state.rejected_registration:
             return False
         return plan.keys() != state.registered.keys()
+
+    def _warn_undeclared(self, state: DeviceTelemetryState, readings: list[Reading]) -> None:
+        """Warn when the connector returns readings it did not declare.
+
+        They are not posted -- the MUP holds no ReadingType for them -- which a
+        connector author would otherwise discover only from a missing series.
+        Repeated only when the set changes, not every cycle.
+        """
+        declared = state.registered_declaration
+        if self._reading_profile is not ReadingProfile.SIGNED_AS_REPORTED or declared is None:
+            return
+        undeclared = undeclared_readings(readings, declared)
+        if undeclared and undeclared != state.warned_undeclared:
+            logger.warning(
+                "Readings %s for %s are not declared by its connector and are not posted; "
+                "add them to declared_readings() to register them",
+                ", ".join(sorted(repr(identity) for identity in undeclared)),
+                state.lfdi[:8],
+            )
+        state.warned_undeclared = undeclared
 
     async def _readback_post_rate(
         self,
@@ -801,7 +841,16 @@ class TelemetryManager:
             registered=state.registered,
             power_direction=self._power_direction,
             role=state.role,
+            declared=state.registered_declaration,
         )
+        if self._reading_profile is ReadingProfile.SIGNED_AS_REPORTED and not (
+            reading_list.mirror_meter_reading
+        ):
+            # A device with nothing to report this cycle (an EV charger with no
+            # vehicle plugged in, say) sends nothing rather than an empty list
+            # (CSIP G27: data a DER cannot provide SHALL not be sent).
+            logger.debug("No readings for %s this cycle, skipping POST", state.lfdi[:8])
+            return
         body = to_xml(reading_list, server_2018_compat=self._client.server_2018_compat)
 
         try:
