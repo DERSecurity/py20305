@@ -264,14 +264,12 @@ IEEE 2030.5 type and leaves out, with a warning, a value outside it:
 | `genConnectStatus`, `storConnectStatus` | ConnectStatusType bitmap (2030.5-2018): bits 0 to 4, connected, available, operating, test, fault |
 | `alarmStatus` | bitmap of bits 0 to 10 |
 
-A 2018 server receives `genConnectStatus` and `storConnectStatus` and never
-`connectStatus`. A 2023 server receives `connectStatus` and never
-`genConnectStatus` or `storConnectStatus`, which the 2023 edition deprecates and
-forbids. When a connector supplies only a ConnectStatusType bitmap, a 2023
-server's `connectStatus` is derived from it: connected from bit 0, energized from
-operating (bit 2). Available, test and fault have no `connectStatus` bit and are
-not carried. When a connector supplies only `connectStatus`, a 2018 server
-receives its bit 0 (connected) alone.
+Each edition sends only the field the connector supplied for it, and the
+bitmaps are never converted into each other. Supply `connectStatus` for a 2023
+server, and `genConnectStatus` and `storConnectStatus` for a 2018 server. A 2023
+server never receives `genConnectStatus` or `storConnectStatus`, which that
+edition deprecates and forbids, and a 2018 server never receives
+`connectStatus`. A field the connector does not supply is not sent.
 
 `fetch_availability` returns DERAvailability element names
 (`availabilityDuration`, `maxChargeDuration`, `readingTime`,

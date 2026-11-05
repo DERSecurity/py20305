@@ -60,12 +60,6 @@ CONNECT_STATUS_2023_BITS = 0b11
 CONNECT_STATUS_2018_BITS = 0b11111
 #: DERStatus alarmStatus: bits 0 to 10.
 ALARM_STATUS_BITS = (1 << 11) - 1
-#: Bit 0, connected, is the only bit both connect bitmaps define alike: bit 1
-#: is energized in 2023 and available in 2018, and bits 2 to 4 exist only in
-#: 2018. A bitmap carried to the other edition keeps bit 0 alone.
-_CONNECTED = 0b1
-_ENERGIZED = 0b10
-_OPERATING = 0b100
 
 
 def build_der_status(
@@ -101,12 +95,12 @@ def build_der_status(
             servers that treat an absent alarmStatus as "no change" rather than
             "cleared". Edition-independent.
 
-    Each server edition receives the connect bitmap it defines. A 2023 server
-    never receives genConnectStatus or storConnectStatus; when the connector
-    supplies only those, connectStatus is derived from the bitmap (connected
-    from bit 0, energized from operating). A 2018 server receives no
-    connectStatus; when the connector supplies only connectStatus, its bit 0
-    (connected) is carried over.
+    Each server edition receives the connect bitmap it defines, exactly as the
+    connector supplied it, and the bitmaps are never converted into each other.
+    A 2023 server receives connectStatus only, and only if the connector
+    supplied it; it never receives genConnectStatus or storConnectStatus. A
+    2018 server receives genConnectStatus and storConnectStatus only as the
+    connector supplied them, and never receives connectStatus.
 
     Returns:
         Pydantic model ready for ``to_xml()`` serialization.
@@ -152,48 +146,29 @@ def build_der_status(
         ),
     }
 
-    stor_2018 = _bitmap("storConnectStatus", status_data.get("storConnectStatus"), 2018)
     if server_2018_compat:
-        # IEEE 2030.5-2018: only genConnectStatus/storConnectStatus exist;
-        # connectStatus (ConnectStatusType2) must not be emitted.
+        # IEEE 2030.5-2018: only genConnectStatus/storConnectStatus exist, and
+        # they are sent as the connector supplied them. connectStatus
+        # (ConnectStatusType2) is never sent.
         return Derstatus(
             connect_status=None,
-            gen_connect_status=_to_connect_status(
-                connect_2018 if connect_2018 is not None else _connected_only(connect_2023),
+            gen_connect_status=_to_connect_status(connect_2018, now_default),
+            stor_connect_status=_to_connect_status(
+                _bitmap("storConnectStatus", status_data.get("storConnectStatus"), 2018),
                 now_default,
             ),
-            stor_connect_status=_to_connect_status(stor_2018, now_default),
             **common,
         )
 
-    # IEEE 2030.5-2023: genConnectStatus and storConnectStatus SHALL NOT be
-    # included; connectStatus (ConnectStatusType2) covers the whole DER. A
-    # connector that supplies only a 2018 bitmap has connectStatus derived from
-    # it (see _connect_2023_from_2018).
-    if connect_2023 is None:
-        connect_2023 = _connect_2023_from_2018(
-            connect_2018 if connect_2018 is not None else stor_2018
-        )
+    # IEEE 2030.5-2023: connectStatus (ConnectStatusType2) is sent as the
+    # connector supplied it. genConnectStatus and storConnectStatus SHALL NOT
+    # be included.
     return Derstatus(
         connect_status=_to_connect_status2(connect_2023, now_default),
         gen_connect_status=None,
         stor_connect_status=None,
         **common,
     )
-
-
-def _connect_2023_from_2018(bitmap: tuple[int, Any] | None) -> tuple[int, Any] | None:
-    """Derive a ConnectStatusType2 bitmap from a 2018 ConnectStatusType bitmap.
-
-    Connected (bit 0) carries over to Connected (bit 0), and Operating (bit 2)
-    sets Energized (bit 1). Available, Test and Fault have no ConnectStatusType2
-    bit and are not carried.
-    """
-    if bitmap is None:
-        return None
-    value, data = bitmap
-    derived = (value & _CONNECTED) | (_ENERGIZED if value & _OPERATING else 0)
-    return derived, data
 
 
 def _dt(data: dict[str, Any], default_time: int) -> TimeType:
@@ -235,14 +210,6 @@ def _bitmap(name: str, data: Any, edition: int | None = None) -> tuple[int, Any]
     if not _fits_bitmap(name, value, defined):
         return None
     return value, data
-
-
-def _connected_only(bitmap: tuple[int, Any] | None) -> tuple[int, Any] | None:
-    """Keep only the connected bit of a bitmap carried to the other edition."""
-    if bitmap is None:
-        return None
-    value, data = bitmap
-    return value & _CONNECTED, data
 
 
 def _to_connect_status(
