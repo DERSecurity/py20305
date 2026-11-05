@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import warnings
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -97,6 +98,7 @@ class SubscriptionManager:
         missing_location_fallback: bool = False,
         on_subscription_lost: Callable[[], Awaitable[None]] | None = None,
         renewal_method: RenewalMethod = "post",
+        server_2018_compat: bool | None = None,
     ) -> None:
         """
         Args:
@@ -123,6 +125,14 @@ class SubscriptionManager:
         # re-subscribing. Persists across rediscovery; cleared only on a genuine
         # reconnect.
         self._resubscribe_suppressed: set[str] = set()
+        if server_2018_compat is not None:
+            warnings.warn(
+                "SubscriptionManager(server_2018_compat=...) is deprecated; pass "
+                "missing_location_fallback=True for a server that omits the Location header",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            missing_location_fallback = missing_location_fallback or server_2018_compat
         self._missing_location_fallback = missing_location_fallback
         # Invoked (fire-and-forget) when a renewal returns 401/404 -- the
         # server has forgotten our subscriptions and a full rediscovery is

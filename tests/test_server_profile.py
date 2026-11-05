@@ -665,3 +665,71 @@ def test_a_dercontrol_base_still_parses_the_borrowed_limits() -> None:
     parsed = from_xml(xml, DercontrolBase)
 
     assert parsed.op_mod_max_lim_wabsorb is not None
+
+
+class TestConstructorAlias:
+    """``server_2018_compat`` stays on the public constructors for one release line."""
+
+    def test_sep2_client_true_is_base_2018_with_the_location_fallback(self) -> None:
+        with pytest.warns(DeprecationWarning, match="server_2018_compat is deprecated"):
+            client = Sep2Client("https://server.example", server_2018_compat=True)
+
+        assert client.profile.base is Edition.E2018
+        assert client.profile.missing_location_fallback is True
+        assert client.profile.features == frozenset()
+
+    def test_sep2_client_false_is_base_2023(self) -> None:
+        with pytest.warns(DeprecationWarning):
+            client = Sep2Client("https://server.example", server_2018_compat=False)
+
+        assert client.profile.base is Edition.E2023
+        assert client.profile.missing_location_fallback is False
+
+    def test_csip_client_maps_the_same_way(self) -> None:
+        from py20305.client.csip_client import CsipClient
+
+        with pytest.warns(DeprecationWarning):
+            client = CsipClient("https://server.example", server_2018_compat=True)
+
+        assert client.http.profile.base is Edition.E2018
+        assert client.http.profile.missing_location_fallback is True
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_passing_both_is_an_error(self, flag: bool) -> None:
+        from py20305.client.csip_client import CsipClient
+
+        with pytest.raises(TypeError, match="not both"):
+            Sep2Client("https://server.example", profile=P2018, server_2018_compat=flag)
+        with pytest.raises(TypeError, match="not both"):
+            CsipClient("https://server.example", profile=P2018, server_2018_compat=flag)
+
+    def test_neither_warns_nor_changes_the_default(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            client = Sep2Client("https://server.example")
+
+        assert client.profile.base is None
+
+    def test_subscription_manager_true_enables_the_location_fallback(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from py20305.subscription.manager import SubscriptionManager
+
+        with pytest.warns(DeprecationWarning):
+            manager = SubscriptionManager(
+                AsyncMock(), "https://agg:10443/notify", server_2018_compat=True
+            )
+
+        assert manager._missing_location_fallback is True
+
+    def test_subscription_manager_false_leaves_it_off(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from py20305.subscription.manager import SubscriptionManager
+
+        with pytest.warns(DeprecationWarning):
+            manager = SubscriptionManager(
+                AsyncMock(), "https://agg:10443/notify", server_2018_compat=False
+            )
+
+        assert manager._missing_location_fallback is False

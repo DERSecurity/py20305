@@ -314,18 +314,18 @@ class ServerProfile:
         return "; ".join(parts)
 
 
-def profile_from_legacy_flag(enabled: bool) -> ServerProfile:
+def profile_from_legacy_flag(enabled: bool, *, stacklevel: int = 3) -> ServerProfile:
     """Return the profile the deprecated ``server_2018_compat`` flag stands for.
 
     ``True`` is base 2018 with the missing-Location fallback. ``False`` is the
     flag's old default, which asked for no 2018 behavior: base 2023.
     """
     warnings.warn(
-        "server_2018_compat is deprecated; use server.schema.base: 2018 and, for a server "
-        "that omits the Location header on a created subscription, "
-        "server.missing_location_fallback: true",
+        "server_2018_compat is deprecated; pass profile=ServerProfile(base=Edition.E2018) "
+        "and, for a server that omits the Location header on a created subscription, "
+        "missing_location_fallback=True",
         DeprecationWarning,
-        stacklevel=3,
+        stacklevel=stacklevel,
     )
     if enabled:
         return ServerProfile(
@@ -334,6 +334,22 @@ def profile_from_legacy_flag(enabled: bool) -> ServerProfile:
             evidence="server_2018_compat",
         )
     return ServerProfile(base=Edition.E2023, evidence="server_2018_compat")
+
+
+def profile_for_constructor(
+    profile: ServerProfile | None, server_2018_compat: bool | None
+) -> ServerProfile | None:
+    """Return the profile a client constructor was given, honoring the deprecated flag.
+
+    ``server_2018_compat`` is kept on the public constructors for one release
+    line and maps as the configuration alias does. Passing it with ``profile`` is
+    an error: the two would disagree.
+    """
+    if server_2018_compat is None:
+        return profile
+    if profile is not None:
+        raise TypeError("pass either profile or the deprecated server_2018_compat, not both")
+    return profile_from_legacy_flag(server_2018_compat, stacklevel=4)
 
 
 def feature_names(features: Iterable[str]) -> frozenset[str]:

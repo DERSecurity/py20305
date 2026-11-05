@@ -41,7 +41,7 @@ from py20305.events.dispatch import ControlDispatcher, NullDispatcher
 from py20305.events.processor import EventProcessor
 from py20305.events.tariff import TariffProcessor
 from py20305.observers import Observers
-from py20305.server_profile import ServerProfile
+from py20305.server_profile import ServerProfile, profile_for_constructor
 from py20305.subscription.manager import (
     StoredNotification,
     SubscriptionManager,
@@ -174,6 +174,7 @@ class CsipClient:
         time_drift_warn_seconds: int = 30,
         fsa_stale_seconds: float | None = None,
         pricing_enabled: bool = False,
+        server_2018_compat: bool | None = None,
     ) -> None:
         #: Application-level server timebase :
         #: time-of-day-sensitive operations follow the head-end's Time resource;
@@ -188,7 +189,7 @@ class CsipClient:
             base_url,
             tls=tls,
             retry=retry,
-            profile=profile,
+            profile=profile_for_constructor(profile, server_2018_compat),
             always_send_alarm_status=always_send_alarm_status,
             request_headers=request_headers,
             timebase=self._timebase,

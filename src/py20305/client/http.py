@@ -56,7 +56,7 @@ from py20305.observers import (
     Observers,
 )
 from py20305.security.identity import compute_sfdi
-from py20305.server_profile import ServerProfile
+from py20305.server_profile import ServerProfile, profile_for_constructor
 from py20305.xml.serialization import (
     APPLICATION_SEP_XML,
     NS_CSIPAUS,
@@ -228,6 +228,7 @@ class Sep2Client:
         request_headers: dict[str, str] | None = None,
         timebase: ServerTimebase | None = None,
         observers: Observers | None = None,
+        server_2018_compat: bool | None = None,
     ) -> None:
         """Initialize Sep2Client.
 
@@ -267,7 +268,9 @@ class Sep2Client:
         self._csipaus_namespace = NS_CSIPAUS
         self._timebase = timebase or ServerTimebase()
         #: What the operator configured; the base may still be ``auto``.
-        self._configured_profile = profile or ServerProfile()
+        self._configured_profile = (
+            profile_for_constructor(profile, server_2018_compat) or ServerProfile()
+        )
         self._profile = self._configured_profile
         self._borrowed_seen: set[tuple[str, str]] = set()
         self._always_send_alarm_status = always_send_alarm_status
