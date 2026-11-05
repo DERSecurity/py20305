@@ -1771,39 +1771,37 @@ class SunSpecModbusConnector:
         model.write()
 
     def _update_const_pf_sync(self, params: dict[str, Any]) -> None:
+        """Apply or withdraw each fixed power factor, injection and absorption on their own.
+
+        A side whose ``mode`` is set is validated, enabled and written; a side
+        whose ``mode`` is 0 has its enable lowered, so a withdrawn power factor
+        stops applying.
+        """
         model = self._get_model(704)
-
-        inj = params.get("inj", {})
-        abs_ = params.get("abs", {})
-
-        if inj.get("mode"):
-            # Validate before _update_enable: an out-of-range displacement must
-            # not leave PFWInjEna raised over a setpoint we never wrote.
-            pf = _require_power_factor(inj["pf"], "opModFixedPFInjectW")
-            exc = 0 if inj.get("excitation") else 1
-            missing = _unimplemented_points(model, ("PFWInj.Ext", "PFWInj.PF"))
-            if missing:
-                self._control_unsupported(
-                    "opModFixedPFInjectW",
-                    f"this device does not implement {', '.join(missing)} (model 704)",
-                )
-            self._update_enable(model.PFWInjEna, 1, "Power factor (inject)")
-            model.PFWInj.Ext.cvalue = exc
-            model.PFWInj.PF.cvalue = pf
-            model.write()
-        elif abs_.get("mode"):
-            pf = _require_power_factor(abs_["pf"], "opModFixedPFAbsorbW")
-            exc = 1 if abs_.get("excitation") else 0
-            missing = _unimplemented_points(model, ("PFWAbs.Ext", "PFWAbs.PF"))
-            if missing:
-                self._control_unsupported(
-                    "opModFixedPFAbsorbW",
-                    f"this device does not implement {', '.join(missing)} (model 704)",
-                )
-            self._update_enable(model.PFWAbsEna, 1, "Power factor (absorb)")
-            model.PFWAbs.Ext.cvalue = exc
-            model.PFWAbs.PF.cvalue = pf
-            model.write()
+        sides = (
+            ("inj", "PFWInjEna", "PFWInj", "opModFixedPFInjectW", "Power factor (inject)", 0),
+            ("abs", "PFWAbsEna", "PFWAbs", "opModFixedPFAbsorbW", "Power factor (absorb)", 1),
+        )
+        for key, enable, group, control, label, over_excited in sides:
+            side = params.get(key) or {}
+            if side.get("mode"):
+                # Validate before _update_enable: an out-of-range displacement
+                # must not leave the enable raised over a setpoint never written.
+                pf = _require_power_factor(side["pf"], control)
+                exc = over_excited if side.get("excitation") else 1 - over_excited
+                missing = _unimplemented_points(model, (f"{group}.Ext", f"{group}.PF"))
+                if missing:
+                    self._control_unsupported(
+                        control,
+                        f"this device does not implement {', '.join(missing)} (model 704)",
+                    )
+                self._update_enable(getattr(model, enable), 1, label)
+                block = getattr(model, group)
+                block.Ext.cvalue = exc
+                block.PF.cvalue = pf
+                model.write()
+            elif not _unimplemented_points(model, (enable,)):
+                self._update_enable(getattr(model, enable), 0, label)
 
     def _update_connect_sync(self, params: dict[str, Any]) -> None:
         """Permit or cease service through model 703 ``ES``.

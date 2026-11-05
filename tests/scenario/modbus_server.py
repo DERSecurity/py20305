@@ -263,13 +263,19 @@ def build_full_der_image() -> bytes:
     m704 = ss.Model(704)
     m704.points["ID"].value = 704
     m704.points["L"].value = m704.len - 2
-    for name in ("WMaxLimPct_SF", "WSet_SF", "WSetPct_SF", "PF_SF", "VarSet_SF", "VarSetPct_SF"):
+    m704.points["PF_SF"].value = -2
+    for name in ("WMaxLimPct_SF", "WSet_SF", "WSetPct_SF", "VarSet_SF", "VarSetPct_SF"):
         m704.points[name].value = 0
     m704.points["WMaxLimPctEna"].value = 0
     m704.points["WMaxLimPct"].value = 100
     m704.points["WSetEna"].value = 0
     m704.points["WSetMod"].value = 0
     m704.points["WSetPct"].value = 0
+    m704.points["PFWInjEna"].value = 0
+    m704.points["PFWAbsEna"].value = 0
+    for group in ("PFWInj", "PFWAbs"):
+        m704.groups[group].points["PF"].value = 0
+        m704.groups[group].points["Ext"].value = 0
 
     m705 = _curve_model(705)
     m705.points["V_SF"].value = 0

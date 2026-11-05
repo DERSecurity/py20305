@@ -253,3 +253,20 @@ async def test_connect_and_disconnect_write_the_enter_service_permit(device) -> 
     assert server.registers[es] == 0, "de-energize ceases service"
     await connector.update_op_mod_energize({"enabled": False})
     assert server.registers[es] == 1, "withdrawing the element permits service again"
+
+
+async def test_both_fixed_power_factors_apply_and_withdraw(device) -> None:
+    connector, _server, _image = device
+    pf = {"displacement": 95, "multiplier": -2, "excitation": False}
+
+    await connector.update_op_mod_fixed_pf_inject_w({"enabled": True, "value": pf})
+    await connector.update_op_mod_fixed_pf_absorb_w({"enabled": True, "value": pf})
+    model = await asyncio.to_thread(connector._core._get_model, 704)
+    assert (model.PFWInjEna.value, model.PFWAbsEna.value) == (1, 1)
+    assert model.PFWInj.PF.cvalue == pytest.approx(0.95)
+    assert model.PFWAbs.PF.cvalue == pytest.approx(0.95)
+
+    await connector.update_op_mod_fixed_pf_inject_w({"enabled": False})
+    await connector.update_op_mod_fixed_pf_absorb_w({"enabled": False})
+    model = await asyncio.to_thread(connector._core._get_model, 704)
+    assert (model.PFWInjEna.value, model.PFWAbsEna.value) == (0, 0)
