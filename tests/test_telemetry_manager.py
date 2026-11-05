@@ -1944,6 +1944,26 @@ class TestDeclaredReadings:
         assert len(warnings) == 1
         assert "Var" in warnings[0].getMessage()
 
+    @pytest.mark.asyncio
+    async def test_a_restart_keeps_the_registered_declaration(
+        self, mock_client, declaring_connector, as_reported
+    ):
+        """A rediscovery restarts metering and keeps the MUP; its readings must
+        still be limited to what that MUP registered."""
+        from py20305.models.sep import MirrorMeterReadingList
+        from py20305.xml.serialization import from_xml
+
+        as_reported.start_metering(SAMPLE_LFDI, post_rate=300)
+        await as_reported._metering_cycle(SAMPLE_LFDI.lower())
+
+        as_reported.start_metering(SAMPLE_LFDI, post_rate=300)
+        declaring_connector.fetch_monitoring.return_value = {"W": 1000.0, "Var": 50.0}
+        await as_reported._metering_cycle(SAMPLE_LFDI.lower())
+
+        (readings_body,) = self._posts(mock_client, "/mup/device1")
+        readings = from_xml(readings_body, MirrorMeterReadingList)
+        assert [m.description for m in readings.mirror_meter_reading] == ["Real Power"]
+
 
 class TestEmptyCycle:
     """A cycle with no reading to post: SIGNED_AS_REPORTED sends nothing (CSIP

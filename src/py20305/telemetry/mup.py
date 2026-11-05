@@ -19,6 +19,9 @@ MeterReading's ReadingType once it is created:
   (``PowerDirection.SPLIT``).
 - 61 and 62: energy delivered in the forward and the reverse direction
   (``WhFwd``, ``WhRev``), DEFAULT profile only.
+- 71-77 and 80-97: the system and per-line readings under
+  ``ReadingProfile.SIGNED_AS_REPORTED``, whose ReadingTypes carry no
+  flowDirection (the DEFAULT slot plus 70).
 """
 
 from __future__ import annotations
@@ -653,6 +656,11 @@ def registration_slots(
     return frozenset(index for index, _ in specs)
 
 
+#: SIGNED_AS_REPORTED's slots are the DEFAULT slots plus this offset (71-77
+#: system, 80-97 per line). Its ReadingTypes carry no flowDirection and every
+#: DEFAULT one does, so sharing a slot would change a registered ReadingType.
+_AS_REPORTED_SLOT_OFFSET = 70
+
 #: Every reading a connector can declare under SIGNED_AS_REPORTED, by monitoring
 #: key: the system readings and all three lines' per-line readings. A declared
 #: per-line key is registered without ACType, since the declaration says it.
@@ -691,13 +699,26 @@ def _specs_for(
         # No energy totals and no PowerDirection modes: both rely on a fixed
         # flowDirection, which this profile omits.
         if declared is None:
-            return _all_specs_for(monitoring_data)
-        return sorted(_DECLARABLE[key] for key in declared if key in _DECLARABLE)
+            specs = _all_specs_for(monitoring_data)
+        else:
+            specs = sorted(_DECLARABLE[key] for key in declared if key in _DECLARABLE)
+        return [(slot + _AS_REPORTED_SLOT_OFFSET, spec) for slot, spec in specs]
     return _default_specs_for(monitoring_data, power_direction)
 
 
-def _as_reported_value(spec: ReadingTypeSpec, monitoring_data: dict[str, Any]) -> int:
-    """A SIGNED_AS_REPORTED value: W and var keep the connector's sign."""
+def _as_reported_value(
+    spec: ReadingTypeSpec, effective: ReadingTypeSpec, monitoring_data: dict[str, Any]
+) -> int:
+    """A SIGNED_AS_REPORTED value: W and var keep the connector's sign.
+
+    ``effective`` is ``spec`` after the connector's override. When the override
+    changes the multiplier, the value is scaled from it, so the value and the
+    registered powerOfTenMultiplier agree; otherwise the spec's own scaling is
+    kept.
+    """
+    if effective.multiplier != spec.multiplier:
+        rescaled = _scale_half_away(monitoring_data[spec.key], effective.multiplier)
+        return rescaled if _quantity(spec.key) in _POWER_QUANTITIES else abs(rescaled)
     scaled = _scaled_for(spec, monitoring_data)
     if _quantity(spec.key) in _POWER_QUANTITIES and scaled.flow_direction == FLOW_REVERSE:
         return -scaled.value
@@ -1167,7 +1188,7 @@ def create_meter_reading_list(
             # An energy total also has a fixed flowDirection, but its value is
             # already the magnitude for that direction.
             if as_reported:
-                value = _as_reported_value(spec, monitoring_data)
+                value = _as_reported_value(spec, _effective_spec(spec, override), monitoring_data)
             elif spec.flow_direction is not None and spec.key in _DIRECTED_KEYS:
                 value = _directed_value(spec, monitoring_data)
             else:

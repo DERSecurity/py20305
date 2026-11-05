@@ -177,6 +177,23 @@ async def test_sustained_failure_recovery_reports_reconnect_before_rediscovery()
 
 
 @pytest.mark.asyncio
+async def test_a_raising_reconnect_callback_still_rediscovers():
+    """The failure streak is already cleared, so skipping the rediscovery here
+    would leave the pre-outage resource paths in use."""
+
+    def broken() -> None:
+        raise RuntimeError("host bug")
+
+    client = CsipClient("https://example.com", on_reconnect=broken)
+
+    with patch.object(client, "trigger_rediscovery", new_callable=AsyncMock) as rediscover:
+        client._poll_failure_count = 3
+        await client._note_successful_contact()
+
+    rediscover.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_brief_failure_recovery_does_not_report_reconnect():
     reconnects: list[None] = []
     client = CsipClient("https://example.com", on_reconnect=lambda: reconnects.append(None))

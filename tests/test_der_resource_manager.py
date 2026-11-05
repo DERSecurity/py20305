@@ -471,6 +471,25 @@ class TestSettingsOnChange:
         assert _puts_to(client, "/set") == 2
 
     @pytest.mark.asyncio
+    async def test_new_hrefs_after_a_rediscovery_are_populated(self) -> None:
+        """What was sent to the old resources says nothing about the new ones."""
+        manager, client = _on_change_manager(
+            _make_connector(nameplate={"WMaxRtg": 15000}, configuration={"WMax": 10000})
+        )
+        _register_both(manager)
+        await manager._capability_cycle("ab")
+        await manager._settings_cycle("ab")
+
+        manager.start_device("ab", None, None, None)
+        manager._devices["ab"].capability_href = "/cap2"
+        manager._devices["ab"].settings_href = "/set2"
+        await manager._capability_cycle("ab")
+        await manager._settings_cycle("ab")
+
+        assert _puts_to(client, "/cap2") == 1
+        assert _puts_to(client, "/set2") == 1
+
+    @pytest.mark.asyncio
     async def test_a_changed_capability_puts_unchanged_settings_again(self) -> None:
         connector = _make_connector(nameplate={"WMaxRtg": 15000}, configuration={"WMax": 10000})
         manager, client = _on_change_manager(connector)

@@ -1268,7 +1268,15 @@ class CsipClient:
             if self._subscription_manager is not None:
                 self._subscription_manager.clear_resubscribe_suppression()
             if self._on_reconnect is not None:
-                self._on_reconnect()
+                # Host code. The failure streak is already cleared, so letting
+                # it raise past here would skip the rediscovery for good.
+                try:
+                    self._on_reconnect()
+                except Exception:
+                    logger.warning(
+                        "on_reconnect callback raised; continuing with rediscovery",
+                        exc_info=True,
+                    )
             await self.trigger_rediscovery()
         else:
             logger.info(

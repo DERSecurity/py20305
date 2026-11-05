@@ -326,6 +326,8 @@ class TelemetryManager:
                 new_state.mup_posted = existing.mup_posted
                 new_state.mup_href = existing.mup_href
                 new_state.registered_slots = existing.registered_slots
+                new_state.registered_declaration = existing.registered_declaration
+                new_state.warned_undeclared = existing.warned_undeclared
                 new_state.registered_ac_type = existing.registered_ac_type
                 new_state.rejected_registration = existing.rejected_registration
                 if existing.server_post_rate is not None:

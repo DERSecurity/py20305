@@ -111,13 +111,16 @@ class DerResourceManager:
         if put_policy not in get_args(PutPolicy):
             raise ValueError(f"put_policy must be 'periodic' or 'on_change', got {put_policy!r}")
         self._put_policy = put_policy
-        # The DERCapability body last PUT for each device, under on_change. Kept
-        # outside the per-device state so a rediscovery, which restarts every
-        # device, does not resend an unchanged capability.
-        self._sent_capability: dict[str, bytes] = {}
-        # Likewise the configuration DERSettings was last PUT from. Compared as
-        # the connector's data, not the body, since the body carries updatedTime.
-        self._sent_settings: dict[str, dict[str, Any]] = {}
+        # The href and DERCapability body last PUT for each device, under
+        # on_change. Kept outside the per-device state so a rediscovery, which
+        # restarts every device, does not resend an unchanged capability; the
+        # href is kept with it because a rediscovery may hand out a new one,
+        # which nothing has been sent to.
+        self._sent_capability: dict[str, tuple[str, bytes]] = {}
+        # Likewise the href and configuration DERSettings was last PUT from.
+        # Compared as the connector's data, not the body, which carries
+        # updatedTime.
+        self._sent_settings: dict[str, tuple[str, dict[str, Any]]] = {}
         self._client = client
         # Server timebase for telemetry timestamp defaults. isinstance guard
         # keeps AsyncMock clients in tests (whose .timebase is a Mock)
@@ -261,16 +264,18 @@ class DerResourceManager:
                 include_csipaus=self._client.csip_aus_mode,
                 csipaus_namespace=self._client.csipaus_namespace,
             )
+            sent = (state.capability_href, body)
             previous = self._sent_capability.get(lfdi)
-            if self._put_policy == "on_change" and previous == body:
+            if self._put_policy == "on_change" and previous == sent:
                 logger.debug("DERCapability unchanged for %s, skipping PUT", lfdi[:8])
                 return
             await self._client.put_bytes(state.capability_href, body)
             if self._put_policy == "on_change":
-                self._sent_capability[lfdi] = body
-                if previous is not None:
+                self._sent_capability[lfdi] = sent
+                if previous is not None and previous[1] != body:
                     # A changed capability resends the settings on their next
-                    # cycle, whether or not they changed too.
+                    # cycle, whether or not they changed too. A new href alone
+                    # does not: the settings cycle checks its own href.
                     self._sent_settings.pop(lfdi, None)
             logger.debug("DERCapability PUT for %s", lfdi[:8])
         except Sep2ProtocolError as e:
@@ -320,12 +325,11 @@ class DerResourceManager:
         try:
             connector = await self._resolve_connector_async(lfdi)
             configuration = await self._read(connector, "fetch_configuration", lfdi)
-            last_sent = (
-                self._sent_settings.get(lfdi)
-                if self._put_policy == "on_change"
-                else state.last_settings_data
-            )
-            if configuration == last_sent:
+            if self._put_policy == "on_change":
+                unchanged = self._sent_settings.get(lfdi) == (state.settings_href, configuration)
+            else:
+                unchanged = configuration == state.last_settings_data
+            if unchanged:
                 logger.debug("DERSettings unchanged for %s, skipping PUT", lfdi[:8])
                 return
             try:
@@ -364,7 +368,7 @@ class DerResourceManager:
             )
             state.last_settings_data = configuration
             if self._put_policy == "on_change":
-                self._sent_settings[lfdi] = configuration
+                self._sent_settings[lfdi] = (state.settings_href, configuration)
             logger.debug("DERSettings PUT for %s", lfdi[:8])
         except Sep2ProtocolError as e:
             from py20305.diagnostics import report
