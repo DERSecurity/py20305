@@ -10,6 +10,8 @@ Talking to the device underneath.
 
 ::: py20305.connectors.config
 
+::: py20305.connectors.sunspec.connector
+
 ::: py20305.connectors.registry
 
 ::: py20305.connectors.dispatcher

@@ -184,6 +184,9 @@ class LazyConnectorProxy:
 #: path so configuring a device you don't have never imports its driver.
 #: ``custom`` is absent by design -- it carries its own ``class_path``.
 CONNECTOR_TYPE_MAP: dict[str, str] = {
+    # Needs the ``sunspec`` extra; imported only when a device of this type
+    # is first used.
+    "sunspec": "py20305.connectors.sunspec.connector.SunSpecConnector",
     "print_demo": "py20305.connectors.print_demo.PrintDemoConnector",
 }
 
@@ -210,6 +213,8 @@ class ConnectorConfigRegistry:
         self,
         devices: list[DeviceConfig],
         factory_resolver: Callable[[Any], Callable[[], Any] | None] | None = None,
+        *,
+        reading_profile: Any = None,
     ) -> None:
         """Build a registry from typed device configs.
 
@@ -225,10 +230,15 @@ class ConnectorConfigRegistry:
                 not on every lookup, and the callable it returns is invoked
                 lazily like any other -- so a resolver may close over
                 expensive state without paying for it up front.
+            reading_profile: The client's
+                :class:`~py20305.telemetry.mup.ReadingProfile`, passed as
+                ``reading_profile`` to a connector class that sets
+                ``takes_reading_profile``, whose readings depend on it.
         """
         self._device_configs: dict[str, DeviceConfig] = {}
         self._device_proxies: dict[str, LazyConnectorProxy] = {}
         self._factory_resolver = factory_resolver
+        self._reading_profile = reading_profile
 
         for device in devices:
             self._device_configs[device.lfdi] = device
@@ -322,8 +332,12 @@ class ConnectorConfigRegistry:
                 ) from exc
             kwargs = device.connector_kwargs()
 
+        reading_profile = self._reading_profile
+
         def factory() -> Any:
             cls = self._import_class(class_path)
+            if reading_profile is not None and getattr(cls, "takes_reading_profile", False):
+                return cls(**kwargs, reading_profile=reading_profile)
             return cls(**kwargs)
 
         return LazyConnectorProxy(name=device.lfdi, factory=factory)

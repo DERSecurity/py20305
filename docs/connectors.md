@@ -4,10 +4,10 @@ A **connector** is the thing that turns an IEEE 2030.5 control into whatever
 your device actually speaks. The client resolves a device's LFDI to its
 connector, then calls methods on it.
 
-The package ships one connector, the print connector, and the interface for
-your own. A connector for a device protocol, Modbus, DNP3 or anything else,
-belongs to the application that drives the device: it converts the device's
-own points to the IEEE 2030.5 values described below.
+The package ships two connectors, the SunSpec Modbus connector and the print
+connector, and the interface for your own. A connector converts its device's
+own points to the IEEE 2030.5 values described below; everything above it is
+IEEE 2030.5.
 
 ## The print connector
 
@@ -20,6 +20,93 @@ from py20305.connectors.config import PrintDemoDeviceConfig
 
 PrintDemoDeviceConfig(lfdi=LFDI, description="bench test")
 ```
+
+## SunSpec Modbus
+
+A downstream adapter for a SunSpec device. It reads and writes the SunSpec
+700-series models (or a meter model, below) and converts them to and from the
+connector contract inside its own package, so the client sees readings,
+DERCapability and DERSettings element names, DERStatus codes and
+`update_<element>` calls like any other connector's. It speaks three
+transports:
+
+```python
+from py20305.connectors.config import SunSpecDeviceConfig
+
+# Modbus TCP
+SunSpecDeviceConfig(lfdi=LFDI, host="192.168.1.50", port=502, unit_id=1)
+
+# Modbus RTU over serial
+SunSpecDeviceConfig(lfdi=LFDI, transport="rtu", serial_port="/dev/ttyUSB0", baudrate=9600)
+
+# Modbus TCP wrapped in TLS
+SunSpecDeviceConfig(
+    lfdi=LFDI, transport="tcp+tls", host="192.168.1.50", port=802,
+    ca_path="certs/ca.pem", cert_path="certs/client.pem", key_path="certs/client.key",
+)
+```
+
+Install it with the `sunspec` extra (`pip install py20305[sunspec]`).
+
+What it reports:
+
+- **Readings.** Real, reactive and apparent power, power factor, frequency,
+  voltage and current, per line for the lines the device's wiring has. The
+  system voltage is the line-to-line average, so it carries the wiring's
+  line-to-line PhaseCode (AB for single- and split-phase, ABC for
+  three-phase); the per-line voltages are line to neutral (AN, BN, CN) and
+  the line-to-line pairs AB, BC and CA. The system current is a total across
+  the lines (A, AB or ABC). Under the signed-load reading profile the power
+  totals carry the wiring's PhaseCode too, as that profile registers them.
+- **Ratings and settings** from model 702, under the `rtg*` and `set*` names,
+  with `rtgMaxA` from the current rating.
+- **Status** from model 701 in the DERStatus types: `inverterStatus`,
+  `operationalModeStatus`, the 2030.5-2023 `connectStatus` and 2030.5-2018
+  `genConnectStatus` bitmaps, and the AC over- and under-voltage and over-
+  and under-frequency alarms at their `alarmStatus` bits.
+
+What it applies: the volt-var, volt-watt and watt-var curves, `opModMaxLimW`
+and its inject and absorb forms, `opModFixedW`, `opModTargetW`,
+`opModFixedVar`, the two fixed power factors, `opModFreqDroop`, the CSIP-AUS
+generation and load limits, and `opModConnect` / `opModEnergize` through the
+model 703 enter-service permit. Any other element is unsupported by design.
+
+### Meters
+
+A device with `role: site_meter` or `role: der_meter` (see
+[Meters](running.md#meters)) is read through a SunSpec meter model instead of
+the 700-series models. The connector reads the first of these the device
+exposes: 201 to 204 (single-phase, split-phase, wye and delta, with scale
+factors), 211 to 214 (the same in floating point), then 220 (the secure AC
+meter). A device configured as a meter that exposes none of them fails at scan
+with a message naming the models it does expose.
+
+A device left as a DER that exposes a meter model and no 700-series model is
+not changed to a meter. The connector logs a WARNING once suggesting
+`site_meter` or `der_meter`, and the scan fails as it does for any device
+without model 702.
+
+The connector reports a meter's real and reactive power in its role's frame:
+import positive for a site meter, the DER's output positive for a DER meter.
+The meter models do not say which sign of real power is import, so the
+connector learns it from the meter's import and export energy totals, or takes
+it from `power_sign`, and leaves real and reactive power out until it knows.
+The energy totals are reported as forward and reverse energy readings in the
+role's frame.
+
+### CSIP-AUS operating envelope limits
+
+Of the four CSIP-AUS limits, the SunSpec connector enforces the generation
+limit, `opModGenLimW`, and the load limit, `opModLoadLimW`. The generation
+limit is written as a percent of the device's maximum power to its power
+limit; when `opModMaxLimW` is active too, the more restrictive of the two is
+written. The load limit is the maximum charge rate of a storage device; when
+`opModMaxLimWAbsorb` is active too, the lower of the two is written, and when
+no charge limit remains the connector writes the device's rated charge rate,
+the value for no limit. `doeModesSupported` and `doeModesEnabled` name only
+the limits the device can take. The export and import limits constrain power
+at the site's connection point, which an inverter cannot measure, so the
+connector does not apply them.
 
 ## Writing your own
 

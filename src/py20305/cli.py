@@ -273,7 +273,11 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
     )
     own_lfdi = compute_lfdi(config.tls.client_cert.read_text())
 
-    registry = ConnectorConfigRegistry(config.devices)
+    from py20305.telemetry.mup import ReadingProfile
+
+    registry = ConnectorConfigRegistry(
+        config.devices, reading_profile=ReadingProfile(config.telemetry.reading_profile)
+    )
 
     sole_device = config.devices[0].lfdi if len(config.devices) == 1 else None
     holder: dict[str, CsipClient] = {}

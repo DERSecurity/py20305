@@ -9,6 +9,7 @@ import pytest
 from py20305.connectors.config import (
     CustomDeviceConfig,
     PrintDemoDeviceConfig,
+    SunSpecDeviceConfig,
 )
 from py20305.connectors.registry import (
     ConnectorConfigRegistry,
@@ -365,6 +366,17 @@ class TestConnectorConfigRegistry:
     def test_missing_connector_returns_none(self):
         registry = ConnectorConfigRegistry([])
         assert registry.get_connector("ffeeddccffeeddccffeeddccffeeddccffeeddcc") is None
+
+    def test_sunspec_device_lookup(self):
+        registry = ConnectorConfigRegistry(
+            [
+                SunSpecDeviceConfig(
+                    lfdi="4561456145614561456145614561456145614561", host="10.0.0.1", port=502
+                ),
+            ]
+        )
+        proxy = registry.get_connector("4561456145614561456145614561456145614561")
+        assert proxy is not None
 
     def test_custom_device_invalid_class_path_raises(self):
         registry = ConnectorConfigRegistry(

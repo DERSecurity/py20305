@@ -15,13 +15,13 @@ The build produces a wheel in one stage and installs it in another, so what
 runs is the same artifact `pip install py20305` would fetch rather than a
 source checkout.
 
-By default the image includes the `cli` extra. The
+By default the image includes the `cli` and `sunspec` extras. The
 management API is deliberately not among them — it serves on a port, and an
 image that never serves it should not carry a web framework. Build with a
 different set if you need it:
 
 ```bash
-docker build --build-arg EXTRAS=cli,api -t py20305 .
+docker build --build-arg EXTRAS=cli,sunspec,api -t py20305 .
 ```
 
 ## Run
