@@ -1630,6 +1630,17 @@ class TestRunsWithoutAStore:
 
         assert snapshot.declared_readings is None
 
+    async def test_a_declaration_that_raises_keeps_the_read_good(self) -> None:
+        connector = AsyncMock(spec=BaseConnector)
+        connector.fetch_monitoring = AsyncMock(return_value={"W": 1})
+        connector.reading_overrides = MagicMock(return_value=None)
+        connector.declared_readings = MagicMock(side_effect=RuntimeError("bug"))
+
+        snapshot = await DirectConnectorSource(lambda _lfdi: connector).read(SAMPLE_LFDI)
+
+        assert snapshot.quality is Quality.GOOD
+        assert snapshot.declared_readings is None
+
     async def test_comm_lost_entries_carry_comm_lost_quality(self) -> None:
         """A retained value must not still claim GOOD under a COMM_LOST snapshot.
 

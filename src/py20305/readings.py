@@ -91,7 +91,7 @@ def typed_declaration(declared: Any) -> frozenset[str] | None:
     return frozenset(declared)
 
 
-def _declaration_of(connector: Any) -> frozenset[str] | None:
+def declared_readings_of(connector: Any) -> frozenset[str] | None:
     """``connector.declared_readings()``, typed; None when absent or broken.
 
     Optional on the connector contract, so a connector that predates it, or does
@@ -330,7 +330,7 @@ class DirectConnectorSource:
             # there is no reading to salvage from it.
             raw_overrides = connector.reading_overrides()
             overrides = typed_overrides(raw_overrides if isinstance(raw_overrides, dict) else None)
-            declared = _declaration_of(connector)
+            declared = declared_readings_of(connector)
             if not isinstance(values, dict):
                 raise TypeError(f"fetch_monitoring returned {type(values).__name__}, expected dict")
         except Exception as exc:
