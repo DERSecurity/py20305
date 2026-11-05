@@ -83,18 +83,23 @@ class TestBuildDerStatus:
         # When connectStatus is present, gen_connect_status should be None
         assert model.gen_connect_status is None
 
-    def test_gen_connect_status_fallback(self) -> None:
-        """genConnectStatus populates both connect_status and gen_connect_status."""
+    def test_2023_server_gets_connect_status_derived_from_a_gen_connect_status(self) -> None:
         model = build_der_status(
             {"readingTime": 0, "genConnectStatus": {"dateTime": 100, "value": 1}}
         )
-        # Backward compat: gen_connect_status still populated
-        assert isinstance(model.gen_connect_status, ConnectStatusType)
-        assert model.gen_connect_status.date_time.value == 100
-        assert model.gen_connect_status.value == b"\x01"
-        # Also populates connect_status from the fallback
+        assert model.gen_connect_status is None
         assert isinstance(model.connect_status, ConnectStatusType2)
-        assert model.connect_status.value == b"\x01"
+        assert model.connect_status.date_time.value == 100
+        assert model.connect_status.value == b""
+
+    def test_2018_server_gets_gen_connect_status_and_no_connect_status(self) -> None:
+        model = build_der_status(
+            {"readingTime": 0, "genConnectStatus": {"dateTime": 100, "value": 0b10111}},
+            server_2018_compat=True,
+        )
+        assert model.connect_status is None
+        assert isinstance(model.gen_connect_status, ConnectStatusType)
+        assert model.gen_connect_status.value == bytes([0b10111])
 
     def test_2018_server_receives_the_2018_bitmap_when_both_are_supplied(self) -> None:
         """ConnectStatusType (2018) and ConnectStatusType2 (2023) define
@@ -190,12 +195,21 @@ class TestBuildDerStatus:
         assert isinstance(model.storage_mode_status, StorageModeStatusType)
         assert model.storage_mode_status.value == 2
 
-    def test_stor_connect_status(self) -> None:
+    def test_stor_connect_status_goes_to_a_2018_server(self) -> None:
         model = build_der_status(
-            {"readingTime": 0, "storConnectStatus": {"dateTime": 700, "value": 1}}
+            {"readingTime": 0, "storConnectStatus": {"dateTime": 700, "value": 1}},
+            server_2018_compat=True,
         )
         assert isinstance(model.stor_connect_status, ConnectStatusType)
-        assert model.stor_connect_status.value == b"\x01"
+        assert model.stor_connect_status.value == b""
+        assert model.connect_status is None
+
+    def test_2023_server_never_gets_stor_connect_status(self) -> None:
+        model = build_der_status(
+            {"readingTime": 0, "storConnectStatus": {"dateTime": 700, "value": 0b101}}
+        )
+        assert model.stor_connect_status is None
+        assert model.connect_status.value == bytes([0b11])
 
     def test_gen_connect_none_value_omitted(self) -> None:
         model = build_der_status(
@@ -380,12 +394,51 @@ class TestIeee2030_5Values:
         model = build_der_status({"readingTime": 0, "alarmStatus": (1 << 10) | 1})
         assert model.alarm_status == ((1 << 10) | 1).to_bytes(4, "big")
 
-    def test_a_bitmap_carried_to_the_other_edition_keeps_only_connected(self) -> None:
-        # 2018 available (bit 1) is not 2023 energized (bit 1); bits 2 to 4
-        # do not exist in 2023.
-        model = build_der_status({"readingTime": 0, "genConnectStatus": self._stamped(0b00111)})
-        assert model.connect_status.value == b"\x01"
+    def test_2018_bitmap_carried_to_a_2023_server_maps_connected_and_operating(self) -> None:
+        # Available (bit 1), test (bit 3) and fault (bit 4) have no 2023
+        # connectStatus bit; connected maps to connected, operating to energized.
+        cases = {0b00001: 0b01, 0b00101: 0b11, 0b00100: 0b10, 0b00010: 0b00, 0b11010: 0b00}
+        for old, new in cases.items():
+            model = build_der_status({"readingTime": 0, "genConnectStatus": self._stamped(old)})
+            assert model.connect_status.value == bytes([new]), bin(old)
+            assert model.gen_connect_status is None
+
+    def test_2023_bitmap_carried_to_a_2018_server_keeps_only_connected(self) -> None:
         model = build_der_status(
             {"readingTime": 0, "connectStatus": self._stamped(0b11)}, server_2018_compat=True
         )
-        assert model.gen_connect_status.value == b"\x01"
+        assert model.gen_connect_status.value == b""
+        assert model.connect_status is None
+
+    def test_2023_payload_has_no_deprecated_connect_fields_and_validates(self) -> None:
+        now = 1700000000
+        model = build_der_status(
+            {
+                "readingTime": now,
+                "genConnectStatus": self._stamped(0b00101),
+                "storConnectStatus": self._stamped(0b00001),
+            }
+        )
+        xml = to_xml(model)
+        root = fromstring(xml.decode("utf-8"))
+        assert root.find(f"{{{NS}}}genConnectStatus") is None
+        assert root.find(f"{{{NS}}}storConnectStatus") is None
+        assert root.find(f"{{{NS}}}connectStatus") is not None
+        assert validate_xml(xml) == []
+        assert root.get("schemaVer") == "2.2"
+
+    def test_2018_payload_has_the_2018_fields_and_no_connect_status(self) -> None:
+        now = 1700000000
+        model = build_der_status(
+            {
+                "readingTime": now,
+                "genConnectStatus": self._stamped(0b00101),
+                "storConnectStatus": self._stamped(0b00001),
+            },
+            server_2018_compat=True,
+        )
+        root = fromstring(to_xml(model, server_2018_compat=True).decode("utf-8"))
+        assert root.find(f"{{{NS}}}genConnectStatus") is not None
+        assert root.find(f"{{{NS}}}storConnectStatus") is not None
+        assert root.find(f"{{{NS}}}connectStatus") is None
+        assert root.get("schemaVer") is None

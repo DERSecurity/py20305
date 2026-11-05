@@ -64,6 +64,8 @@ ALARM_STATUS_BITS = (1 << 11) - 1
 #: is energized in 2023 and available in 2018, and bits 2 to 4 exist only in
 #: 2018. A bitmap carried to the other edition keeps bit 0 alone.
 _CONNECTED = 0b1
+_ENERGIZED = 0b10
+_OPERATING = 0b100
 
 
 def build_der_status(
@@ -99,8 +101,11 @@ def build_der_status(
             servers that treat an absent alarmStatus as "no change" rather than
             "cleared". Edition-independent.
 
-    Each server edition receives the connect bitmap it defines. When the
-    connector supplies only the other edition's bitmap, its bit 0
+    Each server edition receives the connect bitmap it defines. A 2023 server
+    never receives genConnectStatus or storConnectStatus; when the connector
+    supplies only those, connectStatus is derived from the bitmap (connected
+    from bit 0, energized from operating). A 2018 server receives no
+    connectStatus; when the connector supplies only connectStatus, its bit 0
     (connected) is carried over.
 
     Returns:
@@ -131,9 +136,7 @@ def build_der_status(
     common: dict[str, Any] = {
         "reading_time": TimeType(value=reading_time),
         "alarm_status": alarm_bytes,
-        "inverter_status": _enum(
-            InverterStatusType, "inverterStatus", status_data, now_default
-        ),
+        "inverter_status": _enum(InverterStatusType, "inverterStatus", status_data, now_default),
         "local_control_mode_status": _enum(
             LocalControlModeStatusType, "localControlModeStatus", status_data, now_default
         ),
@@ -147,12 +150,9 @@ def build_der_status(
         "storage_mode_status": _enum(
             StorageModeStatusType, "storageModeStatus", status_data, now_default
         ),
-        "stor_connect_status": _to_connect_status(
-            _bitmap("storConnectStatus", status_data.get("storConnectStatus"), 2018),
-            now_default,
-        ),
     }
 
+    stor_2018 = _bitmap("storConnectStatus", status_data.get("storConnectStatus"), 2018)
     if server_2018_compat:
         # IEEE 2030.5-2018: only genConnectStatus/storConnectStatus exist;
         # connectStatus (ConnectStatusType2) must not be emitted.
@@ -162,22 +162,38 @@ def build_der_status(
                 connect_2018 if connect_2018 is not None else _connected_only(connect_2023),
                 now_default,
             ),
+            stor_connect_status=_to_connect_status(stor_2018, now_default),
             **common,
         )
 
-    # IEEE 2030.5-2023: connectStatus (ConnectStatusType2) replaces deprecated
-    # genConnectStatus. A connector that supplies only genConnectStatus still
-    # has it sent, and its connected bit carried into connectStatus.
+    # IEEE 2030.5-2023: genConnectStatus and storConnectStatus SHALL NOT be
+    # included; connectStatus (ConnectStatusType2) covers the whole DER. A
+    # connector that supplies only a 2018 bitmap has connectStatus derived from
+    # it (see _connect_2023_from_2018).
+    if connect_2023 is None:
+        connect_2023 = _connect_2023_from_2018(
+            connect_2018 if connect_2018 is not None else stor_2018
+        )
     return Derstatus(
-        connect_status=_to_connect_status2(
-            connect_2023 if connect_2023 is not None else _connected_only(connect_2018),
-            now_default,
-        ),
-        gen_connect_status=(
-            None if connect_2023 is not None else _to_connect_status(connect_2018, now_default)
-        ),
+        connect_status=_to_connect_status2(connect_2023, now_default),
+        gen_connect_status=None,
+        stor_connect_status=None,
         **common,
     )
+
+
+def _connect_2023_from_2018(bitmap: tuple[int, Any] | None) -> tuple[int, Any] | None:
+    """Derive a ConnectStatusType2 bitmap from a 2018 ConnectStatusType bitmap.
+
+    Connected (bit 0) carries over to Connected (bit 0), and Operating (bit 2)
+    sets Energized (bit 1). Available, Test and Fault have no ConnectStatusType2
+    bit and are not carried.
+    """
+    if bitmap is None:
+        return None
+    value, data = bitmap
+    derived = (value & _CONNECTED) | (_ENERGIZED if value & _OPERATING else 0)
+    return derived, data
 
 
 def _dt(data: dict[str, Any], default_time: int) -> TimeType:
