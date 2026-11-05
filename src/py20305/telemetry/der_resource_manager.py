@@ -24,6 +24,7 @@ from py20305.client.polling import PollScheduler
 from py20305.client.timebase import ServerTimebase
 from py20305.commands import CommandObserver, NullCommandObserver
 from py20305.connectors.base import ConnectorError
+from py20305.connectors.modes import modes_supported2
 from py20305.telemetry.der_capability import build_der_capability
 from py20305.telemetry.der_settings import build_der_settings
 from py20305.telemetry.der_status import build_der_status
@@ -259,10 +260,12 @@ class DerResourceManager:
                 nameplate,
                 der_type=connector.der_type,
                 csip_aus_mode=self._client.csip_aus_mode,
+                modes_supported2=modes_supported2(connector),
+                profile=self._client.profile,
             )
             body = to_xml(
                 model,
-                server_2018_compat=self._client.server_2018_compat,
+                profile=self._client.profile,
                 include_csipaus=self._client.csip_aus_mode,
                 csipaus_namespace=self._client.csipaus_namespace,
             )
@@ -283,7 +286,7 @@ class DerResourceManager:
         except Sep2ProtocolError as e:
             from py20305.diagnostics import report
 
-            hint = compat_hint_suffix(e, self._client.server_2018_compat)
+            hint = compat_hint_suffix(e, self._client.profile)
             report(
                 "warnings",
                 f"DERCapability PUT for {lfdi[:8]} rejected (HTTP {e.status_code}): {e}{hint}",
@@ -339,6 +342,8 @@ class DerResourceManager:
                     configuration,
                     updated_time=int(self._timebase.now()),
                     csip_aus_mode=self._client.csip_aus_mode,
+                    modes_supported2=modes_supported2(connector),
+                    profile=self._client.profile,
                 )
             except ValueError as e:
                 # The connector returned configuration missing a required field
@@ -363,7 +368,7 @@ class DerResourceManager:
                 state.settings_href,
                 to_xml(
                     model,
-                    server_2018_compat=self._client.server_2018_compat,
+                    profile=self._client.profile,
                     include_csipaus=self._client.csip_aus_mode,
                     csipaus_namespace=self._client.csipaus_namespace,
                 ),
@@ -375,7 +380,7 @@ class DerResourceManager:
         except Sep2ProtocolError as e:
             from py20305.diagnostics import report
 
-            hint = compat_hint_suffix(e, self._client.server_2018_compat)
+            hint = compat_hint_suffix(e, self._client.profile)
             report(
                 "warnings",
                 f"DERSettings PUT for {lfdi[:8]} rejected (HTTP {e.status_code}): {e}{hint}",
@@ -425,19 +430,19 @@ class DerResourceManager:
             self._commands.record_readback(lfdi, status_data, read_started_at=read_started_at)
             model = build_der_status(
                 status_data,
-                server_2018_compat=self._client.server_2018_compat,
+                profile=self._client.profile,
                 always_send_alarm_status=self._client.always_send_alarm_status,
                 default_time=int(self._timebase.now()),
             )
             await self._client.put_bytes(
                 state.status_href,
-                to_xml(model, server_2018_compat=self._client.server_2018_compat),
+                to_xml(model, profile=self._client.profile),
             )
             logger.debug("DERStatus PUT for %s", lfdi[:8])
         except Sep2ProtocolError as e:
             from py20305.diagnostics import report
 
-            hint = compat_hint_suffix(e, self._client.server_2018_compat)
+            hint = compat_hint_suffix(e, self._client.profile)
             report(
                 "warnings",
                 f"DERStatus PUT for {lfdi[:8]} rejected (HTTP {e.status_code}): {e}{hint}",

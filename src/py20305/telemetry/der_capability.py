@@ -12,8 +12,10 @@ from py20305.models.csipaus.csipaus_ext import DoeModesSupported
 from py20305.models.sep.sep import (
     Dercapability,
     DercontrolType,
+    DercontrolType2,
     Dertype,
 )
+from py20305.server_profile import ServerProfile
 from py20305.telemetry.scale_factor import (
     to_active_power,
     to_amp_hour,
@@ -33,7 +35,12 @@ _DEFAULT_DOE_MODES_SUPPORTED = 0x0F
 
 
 def build_der_capability(
-    nameplate: dict[str, Any], *, der_type: int = 83, csip_aus_mode: bool = False
+    nameplate: dict[str, Any],
+    *,
+    der_type: int = 83,
+    csip_aus_mode: bool = False,
+    modes_supported2: int | None = None,
+    profile: ServerProfile | None = None,
 ) -> Dercapability:
     """Build a ``Dercapability`` model from connector nameplate data.
 
@@ -44,6 +51,11 @@ def build_der_capability(
         csip_aus_mode: When True, attach the CSIP-AUS ``doeModesSupported``
             extension (required by CSIP-AUS servers); plain 2030.5 servers omit
             it.
+        modes_supported2: The DERControlType2 bits the connector can apply (see
+            :func:`py20305.connectors.modes.modes_supported2`).
+        profile: The server's schema profile. It limits ``modesSupported2`` to
+            the bits the profile permits, and leaves the element out when none
+            remain.
 
     Returns:
         Pydantic model ready for ``to_xml()`` serialization.
@@ -63,6 +75,13 @@ def build_der_capability(
         modes_supported = DercontrolType(value=ctrl_modes.to_bytes(4, "big"))
     else:
         modes_supported = DercontrolType(value=b"\x00\x00\x00\x00")
+
+    # modesSupported2: the additional DERControl modes (2023). Never more than
+    # the connector supports and the server profile permits.
+    bits2 = modes_supported2 or 0
+    if profile is not None:
+        bits2 = profile.mask_modes2(bits2)
+    modes_supported2_value = DercontrolType2(value=bits2.to_bytes(4, "big")) if bits2 > 0 else None
 
     # Category fields (plain int passthrough)
     nor_op_cat = nameplate.get("rtgNormalCategory")
@@ -87,6 +106,7 @@ def build_der_capability(
 
     return Dercapability(
         modes_supported=modes_supported,
+        modes_supported2=modes_supported2_value,
         other_element=other_element,
         rtg_abnormal_category=abn_op_cat if isinstance(abn_op_cat, int) else None,
         rtg_max_a=to_current_rms(nameplate.get("rtgMaxA")),

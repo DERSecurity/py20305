@@ -504,7 +504,7 @@ class TestUnmanagedSubscriptions:
         return SubscriptionManager(
             client=mock_client,
             notification_uri="https://agg:10443/notify",
-            server_2018_compat=True,
+            missing_location_fallback=True,
         )
 
     @pytest.mark.asyncio
@@ -585,7 +585,7 @@ class TestUnmanagedSubscriptions:
         new_mgr = SubscriptionManager(
             client=AsyncMock(),
             notification_uri="https://agg:10443/notify",
-            server_2018_compat=True,
+            missing_location_fallback=True,
         )
         new_mgr.restore_from_checkpoint(checkpoint)
 

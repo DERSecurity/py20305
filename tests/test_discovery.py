@@ -58,6 +58,7 @@ from py20305.models.sep.sep import (
     TimeOffsetType,
     TimeType,
 )
+from py20305.server_profile import Edition, ServerProfile
 from py20305.xml.serialization import NS_CSIPAUS
 
 
@@ -198,14 +199,17 @@ class _MockClient:
         self,
         responses: dict[str, Any],
         raw_bodies: dict[str, bytes] | None = None,
-        server_2018_compat: bool = False,
+        profile: ServerProfile | None = None,
     ) -> None:
         self._responses = responses
         self._raw_bodies = raw_bodies or {}
         self.timebase = ServerTimebase()
-        self.server_2018_compat = server_2018_compat
+        self.profile = profile or ServerProfile(base=Edition.E2023)
         # Every request as (method, path), path with its query string.
         self.calls: list[tuple[str, str]] = []
+
+    def observe_device_capability(self, body: bytes) -> ServerProfile:
+        return self.profile
 
     async def get(self, path: str, model_type: type) -> Any:
         self.calls.append(("get", path))
@@ -2176,7 +2180,7 @@ async def test_multi_der_gaps_filled_from_later_entries_in_2018_compat():
     """A 2018 server may spread child links across DER entries; honor that.
 
     Previous revisions of IEEE 2030.5 allowed several DER objects, so under
-    ``server_2018_compat`` a link the first entry omits is taken from a later
+    a 2018 base a link the first entry omits is taken from a later
     one rather than dropped.
     """
     client = _MockClient(
@@ -2193,7 +2197,7 @@ async def test_multi_der_gaps_filled_from_later_entries_in_2018_compat():
                 ),
             ),
         },
-        server_2018_compat=True,
+        profile=ServerProfile(base=Edition.E2018),
     )
 
     state = DiscoveredState()

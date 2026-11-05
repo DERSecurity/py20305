@@ -1602,9 +1602,7 @@ class EventProcessor:
             # The default belongs to ``best.href``, which need not be the ending
             # event's program: under a group lookup it fans out to *that*
             # program's local devices, so that is what the write reaches.
-            held = self._modes_running_in(
-                self._reach_of(best.href, [dev_href]), active_events
-            )
+            held = self._modes_running_in(self._reach_of(best.href, [dev_href]), active_events)
             taken = carried & held
             if taken:
                 logger.debug(
@@ -1934,9 +1932,7 @@ class EventProcessor:
         :func:`get_active_mode_names` returns them in.
         """
         base = dderc.dercontrol_base
-        cleared: dict[str, Any] = {
-            name: None for name in modes if name in type(base).model_fields
-        }
+        cleared: dict[str, Any] = {name: None for name in modes if name in type(base).model_fields}
         kept = [
             element
             for element in (base.other_element or [])
@@ -1974,9 +1970,9 @@ class EventProcessor:
         """
         held: set[str] = set()
         for record in active_events:
-            devices = list(self._state.device_mapping.program_to_devices.get(
-                record.program_href, []
-            ))
+            devices = list(
+                self._state.device_mapping.program_to_devices.get(record.program_href, [])
+            )
             if not reach & self._reach_of(record.program_href, devices):
                 continue
             # Its registrations on the devices this write touches, not on all
@@ -2108,6 +2104,7 @@ class EventProcessor:
                 lfdi,
                 self._response_tracker,
                 now_ts=int(self._timebase.now()),
+                supported_modes2=await self._supported_modes2(lfdi),
             )
             return
 
@@ -2123,6 +2120,7 @@ class EventProcessor:
                     lfdi,
                     self._response_tracker,
                     now_ts=int(self._timebase.now()),
+                    supported_modes2=await self._supported_modes2(lfdi),
                 )
 
     async def _post_response_for_devices(
@@ -2141,7 +2139,16 @@ class EventProcessor:
                     lfdi,
                     self._response_tracker,
                     now_ts=int(self._timebase.now()),
+                    supported_modes2=await self._supported_modes2(lfdi),
                 )
+
+    async def _supported_modes2(self, lfdi: bytes) -> int | None:
+        """Return the DERControlType2 bits the device with ``lfdi`` can apply, if known."""
+        supported = getattr(self._dispatcher, "supported_modes2", None)
+        if supported is None:
+            return None
+        result = await supported(lfdi.hex())
+        return result if isinstance(result, int) else None
 
     def _get_any_lfdi(self) -> bytes | None:
         """Get any available device LFDI for response posting."""

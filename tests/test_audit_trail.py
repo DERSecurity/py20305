@@ -43,6 +43,7 @@ from py20305.models.sep.sep import (
     TimeType,
 )
 from py20305.observers import AuditRecord, DeviceOperation, DeviceRecord
+from py20305.server_profile import Edition, ServerProfile
 
 LFDI_1 = b"\xaa" * 20
 LFDI_2 = b"\xbb" * 20
@@ -197,6 +198,7 @@ class Site:
             sequence=self.sequence,
         )
         self.http = AsyncMock()
+        self.http.profile = ServerProfile(base=Edition.E2023)
         self.http.post = AsyncMock(return_value=None)
         self.processor = EventProcessor(
             self.http,

@@ -41,6 +41,7 @@ from py20305.history.events import EventHistory
 from py20305.history.intervals import IntervalHistory
 from py20305.history.writes import WriteHistory
 from py20305.readings import DirectConnectorSource
+from py20305.server_profile import Edition, ServerProfile
 from py20305.telemetry.manager import TelemetryManager
 from tests.legacy_readings import readings_from
 from tests.test_audit_trail import (
@@ -681,6 +682,8 @@ class TestTelemetryFeedsTheIntervals:
             return connector
 
         client = AsyncMock()
+
+        client.profile = ServerProfile(base=Edition.E2023)
         client.post_bytes = AsyncMock(return_value="/mup/1")
         client.put_bytes = AsyncMock(return_value=204)
         history = _memory()
@@ -710,6 +713,7 @@ class TestTelemetryFeedsTheIntervals:
 
 def _api(history: History | None) -> TestClient:
     client = MagicMock()
+    client.profile = ServerProfile(base=Edition.E2023)
     client.history = history
     service = ClientAPIService(client=client)
     app = FastAPI()
@@ -897,6 +901,8 @@ class TestRunnerClosesTheHistory:
         from tests.test_device_telemetry import LFDI_A, TestRunnerWiring
 
         client = MagicMock()
+
+        client.profile = ServerProfile(base=Edition.E2023)
         client.http.observers = None
         client.connect = AsyncMock()
         client.run = AsyncMock(side_effect=lambda: asyncio.sleep(0))
@@ -1107,6 +1113,8 @@ class TestReviewFixes:
             return connector
 
         client = AsyncMock()
+
+        client.profile = ServerProfile(base=Edition.E2023)
         client.post_bytes = AsyncMock(return_value="/mup/1")
         history = _memory()
         manager = TelemetryManager(

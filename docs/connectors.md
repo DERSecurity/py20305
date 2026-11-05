@@ -218,6 +218,25 @@ import positive is already the load convention. The `SIGNED_AS_REPORTED`
 profile posts the sign the connector reports, for every role. A connector that
 reports another convention posts the wrong sign.
 
+### Additional control modes
+
+IEEE 2030.5-2023 added control modes beyond the 32 of DERControlType. They are
+the bits of DERControlType2: 0 `opModMaxLimPctVAAbsorb`, 1
+`opModMaxLimPctVAInject`, 2 `opModMaxLimPctVarAbsorb`, 3
+`opModMaxLimPctVarInject`, 4 `opModMaxLimPctWAbsorb`, 5 `opModMaxLimVarAbsorb`,
+6 `opModMaxLimVarInject`, 7 `opModMaxLimWAbsorb`, 8 `opModMaxLimWInject` and 9
+`opModTargetV`.
+
+The client reports them in DERCapability `modesSupported2`, DERSettings
+`modesEnabled2` and DERControlResponse `modesResponded2`, limited to what the
+server profile permits (see [Running](running.md)). Which bits a device
+supports comes from the connector: a bit is set when the connector implements
+the control's `update_<element>` method. A connector that implements a method
+but cannot honor it on this device defines `supported_modes2()` and returns the
+bitmap itself, so the device never advertises a mode it cannot apply. The
+settings' `modesEnabled2` is sent only when `fetch_configuration` returns it,
+and never beyond the supported bits.
+
 ### Ratings and settings
 
 `fetch_nameplate` returns DERCapability element names and `fetch_configuration`

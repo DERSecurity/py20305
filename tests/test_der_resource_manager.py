@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from lxml import etree
 
+from py20305.server_profile import Edition, ServerProfile
 from py20305.telemetry.der_resource_manager import DerResourceManager
 
 
@@ -59,6 +60,7 @@ class TestDerResourceManagerStart:
     @pytest.mark.asyncio
     async def test_start_device_with_all_hrefs(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         connector = _make_connector()
         manager = DerResourceManager(client, _aresolver(connector))
 
@@ -78,6 +80,7 @@ class TestDerResourceManagerStart:
     @pytest.mark.asyncio
     async def test_start_device_with_no_hrefs(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         connector = _make_connector()
         manager = DerResourceManager(client, _aresolver(connector))
 
@@ -93,6 +96,7 @@ class TestDerResourceManagerStart:
     @pytest.mark.asyncio
     async def test_lfdi_normalized_to_lower(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         manager = DerResourceManager(client, _aresolver(_make_connector()))
 
         manager.start_device("AABBCCDD", None, None, None)
@@ -106,6 +110,7 @@ class TestDerResourceManagerCapabilityCycle:
     @pytest.mark.asyncio
     async def test_capability_puts_xml(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         connector = _make_connector(nameplate={"rtgMaxW": 15000})
         manager = DerResourceManager(client, _aresolver(connector))
@@ -123,8 +128,9 @@ class TestDerResourceManagerCapabilityCycle:
     async def test_capability_put_to_a_csipaus_13_server_uses_its_namespace(self) -> None:
         """A CSIP-AUS 1.3 server refuses doeModesSupported in the pre-1.3 namespace."""
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
-        client.server_2018_compat = False
+        client.profile = ServerProfile(base=Edition.E2023)
         client.csip_aus_mode = True
         client.csipaus_namespace = "https://csipaus.org/ns/v1.3"
         connector = _make_connector(nameplate={"rtgMaxW": 15000})
@@ -141,6 +147,7 @@ class TestDerResourceManagerCapabilityCycle:
     @pytest.mark.asyncio
     async def test_capability_error_does_not_propagate(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(side_effect=RuntimeError("network"))
         connector = _make_connector()
         manager = DerResourceManager(client, _aresolver(connector))
@@ -152,6 +159,7 @@ class TestDerResourceManagerCapabilityCycle:
     @pytest.mark.asyncio
     async def test_capability_no_href_noop(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         connector = _make_connector()
         manager = DerResourceManager(client, _aresolver(connector))
 
@@ -167,6 +175,7 @@ class TestDerResourceManagerSettingsCycle:
     @pytest.mark.asyncio
     async def test_settings_puts_xml(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         connector = _make_connector(configuration={"setMaxW": 10000})
         manager = DerResourceManager(client, _aresolver(connector))
@@ -183,6 +192,7 @@ class TestDerResourceManagerSettingsCycle:
     @pytest.mark.asyncio
     async def test_settings_error_does_not_propagate(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(side_effect=RuntimeError("network"))
         connector = _make_connector()
         manager = DerResourceManager(client, _aresolver(connector))
@@ -197,6 +207,7 @@ class TestDerResourceManagerSettingsCycle:
         # not crash the cycle with a full traceback every tick. The cycle should
         # skip the PUT and emit one actionable, traceback-free warning.
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         connector = _make_connector(configuration={"setMaxVA": 5000})  # no setMaxW
         manager = DerResourceManager(client, _aresolver(connector))
@@ -222,6 +233,7 @@ class TestDerResourceManagerStatusCycle:
     @pytest.mark.asyncio
     async def test_status_puts_xml(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         connector = _make_connector()
         manager = DerResourceManager(client, _aresolver(connector))
@@ -237,6 +249,7 @@ class TestDerResourceManagerStatusCycle:
     @pytest.mark.asyncio
     async def test_status_error_does_not_propagate(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(side_effect=RuntimeError("network"))
         connector = _make_connector()
         manager = DerResourceManager(client, _aresolver(connector))
@@ -252,6 +265,7 @@ class TestDerResourceManagerChangeDetection:
     async def test_capability_always_puts_every_cycle(self) -> None:
         """DERCapability always PUTs, even when data is unchanged."""
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         connector = _make_connector(nameplate={"rtgMaxW": 15000})
         manager = DerResourceManager(client, _aresolver(connector))
@@ -269,6 +283,7 @@ class TestDerResourceManagerChangeDetection:
     async def test_settings_skips_put_when_unchanged(self) -> None:
         """Second settings cycle with same data skips the PUT."""
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         config = {"setMaxW": 10000, "setMaxVA": 20000}
         connector = _make_connector(configuration=config)
@@ -284,6 +299,7 @@ class TestDerResourceManagerChangeDetection:
     async def test_settings_puts_when_changed(self) -> None:
         """Settings PUT fires again when connector data changes."""
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         connector = _make_connector(configuration={"setMaxW": 10000})
         manager = DerResourceManager(client, _aresolver(connector))
@@ -300,6 +316,7 @@ class TestDerResourceManagerChangeDetection:
     async def test_status_always_puts(self) -> None:
         """DERStatus has no change detection -- always PUTs."""
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         status = {
             "readingTime": 1000,
@@ -320,6 +337,7 @@ class TestDerResourceManagerChangeDetection:
 
 def _on_change_manager(connector: MagicMock) -> tuple[DerResourceManager, AsyncMock]:
     client = AsyncMock()
+    client.profile = ServerProfile(base=Edition.E2023)
     client.put_bytes = AsyncMock(return_value=204)
     manager = DerResourceManager(client, _aresolver(connector), put_policy="on_change")
     return manager, client
@@ -414,6 +432,7 @@ class TestCapabilityOnChange:
     async def test_periodic_is_the_default(self) -> None:
         """The default keeps the every-cycle PUT certification relies on."""
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=204)
         manager = DerResourceManager(client, _aresolver(_make_connector()))
         _register(manager)
@@ -531,6 +550,7 @@ class TestSettingsOnChange:
     async def test_periodic_settings_are_put_again_after_a_restart(self) -> None:
         """Today's behavior: change detection lives in the per-device state."""
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=204)
         manager = DerResourceManager(client, _aresolver(_make_connector()))
         _register_both(manager)
@@ -549,6 +569,7 @@ class TestDerResourceManagerPerResourceRates:
     async def test_different_rates_per_resource(self) -> None:
         """Each resource type uses its own poll rate."""
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         connector = _make_connector()
         manager = DerResourceManager(client, _aresolver(connector))
 
@@ -574,6 +595,7 @@ class TestDerResourceManagerPerResourceRates:
     async def test_default_rates(self) -> None:
         """Default rates: 86400 for cap, 60 for settings, 300 for status."""
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         connector = _make_connector()
         manager = DerResourceManager(client, _aresolver(connector))
 
@@ -592,6 +614,7 @@ class TestDerResourceManagerShutdown:
     @pytest.mark.asyncio
     async def test_shutdown_clears_devices(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         manager = DerResourceManager(client, _aresolver(_make_connector()))
 
         manager.start_device("ab", "/cap", "/set", "/stat")
@@ -605,6 +628,7 @@ class TestDerResourceManagerShutdown:
     @pytest.mark.asyncio
     async def test_shutdown_cancels_scheduler(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         manager = DerResourceManager(client, _aresolver(_make_connector()))
 
         manager.start_device("ab", "/cap", None, None)
@@ -644,6 +668,7 @@ class TestReadsAreReported:
     @pytest.mark.asyncio
     async def test_capability_cycle_reports_the_nameplate_read(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         emitter, fw = _make_telemetry()
         manager = DerResourceManager(
@@ -662,6 +687,7 @@ class TestReadsAreReported:
     @pytest.mark.asyncio
     async def test_settings_cycle_reports_the_configuration_read(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         emitter, fw = _make_telemetry()
         manager = DerResourceManager(
@@ -679,6 +705,7 @@ class TestReadsAreReported:
     @pytest.mark.asyncio
     async def test_status_cycle_reports_the_status_read(self) -> None:
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         emitter, fw = _make_telemetry()
         manager = DerResourceManager(
@@ -695,6 +722,7 @@ class TestReadsAreReported:
     async def test_without_the_kwarg_cycles_run_unchanged(self) -> None:
         """No emitter, no reporting -- and no change to the PUT path."""
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.put_bytes = AsyncMock(return_value=200)
         manager = DerResourceManager(client, _aresolver(_make_connector()))
 

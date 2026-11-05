@@ -94,12 +94,16 @@ class SubscriptionManager:
         notification_uri: str,
         *,
         max_notifications: int = 1000,
-        server_2018_compat: bool = False,
+        missing_location_fallback: bool = False,
         on_subscription_lost: Callable[[], Awaitable[None]] | None = None,
         renewal_method: RenewalMethod = "post",
     ) -> None:
         """
         Args:
+            missing_location_fallback: Accept a created subscription whose 201
+                response has no Location header, under a synthetic URI. Both
+                editions require the header (2018 clause 5.5.2.4), so this is a
+                workaround for a non-conforming server and is off by default.
             renewal_method: ``post`` re-POSTs a subscription to its list to
                 renew it; ``put`` PUTs it to its own href (see :meth:`renew`).
 
@@ -119,7 +123,7 @@ class SubscriptionManager:
         # re-subscribing. Persists across rediscovery; cleared only on a genuine
         # reconnect.
         self._resubscribe_suppressed: set[str] = set()
-        self._server_2018_compat = server_2018_compat
+        self._missing_location_fallback = missing_location_fallback
         # Invoked (fire-and-forget) when a renewal returns 401/404 -- the
         # server has forgotten our subscriptions and a full rediscovery is
         # needed to re-establish them. The caller (typically csip_client)
@@ -234,10 +238,10 @@ class SubscriptionManager:
             return None
 
         if not location:
-            if self._server_2018_compat:
+            if self._missing_location_fallback:
                 location = f"_synthetic:{subscribed_resource}"
                 logger.info(
-                    "No Location header (2018 compat), using synthetic URI for %s",
+                    "No Location header, using a synthetic URI for %s (missing_location_fallback)",
                     subscribed_resource,
                 )
                 state = SubscriptionState(

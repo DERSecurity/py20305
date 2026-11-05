@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from py20305.server_profile import ServerProfile
+
 # Substrings in a server's 400 response body that indicate the server is
 # validating against the IEEE 2030.5-2018 schema and rejecting attributes /
 # child elements introduced in 2030.5-2023. When we see one of these,
-# surfacing a "try server_2018_compat=true" hint to the operator turns a
+# surfacing a "try server.schema.base: 2018" hint to the operator turns a
 # generic protocol failure into an actionable next step.
 _2018_SCHEMA_SIGNATURES: tuple[str, ...] = (
     "'subscribable' attribute is not declared",
@@ -15,7 +20,7 @@ _2018_SCHEMA_SIGNATURES: tuple[str, ...] = (
 
 _2018_COMPAT_HINT = (
     "this typically indicates an IEEE 2030.5-2018 server; "
-    "try setting server_2018_compat=true in the client configuration"
+    "try setting server.schema.base: 2018 in the client configuration"
 )
 
 
@@ -113,9 +118,9 @@ def is_2018_schema_validation_error(exc: BaseException) -> bool:
     return any(sig in message for sig in _2018_SCHEMA_SIGNATURES)
 
 
-def compat_hint_suffix(exc: BaseException, server_2018_compat: bool) -> str:
+def compat_hint_suffix(exc: BaseException, profile: ServerProfile) -> str:
     """Return ``" -- {hint}"`` when *exc* matches a 2018-server signature
-    and the client is not already in 2018-compat mode; otherwise ``""``.
+    and the client is not already treating the server as 2018; otherwise ``""``.
 
     Designed for appending to operator-facing diagnostic messages so the
     UI footer entry tells the operator exactly which config flag would
@@ -123,6 +128,6 @@ def compat_hint_suffix(exc: BaseException, server_2018_compat: bool) -> str:
     case so callers can do ``f"{base_msg}{compat_hint_suffix(...)}"``
     unconditionally.
     """
-    if server_2018_compat or not is_2018_schema_validation_error(exc):
+    if profile.is_2018 or not is_2018_schema_validation_error(exc):
         return ""
     return f" -- {_2018_COMPAT_HINT}"

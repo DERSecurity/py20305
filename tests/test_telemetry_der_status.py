@@ -17,6 +17,7 @@ from py20305.models.sep.sep import (
     StateOfChargeStatusType,
     StorageModeStatusType,
 )
+from py20305.server_profile import Edition, ServerProfile
 from py20305.telemetry.der_status import build_der_status
 from py20305.xml.serialization import from_xml, to_xml, validate_xml
 
@@ -100,7 +101,7 @@ class TestBuildDerStatus:
     ) -> None:
         model = build_der_status(
             {"readingTime": 0, "connectStatus": {"dateTime": 100, "value": 0b11}},
-            server_2018_compat=True,
+            profile=ServerProfile(base=Edition.E2018),
         )
         assert model.gen_connect_status is None
         assert model.stor_connect_status is None
@@ -109,7 +110,7 @@ class TestBuildDerStatus:
     def test_2018_server_gets_gen_connect_status_and_no_connect_status(self) -> None:
         model = build_der_status(
             {"readingTime": 0, "genConnectStatus": {"dateTime": 100, "value": 0b10111}},
-            server_2018_compat=True,
+            profile=ServerProfile(base=Edition.E2018),
         )
         assert model.connect_status is None
         assert isinstance(model.gen_connect_status, ConnectStatusType)
@@ -123,7 +124,7 @@ class TestBuildDerStatus:
             "connectStatus": {"dateTime": 100, "value": 0b11},
             "genConnectStatus": {"dateTime": 100, "value": 0b10111},
         }
-        model = build_der_status(data, server_2018_compat=True)
+        model = build_der_status(data, profile=ServerProfile(base=Edition.E2018))
         assert model.connect_status is None
         assert model.gen_connect_status.value == bytes([0b10111])
 
@@ -203,7 +204,7 @@ class TestBuildDerStatus:
     def test_stor_connect_status_goes_to_a_2018_server(self) -> None:
         model = build_der_status(
             {"readingTime": 0, "storConnectStatus": {"dateTime": 700, "value": 1}},
-            server_2018_compat=True,
+            profile=ServerProfile(base=Edition.E2018),
         )
         assert isinstance(model.stor_connect_status, ConnectStatusType)
         assert model.stor_connect_status.value == b""
@@ -383,12 +384,12 @@ class TestIeee2030_5Values:
         assert model.connect_status is None
         model = build_der_status(
             {"readingTime": 0, "genConnectStatus": self._stamped(0b100000)},
-            server_2018_compat=True,
+            profile=ServerProfile(base=Edition.E2018),
         )
         assert model.gen_connect_status is None
         model = build_der_status(
             {"readingTime": 0, "genConnectStatus": self._stamped(0b10111)},
-            server_2018_compat=True,
+            profile=ServerProfile(base=Edition.E2018),
         )
         assert model.gen_connect_status.value == bytes([0b10111])
 
@@ -430,9 +431,9 @@ class TestIeee2030_5Values:
                 "genConnectStatus": self._stamped(0b00101),
                 "storConnectStatus": self._stamped(0b00001),
             },
-            server_2018_compat=True,
+            profile=ServerProfile(base=Edition.E2018),
         )
-        root = fromstring(to_xml(model, server_2018_compat=True).decode("utf-8"))
+        root = fromstring(to_xml(model, profile=ServerProfile(base=Edition.E2018)).decode("utf-8"))
         assert root.find(f"{{{NS}}}genConnectStatus") is not None
         assert root.find(f"{{{NS}}}storConnectStatus") is not None
         assert root.find(f"{{{NS}}}connectStatus") is None
@@ -448,7 +449,7 @@ class TestIeee2030_5Values:
         supplied = status(raw)
 
         new = build_der_status(supplied)
-        old = build_der_status(supplied, server_2018_compat=True)
+        old = build_der_status(supplied, profile=ServerProfile(base=Edition.E2018))
 
         assert new.connect_status is not None
         assert new.gen_connect_status is None

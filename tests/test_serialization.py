@@ -11,6 +11,7 @@ from py20305.models.sep.sep import (
     Registration,
     Time,
 )
+from py20305.server_profile import Edition, ServerProfile
 from py20305.telemetry.der_capability import build_der_capability
 from py20305.xml.serialization import (
     APPLICATION_SEP_XML,
@@ -126,22 +127,22 @@ def test_to_xml_includes_schema_ver_by_default():
 
 
 def test_to_xml_2018_compat_omits_schema_ver():
-    """server_2018_compat strips schemaVer from the root element."""
+    """A 2018 profile leaves schemaVer off the root element."""
     dc = DeviceCapability()
-    xml_bytes = to_xml(dc, server_2018_compat=True)
+    xml_bytes = to_xml(dc, profile=ServerProfile(base=Edition.E2018))
     assert b"schemaVer" not in xml_bytes
 
 
 def test_to_xml_2018_compat_preserves_other_attributes():
-    """server_2018_compat only strips 2023-specific attributes."""
+    """A 2018 profile only leaves off 2023-specific attributes."""
     dc = DeviceCapability()
-    xml_bytes = to_xml(dc, server_2018_compat=True)
+    xml_bytes = to_xml(dc, profile=ServerProfile(base=Edition.E2018))
     assert b"pollRate" in xml_bytes
     assert b"schemaVer" not in xml_bytes
 
 
 def test_to_xml_2018_compat_omits_subscribable():
-    """server_2018_compat strips subscribable from MirrorUsagePoint."""
+    """A 2018 profile leaves subscribable off MirrorUsagePoint."""
     from py20305.telemetry.mup import create_mup
 
     mup = create_mup(
@@ -149,7 +150,7 @@ def test_to_xml_2018_compat_omits_subscribable():
         readings_from({"W": 1000, "Var": 0, "Hz": 60, "V": 240, "PF": 1, "VA": 1000, "A": 4}),
         300,
     )
-    xml_bytes = to_xml(mup, server_2018_compat=True)
+    xml_bytes = to_xml(mup, profile=ServerProfile(base=Edition.E2018))
     assert b"subscribable" not in xml_bytes
     assert b"schemaVer" not in xml_bytes
     # Core content still present

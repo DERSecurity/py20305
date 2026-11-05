@@ -14,6 +14,7 @@ from py20305.client.errors import (
 )
 from py20305.client.http import _parse_body
 from py20305.models.sep.sep import DefaultDercontrol, DercontrolList
+from py20305.server_profile import Edition, ServerProfile
 
 
 class TestIs2018SchemaValidationError:
@@ -51,22 +52,22 @@ class TestIs2018SchemaValidationError:
 class TestCompatHintSuffix:
     def test_returns_hint_when_signature_matches_and_compat_off(self) -> None:
         exc = Sep2ProtocolError("'schemaVer' attribute is not declared", 400)
-        suffix = compat_hint_suffix(exc, server_2018_compat=False)
+        suffix = compat_hint_suffix(exc, ServerProfile(base=Edition.E2023))
         assert suffix.startswith(" -- ")
-        assert "server_2018_compat=true" in suffix
+        assert "server.schema.base: 2018" in suffix
 
     def test_empty_when_compat_already_on(self) -> None:
         """No point telling the operator to flip a flag they already flipped."""
         exc = Sep2ProtocolError("'schemaVer' attribute is not declared", 400)
-        assert compat_hint_suffix(exc, server_2018_compat=True) == ""
+        assert compat_hint_suffix(exc, ServerProfile(base=Edition.E2018)) == ""
 
     def test_empty_for_non_2018_error(self) -> None:
         exc = Sep2ProtocolError("Bad Request: missing field", 400)
-        assert compat_hint_suffix(exc, server_2018_compat=False) == ""
+        assert compat_hint_suffix(exc, ServerProfile(base=Edition.E2023)) == ""
 
     def test_empty_for_connection_error(self) -> None:
         exc = Sep2ConnectionError("network down")
-        assert compat_hint_suffix(exc, server_2018_compat=False) == ""
+        assert compat_hint_suffix(exc, ServerProfile(base=Edition.E2023)) == ""
 
 
 class TestParseBodyPayloadErrors:

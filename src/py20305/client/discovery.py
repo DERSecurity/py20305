@@ -42,6 +42,7 @@ from py20305.models.sep.sep import (
     TariffProfileList,
     Time,
 )
+from py20305.server_profile import EXTENSIONS
 from py20305.xml.serialization import NS_CSIPAUS
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,7 @@ def _der_child_hrefs(ders: list[Der1], list_href: str, *, legacy_multi_der: bool
     does not exist -- one instance's operating limit against another's
     nameplate.
 
-    The exception is ``legacy_multi_der`` (``server_2018_compat``): previous
+    The exception is ``legacy_multi_der`` (a 2018 base): previous
     revisions of the standard did allow several DER objects, and a 2018
     server may legitimately spread child links across them. There, fall back
     to later entries for links the first one omits, so upgrading this client
@@ -149,7 +150,7 @@ def _der_child_hrefs(ders: list[Der1], list_href: str, *, legacy_multi_der: bool
             list_href,
             len(ders),
             (
-                "server_2018_compat is set, so filling gaps from later entries"
+                "the server is on the 2018 edition, so filling gaps from later entries"
                 if legacy_multi_der
                 else f"Using the first ({ders[0].href or 'unnamed'}) only"
             ),
@@ -218,7 +219,9 @@ async def _discover_self_device(
     sdev_state.ders = [der for page in der_pages for der in page.der]
     if sdev_state.ders:
         sdev_state.der_subscribable = bool(sdev_state.ders[0].subscribable)
-    hrefs = _der_child_hrefs(sdev_state.ders, der_href, legacy_multi_der=client.server_2018_compat)
+    hrefs = _der_child_hrefs(
+        sdev_state.ders, der_href, legacy_multi_der=client.profile.allows_multi_der
+    )
     sdev_state.der_settings_href = hrefs.settings
     sdev_state.der_capability_href = hrefs.capability
     sdev_state.der_status_href = hrefs.status
@@ -493,6 +496,8 @@ async def discover(
     # 1. Device Capability (with raw body for CSIP-AUS detection)
     dcap, raw_dcap = await client.get_with_body(dcap_path, DeviceCapability)
     state.dcap = dcap
+    # The server's edition comes from the DeviceCapability when it is not configured.
+    client.observe_device_capability(raw_dcap)
     state.poll_rates["dcap"] = normalize_poll_rate(dcap.poll_rate, resource_key="dcap")
 
     # Auto-detect CSIP-AUS mode from namespace declaration in dcap response
@@ -500,6 +505,14 @@ async def discover(
         state.csip_aus_mode = True
         logger.info("CSIP-AUS mode detected from server dcap response")
     client.csipaus_namespace = _declared_csipaus_namespace(raw_dcap)
+    # Extensions named in the configuration replace what the server declares.
+    configured = client.profile.extensions
+    if configured is not None:
+        state.csip_aus_mode = bool(configured)
+        if "csip-aus-1.3" in configured:
+            client.csipaus_namespace = EXTENSIONS["csip-aus-1.3"]
+        elif "csip-aus-1.2" in configured:
+            client.csipaus_namespace = EXTENSIONS["csip-aus-1.2"]
 
     # 2. Time
     time_href = _extract_href(dcap.time_link)
@@ -603,7 +616,7 @@ async def discover(
                         logger.warning("DER list at %s is absent (404 or 204), no DERs", der_href)
                     edev_state.ders = [der for page in der_pages for der in page.der]
                     hrefs = _der_child_hrefs(
-                        edev_state.ders, der_href, legacy_multi_der=client.server_2018_compat
+                        edev_state.ders, der_href, legacy_multi_der=client.profile.allows_multi_der
                     )
                     edev_state.der_status_href = hrefs.status
                     edev_state.der_capability_href = hrefs.capability

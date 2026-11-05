@@ -44,6 +44,7 @@ from py20305.models.sep.sep import (
     SignedPerCentControlType,
     TimeType,
 )
+from py20305.server_profile import Edition, ServerProfile
 
 
 def _envelope_elem(meta_name: str, value: int, multiplier: int = 0):
@@ -156,6 +157,7 @@ class TestProcessControlsNewScheduled:
         derc = _make_derc(0x01, start=now + 100, duration=3600)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -176,6 +178,7 @@ class TestProcessControlsNewScheduled:
         derc = _make_derc(0x01, start=now - 10000, duration=100)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
         await proc.process_controls("/derp/1")
@@ -198,8 +201,10 @@ class TestProcessControlsNewScheduled:
             return None
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=track_post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
         await proc.process_controls("/derp/1")
@@ -225,8 +230,10 @@ class TestProcessControlsNewScheduled:
             return None
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=track_post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
         # Simulate "we already ran this event to COMPLETED" before the store
         # pruned it after its end -- the response tracker remembers it.
@@ -247,6 +254,7 @@ class TestProcessControlsLateDiscovery:
         derc = _make_derc(0x01, start=now - 10, duration=3600)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -271,6 +279,7 @@ class TestProcessControlsCancellation:
         derc = _make_derc(0x01, start=now + 100, duration=3600, current_status=2)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -288,6 +297,7 @@ class TestProcessControlsCancellation:
         derc = _make_derc(0x01, start=now - 10, duration=3600, current_status=0)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -334,8 +344,10 @@ class TestDisappearedEventCancellation:
             return None
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=track_post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
 
@@ -363,6 +375,7 @@ class TestDisappearedEventCancellation:
         derc = _make_derc(0x01, start=now + 600, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -388,6 +401,7 @@ class TestDisappearedEventCancellation:
         derc = _make_derc(0x01, start=now - 10, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -432,8 +446,10 @@ class TestDisappearedEventCancellation:
             return None
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=track_post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         proc = EventProcessor(http, state, AsyncMock(), shutdown)
 
         await proc.process_controls("/derp/1")
@@ -483,6 +499,8 @@ class TestDisappearedEventCancellation:
         state.device_mapping.add("/derp/2", "/edev/2")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, AsyncMock(), shutdown)
 
@@ -529,6 +547,8 @@ class TestProcessControlsSupersession:
         state.device_mapping.add("/derp/2", "/edev/1")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -588,8 +608,10 @@ class TestLateDiscoverySupersessionOrdering:
             return None
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=track_post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
         # Process both programs (late discovery for both)
@@ -639,8 +661,10 @@ class TestLateDiscoverySupersessionOrdering:
         state.device_mapping.add("/derp/2", "/edev/1")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
         await proc.process_controls("/derp/1")
@@ -668,6 +692,7 @@ class TestProcessControlsDdercFallback:
         dderc = _make_dderc()
         state = _setup_state(der_controls=[derc], dderc=dderc)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -698,6 +723,7 @@ class TestProcessControlsDdercFallback:
         derc = _make_derc(0x01, start=now - 3600, duration=3610)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -739,6 +765,8 @@ class TestProcessControlsDdercFallback:
             state.der_programs["/derp/1"].default_dercontrol = replacement
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         dispatcher.apply_default_control.side_effect = refreshed_mid_dispatch
@@ -759,6 +787,7 @@ class TestProcessControlsDdercFallback:
         derc = _make_derc(0x01, start=now - 3600, duration=3610)
         state = _setup_state(der_controls=[derc], dderc=None)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -782,6 +811,7 @@ class TestProcessControlsDdercFallback:
         derc = _make_derc(0x01, start=now - 3600, duration=3610)
         state = _setup_state(der_controls=[derc], dderc=None)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -807,6 +837,7 @@ class TestProcessControlsMissing:
     async def test_missing_program_noop(self, shutdown: asyncio.Event):
         state = DiscoveredState()
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
         await proc.process_controls("/derp/nonexistent")
         await proc.shutdown()
@@ -819,6 +850,7 @@ class TestEventProcessorShutdown:
         derc = _make_derc(0x01, start=now + 100, duration=3600)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -834,6 +866,7 @@ class TestIdempotentProcessing:
         derc = _make_derc(0x01, start=now + 100, duration=3600)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -864,6 +897,8 @@ class TestAggregatorModeDispatch:
         local_lfdis = ["aa" * 20, "bb" * 20, "cc" * 20, "dd" * 20]
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(
@@ -897,6 +932,8 @@ class TestAggregatorModeDispatch:
         local_lfdis = ["aa" * 20, "bb" * 20]
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(
@@ -934,6 +971,8 @@ class TestAggregatorModeDispatch:
         local_lfdis = ["aa" * 20, "bb" * 20, "cc" * 20]
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(
@@ -966,6 +1005,8 @@ class TestAggregatorModeDispatch:
         state = _setup_state(der_controls=[derc])
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)  # no group_lookup
@@ -1007,6 +1048,8 @@ class TestPostResponseLfdiRouting:
         state.device_mapping.add("/derp/1", "/edev/1")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1040,6 +1083,8 @@ class TestPostResponseLfdiRouting:
         # No device_mapping.add call -- program has no mapped devices
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1068,6 +1113,8 @@ class TestPostResponseLfdiRouting:
         # No end devices at all
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1103,6 +1150,8 @@ class TestPostResponseLfdiRouting:
         state.device_mapping.add("/derp/1", "/edev/2")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1169,6 +1218,7 @@ class TestCancellationWindDown:
         dderc = _make_dderc()
         state = _setup_state(der_controls=[derc], dderc=dderc)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1202,6 +1252,7 @@ class TestClosedGuard:
     async def test_shutdown_sets_closed(self, shutdown: asyncio.Event):
         state = DiscoveredState()
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
         assert proc.closed is False
@@ -1214,6 +1265,7 @@ class TestClosedGuard:
         derc = _make_derc(0x01, start=now + 100, duration=3600)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1232,6 +1284,7 @@ class TestClosedGuard:
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
 
+        http.profile = ServerProfile(base=Edition.E2023)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
         # When post is called (ACK), set _closed to simulate concurrent shutdown
@@ -1254,6 +1307,7 @@ class TestClosedGuard:
         derc = _make_derc(0x01, start=now - 10, duration=3600)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         dispatcher = AsyncMock()
 
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1286,6 +1340,7 @@ class TestSuccessiveEvents:
         derc2 = _make_derc(0x02, start=now + 300, duration=200)
         state = _setup_state(der_controls=[derc1, derc2])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1311,6 +1366,7 @@ class TestNoDdercCompletion:
         derc = _make_derc(0x01, start=now - 10, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=None)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1337,6 +1393,7 @@ class TestInitialDderc:
         dderc = _make_dderc()
         state = _setup_state(der_controls=[], dderc=dderc)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1357,6 +1414,7 @@ class TestInitialDderc:
         dderc = _make_dderc()
         state = _setup_state(der_controls=[derc], dderc=dderc)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1379,6 +1437,7 @@ class TestInitialDderc:
         dderc = _make_dderc()
         state = _setup_state(der_controls=[derc], dderc=dderc)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1402,6 +1461,7 @@ class TestInitialDderc:
         )
         state = _setup_state(der_controls=[], dderc=dderc_v1)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1429,6 +1489,7 @@ class TestInitialDderc:
         dderc = _make_dderc()
         state = _setup_state(der_controls=[], dderc=dderc)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1447,6 +1508,7 @@ class TestInitialDderc:
         # Program with high priority (primacy=0)
         state = _setup_state(der_controls=[], dderc=dderc, primacy=0)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1470,6 +1532,7 @@ class TestInitialDderc:
         # High-priority program (primacy=0) on shared device /edev/1
         state = _setup_state(der_controls=[], dderc=dderc_high, primacy=0)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1500,6 +1563,7 @@ class TestInitialDderc:
         """When no DDERC exists, nothing should be dispatched."""
         state = _setup_state(der_controls=[], dderc=None)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1545,6 +1609,8 @@ class TestInitialDderc:
         state.device_mapping.add("/derp/2", "/edev/1")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1602,6 +1668,8 @@ class TestDdercFallbackExcludesSuperseded:
         state.device_mapping.add("/derp/2", "/edev/2")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -1667,6 +1735,8 @@ class TestPostResponseExcludeDevices:
         state, _, dev2_lfdi = _two_device_state(der_controls=[derc])
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1684,6 +1754,8 @@ class TestPostResponseExcludeDevices:
         state, _, _ = _two_device_state(der_controls=[derc])
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1705,6 +1777,8 @@ class TestPostResponseForDevices:
         state, dev1_lfdi, _ = _two_device_state(der_controls=[derc])
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1722,6 +1796,8 @@ class TestPostResponseForDevices:
         state, _, _ = _two_device_state(der_controls=[derc])
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1769,6 +1845,8 @@ class TestSupersessionPerDeviceResponses:
         state.device_mapping.add("/derp/2", "/edev/2")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1837,6 +1915,8 @@ class TestActivationCompletionExcludesSuperseded:
         state.device_mapping.add("/derp/2", "/edev/3")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1899,6 +1979,8 @@ class TestActivationCompletionExcludesSuperseded:
         state.device_mapping.add("/derp/2", "/edev/2")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -1979,6 +2061,7 @@ class TestDeferredSupersession:
 
         state = self._setup_two_programs(derc1, derc2, primacy1=10, primacy2=0)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -2009,6 +2092,7 @@ class TestDeferredSupersession:
 
         state = self._setup_two_programs(derc1, derc2, primacy1=10, primacy2=0)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -2051,6 +2135,7 @@ class TestDeferredSupersession:
         dev2_lfdi = b"\xbb" * 20
         state = self._setup_two_programs(derc1, derc2, primacy1=10, primacy2=0)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown)
 
@@ -2097,6 +2182,7 @@ class TestScheduleNotificationRelay:
         derc = _make_derc(0x01, start=now + 100, duration=3600)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -2125,6 +2211,7 @@ class TestScheduleNotificationRelay:
         )
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -2143,6 +2230,7 @@ class TestScheduleNotificationRelay:
         derc = _make_derc(0x01, start=now + 100, duration=3600, current_status=2)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -2160,6 +2248,7 @@ class TestScheduleNotificationRelay:
     async def test_default_baseline_added_then_deduped(self, shutdown: asyncio.Event):
         state = _setup_state(der_controls=[], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -2187,6 +2276,7 @@ class TestScheduleNotificationRelay:
 
         state = _setup_state(der_controls=[], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -2215,6 +2305,7 @@ class TestScheduleNotificationRelay:
         # fresh "default_added", and keeps a single program-scoped cache slot.
         state = _setup_state(der_controls=[], dderc=_make_dderc())  # mRID \x20
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -2248,6 +2339,7 @@ class TestScheduleNotificationRelay:
         derc = _make_derc(0x01, start=now + 100, duration=3600, base=base)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -2274,6 +2366,7 @@ class TestScheduleNotificationRelay:
         derc = _make_derc(0x01, start=now + 100, duration=3600)  # plain setpoint control
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -2295,6 +2388,7 @@ class TestScheduleNotificationRelay:
         )
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -2330,6 +2424,7 @@ class TestScheduleNotificationRelay:
         derc = _make_derc(0x01, start=now + 100, duration=3600)
         state = _setup_state(der_controls=[derc])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -2352,6 +2447,7 @@ class TestScheduleNotificationRelay:
             der_controls=[_make_derc(0x01, start=now + 100, duration=3600, status_time=1000)]
         )
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
@@ -2406,6 +2502,7 @@ class TestCommsLossOptOut:
         derc = _make_derc(0x01, start=now - 10, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         comms = CommsLossState()
@@ -2432,6 +2529,7 @@ class TestCommsLossOptOut:
         derc = _make_derc(0x01, start=now - 10, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=None)  # no planning limit
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         comms = CommsLossState()
@@ -2449,6 +2547,7 @@ class TestCommsLossOptOut:
     async def test_enter_no_active_events_is_noop(self, shutdown: asyncio.Event):
         state = _setup_state(der_controls=[], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         comms = CommsLossState()
@@ -2467,6 +2566,7 @@ class TestCommsLossOptOut:
         derc = _make_derc(0x01, start=now - 10, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         comms = CommsLossState(active=True)
@@ -2487,6 +2587,7 @@ class TestCommsLossOptOut:
         derc = _make_derc(0x01, start=now + 5, duration=3600)  # scheduled
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         comms = CommsLossState()
@@ -2513,6 +2614,7 @@ class TestCommsLossOptOut:
         after = _make_derc(0x02, start=now + 1000, duration=200)  # > boundary
         state = _setup_state(der_controls=[in_window, after], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         comms = CommsLossState(resume_after_epoch=now + 500)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown, comms_loss=comms)
@@ -2527,6 +2629,7 @@ class TestCommsLossOptOut:
     async def test_resume_boundary_survives_prune(self, shutdown: asyncio.Event):
         state = _setup_state(der_controls=[])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         comms = CommsLossState(resume_after_epoch=12345)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown, comms_loss=comms)
 
@@ -2543,6 +2646,7 @@ class TestCommsLossOptOut:
         derc = _make_derc(0x01, start=now - 10, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown, comms_loss=CommsLossState())
@@ -2647,6 +2751,7 @@ class TestCommsLossOptOut:
         derc = _make_derc(0x01, start=now - 10, duration=100)  # ends soon
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, AsyncMock(), shutdown, comms_loss=CommsLossState())
 
@@ -2669,6 +2774,7 @@ class TestCommsLossOptOut:
         derc = _make_derc(0x01, start=now - 10, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=None, device_hrefs=["/edev/1", "/edev/2"])
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         local_lfdis = ["11" * 20, "22" * 20, "11" * 20]  # duplicate: dedupe expected
@@ -2698,6 +2804,7 @@ class TestCommsLossOptOut:
         state = _setup_state(der_controls=[derc], dderc=None)
         state.device_mapping.add("/derp/1", "/edev/1")  # duplicate mapping
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown, comms_loss=CommsLossState())
@@ -2721,6 +2828,7 @@ class TestCommsLossOptOut:
         derc = _make_derc(0x01, start=now + 2, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         comms = CommsLossState()
@@ -2758,6 +2866,7 @@ class TestServerTimebase:
         derc = _make_derc(0x01, start=now + 500, duration=100)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown, timebase=self._tb(now + 550))
@@ -2785,8 +2894,10 @@ class TestServerTimebase:
             return None
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=track_post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown, timebase=self._tb(now + 500))
 
         await proc.process_controls("/derp/1")
@@ -2807,6 +2918,7 @@ class TestServerTimebase:
         tb.observe(now)  # global: no skew (would classify SCHEDULED)
         tb.observe(now + 550, fsa_href="/fsa/1")  # FSA clock: already active
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown, timebase=tb)
@@ -2831,8 +2943,10 @@ class TestServerTimebase:
             return None
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=track_post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         proc = EventProcessor(http, state, AsyncMock(), shutdown, timebase=self._tb(now + 500))
 
         await proc.process_controls("/derp/1")
@@ -2854,6 +2968,7 @@ class TestServerTimebase:
         derc = _make_derc(0x01, start=now + 50, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         tb = ServerTimebase(drift_warn_seconds=0)
         dispatcher = AsyncMock()
@@ -2905,8 +3020,9 @@ def _codes_by_lfdi(http: AsyncMock) -> dict[bytes, set[int]]:
 
 def _activation_http() -> AsyncMock:
     http = AsyncMock()
+    http.profile = ServerProfile(base=Edition.E2023)
     http.post = AsyncMock(return_value=None)
-    http.server_2018_compat = False
+    http.profile = ServerProfile(base=Edition.E2023)
     return http
 
 
@@ -2920,7 +3036,7 @@ class TestDispatchGatedResponses:
         derc = _make_derc(0x01, start=now + 50, duration=3600)
         state = _setup_state(der_controls=[derc], dderc=_make_dderc())
         http = AsyncMock()
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         order: list[str] = []
 
         async def record_post(*args: object, **kwargs: object) -> None:
@@ -3342,7 +3458,7 @@ class TestDispatchGatedResponses:
         derc = _make_derc(0x01, start=now + 50, duration=3600)
         state = _gated_two_device_state(derc)
         http = AsyncMock()
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         order: list[str] = []
         slow_released = asyncio.Event()
 
@@ -3746,8 +3862,10 @@ class TestARepeatedDispatchTarget:
             statuses.append(getattr(body, "status", None))
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, shutdown)
 
@@ -3785,6 +3903,8 @@ class TestFsaScopedClockRegression:
             timebase.observe(server_now, fsa_href="/fsa/1")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown, timebase=timebase)
 
@@ -3829,6 +3949,8 @@ class TestFsaScopedClockRegression:
             timebase.observe(server_now, fsa_href="/fsa/1")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, NullDispatcher(), shutdown, timebase=timebase)
 
@@ -3871,6 +3993,7 @@ class TestModeWithdrawalAtEventEnd:
         derc = _make_derc(0x01, start=now - 10, duration=3600, current_status=0, base=derc_base)
         state = _setup_state(der_controls=[derc], dderc=dderc)
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, dispatcher, shutdown)
         await proc.process_controls("/derp/1")
@@ -3969,6 +4092,7 @@ class TestModeWithdrawalAtEventEnd:
         state.device_mapping.add("/derp/2", "/edev/1")
         groups = {"/derp/1": [cls._LOCAL_1, cls._LOCAL_2], "/derp/2": [cls._LOCAL_1]}
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, dispatcher, shutdown, group_lookup=groups.get)
         await proc.process_controls("/derp/1")
@@ -4090,6 +4214,8 @@ class TestADefaultDoesNotOverrideAnActiveEvent:
         state.device_mapping.add("/derp/2", "/edev/1")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, dispatcher, asyncio.Event())
         await proc.process_controls("/derp/1")
@@ -4234,6 +4360,7 @@ class TestADefaultDoesNotOverrideAnActiveEvent:
             device_hrefs=["/edev/1", "/edev/2"],
         )
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = self._rejecting("/edev/1")
         proc = EventProcessor(http, state, dispatcher, asyncio.Event())
@@ -4285,6 +4412,7 @@ class TestADefaultDoesNotOverrideAnActiveEvent:
         state.device_mapping.add("/derp/2", "/edev/1")
         state.device_mapping.add("/derp/2", "/edev/3")
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = self._rejecting("/edev/1")
         proc = EventProcessor(http, state, dispatcher, asyncio.Event())
@@ -4345,6 +4473,8 @@ class TestADefaultDoesNotOverrideAnActiveEvent:
         groups = {"/derp/1": [self._LOCAL_A, self._LOCAL_B], "/derp/2": [self._LOCAL_A]}
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
@@ -4432,6 +4562,8 @@ class TestTheInitialDefaultAndRunningEvents:
         groups = {"/derp/1": [self._LOCAL_A, self._LOCAL_B], "/derp/2": [self._LOCAL_A]}
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
@@ -4493,6 +4625,8 @@ class TestTheInitialDefaultAndRunningEvents:
         groups = {"/derp/1": [self._LOCAL_A, self._LOCAL_B], "/derp/2": [self._LOCAL_A]}
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
@@ -4549,6 +4683,8 @@ class TestTheInitialDefaultAndRunningEvents:
         groups = {"/derp/1": [self._LOCAL_A, self._LOCAL_B], "/derp/3": [self._LOCAL_A]}
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
@@ -4611,6 +4747,8 @@ class TestTheInitialDefaultAndRunningEvents:
         groups = {"/derp/1": [self._LOCAL_A], "/derp/3": [self._LOCAL_B]}
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
@@ -4687,6 +4825,8 @@ class TestTheInitialDefaultAndRunningEvents:
         }
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, asyncio.Event(), group_lookup=groups.get)
@@ -4767,6 +4907,8 @@ class TestPartlySupersededEvent:
         state.device_mapping.add("/derp/2", "/edev/1")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, dispatcher, asyncio.Event())
 
@@ -4843,6 +4985,8 @@ class TestPartlySupersededEvent:
         state.device_mapping.add("/derp/2", "/edev/1")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         dispatcher = AsyncMock()
         proc = EventProcessor(http, state, dispatcher, asyncio.Event())
@@ -4895,6 +5039,7 @@ class TestPartlySupersededEvent:
         )
         state.device_mapping.add("/derp/2", "/edev/1")
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         return EventProcessor(http, state, dispatcher, asyncio.Event())
 
@@ -4973,6 +5118,7 @@ class TestPartlySupersededEvent:
         )
         state.device_mapping.add("/derp/2", "/edev/1")
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         proc = EventProcessor(http, state, dispatcher, asyncio.Event())
         await proc.process_controls("/derp/1")

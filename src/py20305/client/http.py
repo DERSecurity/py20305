@@ -56,6 +56,7 @@ from py20305.observers import (
     Observers,
 )
 from py20305.security.identity import compute_sfdi
+from py20305.server_profile import ServerProfile
 from py20305.xml.serialization import (
     APPLICATION_SEP_XML,
     NS_CSIPAUS,
@@ -222,7 +223,7 @@ class Sep2Client:
         retry: RetryPolicy | None = None,
         timeout: aiohttp.ClientTimeout | None = None,
         traffic_recorder: TrafficRecorder | None = None,
-        server_2018_compat: bool = False,
+        profile: ServerProfile | None = None,
         always_send_alarm_status: bool = False,
         request_headers: dict[str, str] | None = None,
         timebase: ServerTimebase | None = None,
@@ -236,7 +237,9 @@ class Sep2Client:
             retry: Retry policy for transient failures
             timeout: HTTP timeout settings
             traffic_recorder: Optional TrafficRecorder for the Live Traffic view
-            server_2018_compat: IEEE 2030.5-2018 compatibility mode
+            profile: The server's schema profile (see :mod:`py20305.server_profile`);
+                ``None`` is ``auto``: the base is decided from the DeviceCapability
+                (see :meth:`observe_device_capability`)
             always_send_alarm_status: Always emit <alarmStatus> in DERStatus PUTs
                 (explicit all-zero bitmap when no alarms), instead of omitting it
             request_headers: Extra headers to send on every outbound request
@@ -263,7 +266,10 @@ class Sep2Client:
         self._csip_aus_mode = False
         self._csipaus_namespace = NS_CSIPAUS
         self._timebase = timebase or ServerTimebase()
-        self._server_2018_compat = server_2018_compat
+        #: What the operator configured; the base may still be ``auto``.
+        self._configured_profile = profile or ServerProfile()
+        self._profile = self._configured_profile
+        self._borrowed_seen: set[tuple[str, str]] = set()
         self._always_send_alarm_status = always_send_alarm_status
         # Operator-supplied extra headers sent on every outbound request (e.g. a
         # third-party API token). Protocol-critical Accept/Content-Type always win.
@@ -554,9 +560,53 @@ class Sep2Client:
         self._csipaus_namespace = value
 
     @property
-    def server_2018_compat(self) -> bool:
-        """Whether IEEE 2030.5-2018 compatibility mode is enabled."""
-        return self._server_2018_compat
+    def profile(self) -> ServerProfile:
+        """The server's schema profile, with ``auto`` resolved once the server has been seen."""
+        return self._profile
+
+    def observe_device_capability(self, body: bytes) -> ServerProfile:
+        """Resolve an ``auto`` base from the DeviceCapability ``body`` and return the profile.
+
+        The decision and its evidence are logged when the base changes. A
+        configured base is kept as it is.
+        """
+        previous = self._profile
+        self._profile = self._configured_profile.resolve_from_device_capability(body)
+        if self._profile.base != previous.base:
+            logger.info(
+                "Server schema base %d (%s)",
+                self._profile.edition.value,
+                self._profile.evidence or "configured",
+            )
+        return self._profile
+
+    def _note_inbound(self, body: bytes) -> None:
+        """Log, once each, 2023 elements a 2018-base server sent; nothing is rejected."""
+        if not self._profile.resolved or not self._profile.is_2018:
+            return
+        try:
+            borrowed = self._profile.borrowed_in(body)
+        except Exception:
+            return
+        for item, owner in borrowed:
+            key = (item.parent, item.name)
+            if key in self._borrowed_seen:
+                continue
+            self._borrowed_seen.add(key)
+            if owner is not None and owner in self._profile.features:
+                logger.info(
+                    "Server uses %s in %s (feature %s, borrowed from IEEE 2030.5-2023)",
+                    item.name,
+                    item.parent,
+                    owner,
+                )
+            else:
+                logger.info(
+                    "Server sent %s in %s, which IEEE 2030.5-2023 added%s; read, not sent",
+                    item.name,
+                    item.parent,
+                    f" (feature {owner} is not enabled)" if owner else "",
+                )
 
     @property
     def always_send_alarm_status(self) -> bool:
@@ -1153,6 +1203,7 @@ class Sep2Client:
                         body = await resp.read()
                         exchange.response_body(body)
                         result = _parse_body(body, model_type, path)
+                        self._note_inbound(body)
                         self._record_traffic_success("GET", path, resp.status, body)
                         self._record_contact(reachable=True)
                         self._last_error = None
@@ -1262,7 +1313,7 @@ class Sep2Client:
             resource,
             include_csipaus=self._csip_aus_mode,
             csipaus_namespace=self._csipaus_namespace,
-            server_2018_compat=self._server_2018_compat,
+            profile=self._profile,
         )
         return await self._post_body(path, body, resource.__class__.__name__)
 
@@ -1336,7 +1387,7 @@ class Sep2Client:
             resource,
             include_csipaus=self._csip_aus_mode,
             csipaus_namespace=self._csipaus_namespace,
-            server_2018_compat=self._server_2018_compat,
+            profile=self._profile,
         )
         return await self._put_body(path, body, resource.__class__.__name__)
 

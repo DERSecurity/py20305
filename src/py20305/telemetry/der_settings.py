@@ -12,9 +12,11 @@ from typing import Any
 from py20305.models.csipaus.csipaus_ext import DoeModesEnabled
 from py20305.models.sep.sep import (
     DercontrolType,
+    DercontrolType2,
     Dersettings,
     TimeType,
 )
+from py20305.server_profile import ServerProfile
 from py20305.telemetry.scale_factor import (
     to_active_power,
     to_amp_hour,
@@ -36,6 +38,8 @@ def build_der_settings(
     updated_time: int | None = None,
     *,
     csip_aus_mode: bool = False,
+    modes_supported2: int | None = None,
+    profile: ServerProfile | None = None,
 ) -> Dersettings:
     """Build a ``Dersettings`` model from connector configuration data.
 
@@ -46,6 +50,11 @@ def build_der_settings(
         csip_aus_mode: When True, attach the CSIP-AUS ``doeModesEnabled``
             extension (required by CSIP-AUS servers); plain 2030.5 servers omit
             it.
+        modes_supported2: The DERControlType2 bits the connector supports.
+            ``modesEnabled2`` is limited to them, since a mode the device cannot
+            apply is not enabled on it.
+        profile: The server's schema profile. It limits ``modesEnabled2`` to the
+            bits the profile permits.
 
     Returns:
         Pydantic model ready for ``to_xml()`` serialization.
@@ -64,6 +73,20 @@ def build_der_settings(
     modes_enabled = None
     if ctrl_modes is not None and isinstance(ctrl_modes, int):
         modes_enabled = DercontrolType(value=ctrl_modes.to_bytes(4, "big"))
+
+    # modesEnabled2: the additional modes (2023) the connector reports enabled.
+    # Only the connector can say which are enabled, so nothing is sent without
+    # its value; it is limited to what the device supports and the server
+    # profile permits.
+    modes_enabled2 = None
+    enabled2 = configuration.get("modesEnabled2")
+    if isinstance(enabled2, int) and not isinstance(enabled2, bool):
+        if modes_supported2 is not None:
+            enabled2 &= modes_supported2
+        if profile is not None:
+            enabled2 = profile.mask_modes2(enabled2)
+        if enabled2 > 0:
+            modes_enabled2 = DercontrolType2(value=enabled2.to_bytes(4, "big"))
 
     # setGradW: required UInt16, plain integer (not a scale factor type)
     grad_w = configuration.get("setGradW", 0)
@@ -91,6 +114,7 @@ def build_der_settings(
 
     return Dersettings(
         modes_enabled=modes_enabled,
+        modes_enabled2=modes_enabled2,
         other_element=other_element,
         set_grad_w=set_grad_w,
         set_max_ah=to_amp_hour(configuration.get("setMaxAh")),
