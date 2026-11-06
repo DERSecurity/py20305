@@ -287,3 +287,185 @@ class TestTimeOverlap:
         devices = _device_map(("/derp/1", {"d1"}))
         results = compute_supersession([r1, r2], devices)
         assert len(results) == 0
+
+
+def _reference_supersession(events, program_to_devices):
+    """Every pair compared, as compute_supersession did before it grouped events by device.
+
+    Kept as the definition the faster grouping is held to: the same results, in
+    the same order.
+    """
+    from py20305.events.supersession import (
+        SupersessionResult,
+        _time_overlaps,
+        compared_mode_keys,
+    )
+
+    results = []
+    checked = set()
+    for i, a in enumerate(events):
+        for b in events[i + 1 :]:
+            pair_key = (min(a.mrid, b.mrid), max(a.mrid, b.mrid))
+            if pair_key in checked:
+                continue
+            checked.add(pair_key)
+            if not _time_overlaps(a, b):
+                continue
+            params_a = compared_mode_keys(a.derc.dercontrol_base)
+            params_b = compared_mode_keys(b.derc.dercontrol_base)
+            overlap = params_a & params_b
+            if params_a != params_b and not overlap:
+                continue
+            if a.primacy < b.primacy:
+                winner, loser = a, b
+            elif b.primacy < a.primacy:
+                winner, loser = b, a
+            else:
+                a_time = a.creation_time or a.server_status_time
+                b_time = b.creation_time or b.server_status_time
+                winner, loser = (a, b) if a_time >= b_time else (b, a)
+            affected = frozenset(
+                program_to_devices.get(winner.program_href, set())
+                & program_to_devices.get(loser.program_href, set())
+            )
+            if affected:
+                results.append(
+                    SupersessionResult(
+                        superseded_mrid=loser.mrid,
+                        superseding_mrid=winner.mrid,
+                        affected_devices=affected,
+                        superseded_program_href=loser.program_href,
+                        superseding_program_href=winner.program_href,
+                        affected_modes=overlap,
+                    )
+                )
+    return results
+
+
+_MODES = (
+    {},
+    {"op_mod_grid_connect_permit": True},
+    {"op_mod_island_permit": True},
+    {"op_mod_grid_connect_permit": True, "op_mod_island_permit": False},
+    {
+        "op_mod_fixed_var": FixedVarControlType(
+            ref_type=DerunitRefType(value=0), value=SignedPerCent(value=50)
+        )
+    },
+)
+
+
+def _random_events(seed: int, count: int, programs: int):
+    import random
+
+    rng = random.Random(seed)
+    events = []
+    for n in range(count):
+        record = _make_record(
+            n % 256,
+            start=rng.choice((1000, 1500, 3000, 4600)),
+            duration=rng.choice((600, 1800, 3600)),
+            primacy=rng.choice((0, 1, 2)),
+            program_href=f"/derp/{rng.randrange(programs)}",
+            creation_time=rng.choice((900, 950, 0)),
+            status_time=rng.choice((1000, 1100)),
+        )
+        mrid = n.to_bytes(16, "big")
+        record.mrid = mrid
+        record.derc = record.derc.model_copy(
+            update={"dercontrol_base": DercontrolBase(**rng.choice(_MODES))}
+        )
+        events.append(record)
+    return events
+
+
+def _random_devices(seed: int, programs: int, devices: int) -> dict[str, set[str]]:
+    import random
+
+    rng = random.Random(seed + 1)
+    mapping = {}
+    for p in range(programs):
+        if rng.random() < 0.1:
+            continue  # a program with no device known
+        mapping[f"/derp/{p}"] = {
+            f"/edev/{rng.randrange(devices)}" for _ in range(rng.choice((1, 1, 2, 3)))
+        }
+    return mapping
+
+
+class TestSupersessionGroupedByDevice:
+    """Only events whose programs reach a common device are compared, with the same results."""
+
+    def test_the_results_and_their_order_are_those_of_comparing_every_pair(self):
+        for seed in range(40):
+            programs = 3 + seed % 7
+            events = _random_events(seed, 12 + seed % 20, programs)
+            devices = _random_devices(seed, programs, 2 + seed % 5)
+
+            assert compute_supersession(events, devices) == _reference_supersession(
+                events, devices
+            ), f"seed {seed}"
+
+    def test_events_of_programs_with_no_common_device_are_not_compared(self, monkeypatch):
+        from py20305.events import supersession
+
+        events = []
+        for n in range(2000):
+            record = _make_record(0, program_href=f"/derp/{n // 2}", fixed_var=True)
+            record.mrid = n.to_bytes(16, "big")
+            events.append(record)
+        devices = {f"/derp/{p}": {f"/edev/{p}"} for p in range(1000)}
+        visited = _count_calls(monkeypatch, supersession, "_time_overlaps")
+
+        results = compute_supersession(events, devices)
+
+        # Each program's two events overlap with the same modes: one pair each,
+        # and no pair of events from two programs is looked at.
+        assert len(results) == 1000
+        assert len(visited) == 1000
+
+    def test_each_events_modes_are_worked_out_once(self, monkeypatch):
+        from py20305.events import supersession
+
+        events = []
+        for n in range(3):
+            record = _make_record(0, primacy=n, fixed_var=True)
+            record.mrid = n.to_bytes(16, "big")
+            events.append(record)
+        modes = _count_calls(monkeypatch, supersession, "compared_mode_keys")
+
+        results = compute_supersession(events, {"/derp/1": {"/edev/1"}})
+
+        # Three pairs, each needing both events' modes: three events, three calls.
+        assert len(results) == 3
+        assert len(modes) == 3
+
+    def test_a_program_reaching_many_devices_compares_each_pair_once(self, monkeypatch):
+        from py20305.events import supersession
+
+        events = []
+        for n in range(240):
+            record = _make_record(0, start=1000 + n, fixed_var=True)
+            record.mrid = n.to_bytes(16, "big")
+            events.append(record)
+        devices = {"/derp/1": {f"/edev/{d}" for d in range(200)}}
+        visited = _count_calls(monkeypatch, supersession, "_time_overlaps")
+
+        results = compute_supersession(events, devices)
+
+        assert len(results) == 240 * 239 // 2
+        assert len(visited) == 240 * 239 // 2
+        assert all(len(result.affected_devices) == 200 for result in results)
+
+
+def _count_calls(monkeypatch, module, name: str) -> list[tuple]:
+    """Replace ``module.name`` with a wrapper recording each call's arguments."""
+    calls: list[tuple] = []
+    original = getattr(module, name)
+
+    def counted(*args):
+        calls.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(module, name, counted)
+    return calls

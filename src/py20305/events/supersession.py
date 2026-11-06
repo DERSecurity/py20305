@@ -1,6 +1,7 @@
 """Pure-function supersession algorithm for DERControl events.
 
-Compares all pairs of active/scheduled events. If two events have
+Compares the pairs of active/scheduled events whose programs reach a common
+device. If two events have
 overlapping time ranges and identical DERControlBase parameters
 (excluding opModConnect/opModEnergize), the lower-primacy event
 supersedes the higher-primacy one. Same primacy: newer creationTime wins
@@ -13,6 +14,7 @@ Fixes from original:
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass
 
 from py20305.events.state_machine import EventRecord
@@ -79,6 +81,12 @@ def compute_supersession(
 ) -> list[SupersessionResult]:
     """Compute all supersession pairs among the given events.
 
+    Only events whose programs reach a common device can supersede one
+    another. Each event is compared with the later events of the programs it
+    shares a device with, in the order of *events*, so each such pair is
+    compared once and the results, and their order, are those of comparing
+    every pair. Each event's compared modes are worked out once.
+
     Args:
         events: List of active/scheduled EventRecords to compare.
         program_to_devices: Mapping from program_href to set of device hrefs
@@ -87,11 +95,43 @@ def compute_supersession(
     Returns:
         List of SupersessionResult for each superseded pair.
     """
+    programs_on: dict[str, set[str]] = {}
+    for program, devices in program_to_devices.items():
+        for device in devices:
+            programs_on.setdefault(device, set()).add(program)
+    sharing: dict[str, set[str]] = {}
+
+    def programs_sharing(program: str) -> set[str]:
+        """The programs that reach a device *program* reaches, itself included."""
+        if program not in sharing:
+            reach: set[str] = set()
+            for device in program_to_devices.get(program, ()):
+                reach |= programs_on[device]
+            sharing[program] = reach
+        return sharing[program]
+
+    indices_of: dict[str, list[int]] = {}
+    for index, event in enumerate(events):
+        indices_of.setdefault(event.program_href, []).append(index)
+
+    modes: dict[int, frozenset[str]] = {}
+
+    def modes_of(index: int) -> frozenset[str]:
+        if index not in modes:
+            modes[index] = compared_mode_keys(events[index].derc.dercontrol_base)
+        return modes[index]
+
     results: list[SupersessionResult] = []
     checked: set[tuple[bytes, bytes]] = set()
 
     for i, a in enumerate(events):
-        for b in events[i + 1 :]:
+        later: list[int] = []
+        for program in programs_sharing(a.program_href):
+            indices = indices_of.get(program, [])
+            later.extend(indices[bisect.bisect_right(indices, i) :])
+        later.sort()
+        for j in later:
+            b = events[j]
             pair_key = (min(a.mrid, b.mrid), max(a.mrid, b.mrid))
             if pair_key in checked:
                 continue
@@ -102,8 +142,8 @@ def compute_supersession(
 
             # Per-mode supersession: intersecting modes supersede independently.
             # Exact match (including both-empty) or non-empty overlap triggers supersession.
-            params_a = compared_mode_keys(a.derc.dercontrol_base)
-            params_b = compared_mode_keys(b.derc.dercontrol_base)
+            params_a = modes_of(i)
+            params_b = modes_of(j)
             overlap = params_a & params_b
             if params_a != params_b and not overlap:
                 continue
