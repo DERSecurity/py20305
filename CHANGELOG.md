@@ -9,6 +9,432 @@ below says so explicitly.
 
 Nothing yet.
 
+## [1.0.0] - 2026-11-06
+
+### Added
+
+- **Observers report every exchange, connection, anomaly, device read and write,
+  and audit record (#85).** `py20305.observers` defines frozen records and the
+  callables that receive them, all optional and off by default:
+
+  - `ExchangeRecord`, one per HTTP exchange: each attempt of each request,
+    including one that received no response, and each notification POSTed to
+    the listener. It carries the request and response bytes exactly as sent and
+    received, headers with `Authorization`, `Cookie` and `Set-Cookie` redacted,
+    method, URL, status, wall-clock and monotonic send and receive times, the
+    attempt number, the error kind and text, the local and remote endpoints, the
+    server host, the TLS version, cipher and peer certificate SHA-256 where the
+    transport exposes them, the client LFDI and SFDI, the device LFDI and
+    EndDevice href the exchange concerns, the resource type, and the layered
+    schema validation result of each body. Body capture and validation can be
+    turned off.
+  - `ConnectionEvent` for connections made, failed and lost, and notification
+    requests accepted or refused.
+  - `ProtocolAnomaly` for bodies that cannot be used or fail validation,
+    unexpected statuses, and notifications refused or dropped.
+  - `DeviceRecord` for each read from and write to a device through a connector,
+    through `DeviceTelemetryEmitter`, and `AuditRecord` for the control audit
+    trail, through `AuditEmitter`.
+
+  Every record carries `record_version`; fields are only added, and a removal
+  follows one minor release of deprecation. An observer that raises never
+  affects the exchange: `ObserverGuard` catches and counts the exception.
+  `QueuedObserver` hands records to a slow observer through a bounded queue on a
+  background thread, counting what it drops. Attach them with
+  `CsipClient.attach_observers(Observers(...))`. See `docs/observers.md`.
+
+- **A subscription can be renewed with a PUT to its own href (#88).**
+  `subscription.renewal_method: put` or `SubscriptionManager(renewal_method="put")`
+  PUTs the Subscription to its href (IEEE 2030.5 Annex A.2.7.2 lists PUT on a
+  Subscription as Mandatory) instead of re-POSTing it to its list. A 404 or 405
+  means the server no longer holds that href, so a new subscription is POSTed to
+  the list it was created on, without a rediscovery. Each subscription now
+  records that list, since a server may place the subscription outside it. The
+  default stays `post`.
+
+  **The backstop poll of subscribed resources has a configurable interval (#88).**
+  `subscription.backstop_poll_seconds`, `CsipClient(heartbeat_seconds=...)` and
+  `PollScheduler(heartbeat_seconds=...)` set how often a resource with an active
+  subscription is still polled, for a server that stops notifying while it still
+  lists the subscription. It is never faster than the resource's pollRate. The
+  default stays 900 s.
+
+  **DERCapability and DERSettings can be PUT on change only (#88).**
+  `telemetry.der_resource_put_policy: on_change`,
+  `TelemetryCoordinator(der_resource_put_policy=...)` or
+  `DerResourceManager(put_policy="on_change")` PUTs each once, then only when it
+  changes; a changed DERCapability also resends DERSettings, and a rediscovery
+  does not resend an unchanged one (CSIP G29). Under the coordinator, a reconnect
+  after a sustained loss of contact resends both. `CsipClient(on_reconnect=...)`
+  and `CsipClient.add_reconnect_listener()` report that reconnect, before the
+  rediscovery that follows, and `forget_sent()` resends both for a host that
+  builds its own manager. The default stays `periodic`, which PUTs DERCapability
+  every cycle.
+
+  **A `signed_as_reported` reading profile (#88).** W, var and power factor are
+  posted with the sign the connector reports (negative W while a DER absorbs, a
+  battery charging), flowDirection is omitted from every ReadingType that does
+  not state one, and no energy totals are given a slot. Its readings use mRIDs
+  of their own (slots 71 to 77 and 80 to 97, and hashed mRIDs that cover the
+  profile), so a device
+  switched to it from another profile starts new reading series in the same
+  MirrorUsagePoint. A cycle with no reading to post sends no readings POST (CSIP
+  G27). Selected with `telemetry.reading_profile: signed_as_reported` or
+  `ReadingProfile.SIGNED_AS_REPORTED`.
+
+  **A connector can declare the readings a device provides (#88).**
+  `BaseConnector.declared_readings()` returns the readings as identities (the
+  `ReadingIdentity` that sets a reading's mRID, or a `Reading` standing for it);
+  under `signed_as_reported` the MirrorUsagePoint registers exactly those from the
+  first cycle, also one with no values, and is not re-posted when a reading
+  appears. A returned reading that was not declared is not posted and is logged
+  once.
+  `DeviceSnapshot.declared_readings` carries the declaration, and
+  `readings.declared_readings_of()` reads it from a connector defensively. Other
+  profiles ignore it.
+
+- **A server schema profile describes which IEEE 2030.5 schemas a server speaks (#89).**
+  `server.schema` holds `base` (`auto`, `2018` or `2023`), `features` and
+  `extensions`. A `ServerProfile` answers every edition question the client has:
+  the response status table, the DERStatus connect fields, `schemaVer`,
+  `modesResponded`, multiple DER objects and the control mode bitmaps. A feature
+  is one entry in `py20305.server_profile.FEATURES`: the elements it borrows from
+  another edition, the schema that defines them and the DERControlType2 bits it
+  permits. The first is `import_export_limits`: `opModMaxLimWAbsorb` and
+  `opModMaxLimWInject` for a 2018 server, with bits 7 and 8 in DERCapability
+  `modesSupported2`, DERSettings `modesEnabled2` and DERControlResponse
+  `modesResponded2`. Features are configured, never detected. Inbound, the client
+  reads any element either edition defines and logs which borrowed elements a
+  server actually sends. Outbound, it sends a 2023 element to a 2018 server only
+  when an enabled feature covers it. The per-parent tables of what 2023 added are
+  derived from the two bundled schemas (`py20305.schema_editions`), covering
+  elements and attributes, so `UsagePointLink` is caught inside
+  `MirrorUsagePoint` and `updatedTime` inside `DefaultDERControl`.
+
+  **A connector says which additional control modes it can apply (#89).**
+  DERCapability `modesSupported2` and DERControlResponse `modesResponded2` report
+  DERControlType2 bits for the controls a connector implements (for example
+  `update_op_mod_max_lim_w_inject` sets bit 8), limited to what the server profile
+  permits. A connector that implements a method it cannot honor on the device
+  defines `supported_modes2()` and returns the bitmap; the SunSpec connector
+  leaves out bit 7 for a device with no charge-rate limit (model 702 `WChaRteMax`
+  unimplemented or a zero `WChaRteMaxRtg`). A response reads the bits only from a
+  connector that is already constructed, so it never waits on a device.
+  `to_xml` masks the bitmaps of a prebuilt model to the profile as well.
+  DERSettings `modesEnabled2` is sent when `fetch_configuration` returns it, never
+  beyond the supported bits, and as 0 when the connector reports 0 and an
+  additional mode is available, so the server learns the modes are disabled.
+
+  **A pre-release tag is published as a pre-release (#89).** `release.yml` passes
+  `--prerelease` to `gh release create` for a PEP 440 pre-release (`a`, `b`, `rc`
+  or `dev`, alone or combined, as in `v1.0.0rc1.dev1`), so `v1.0.0b1` is not marked as the latest release.
+
+### Changed
+
+- **Validation is layered, so a body with CSIP-AUS extensions validates (#85).**
+  `validate_xml` and `validate_xml_result` validated against the IEEE 2030.5-2023
+  schema alone, which does not declare the CSIP-AUS extension elements, so a
+  CSIP-AUS body with an extension outside a schema wildcard position (for example
+  `DERCapability` or `DERSettings`) was reported invalid, including in the
+  validation result of each captured exchange of that kind. Without `schema_path` they now set aside every element
+  outside the IEEE 2030.5 namespace, at any depth and position, validate the rest
+  against the IEEE 2030.5-2023 schema, and validate each element set aside on its
+  own against its namespace's schema (`csipaus-ext.xsd` for
+  `https://csipaus.org/ns` and `https://csipaus.org/ns/v1.3`,
+  `csipaus-ext-v1.3-beta_storage.xsd` for its namespace). An element of a
+  namespace with no known schema is an error naming the namespace and the
+  element. Profile requirements, such as a mandatory CSIP-AUS element, are not
+  checked. A body whose root element is outside the IEEE 2030.5 namespace is an
+  error, except the CSIP-AUS `ConnectionPoint` resource. A new `schema_dir`
+  argument supplies the schema files; a directory that holds `csipaus-ext.xsd`
+  without the IEEE 2030.5-2018 schema it imports uses the packaged copy. Passing
+  `schema_path` keeps the single-schema check.
+
+  **The connector contract is IEEE 2030.5 throughout (#85).** Every key and value
+  a connector exchanges with the client is an IEEE 2030.5 element name and value.
+  This breaks every connector outside the package; the print connector is
+  updated. See "Writing your own" in `docs/connectors.md`.
+
+  - `fetch_monitoring` returns a list of `Reading` (`py20305.connectors.base` or
+    `py20305.connectors.reading`) instead of a dict keyed by SunSpec point names.
+    Each reading states its `uom`, `phase`, `kind`, `data_qualifier`,
+    `accumulation_behaviour`, optional `flow_direction`, `multiplier` and
+    `quality_flags`. `ACType`, the `"<key>__quality"` keys, `ReadingOverride` and
+    `BaseConnector.reading_overrides()` are removed: each reading carries what
+    they set.
+  - A reading's MirrorMeterReading mRID is derived from its ReadingType. Readings
+    that 0.16 registered keep their mRIDs through a fixed table of 0.16 slots, so
+    a server holding a 0.16 registration keeps receiving them; any other
+    ReadingType gets an mRID hashed from it. A reading 0.16 registered with a
+    `ReadingOverride` that changed its ReadingType gets a new mRID, since its
+    ReadingType is not the one 0.16 registered for that slot.
+  - A MirrorUsagePoint registers the readings the connector supplies, not a fixed
+    set of quantities. When a reading first appears after registration, the
+    client posts the MirrorUsagePoint again under both reading profiles, with
+    every registered ReadingType unchanged, before posting readings for it.
+    Readings are posted only for registered mRIDs.
+  - `fetch_nameplate` and `fetch_configuration` use DERCapability and DERSettings
+    element names (`rtgMaxW`, `rtgMaxVA`, `modesSupported`, `setMaxW`,
+    `setGradW`, `modesEnabled`, `doeModesSupported`, `doeModesEnabled`, ...).
+    `WMaxOvrExt` and `WMaxUndExt` are removed: no DERSettings element carries
+    them.
+  - Controls arrive through one method per IEEE 2030.5 element,
+    `update_<element in snake case>` (`update_op_mod_volt_var`,
+    `update_op_mod_max_lim_w`, `update_op_mod_fixed_pf_inject_w`,
+    `update_op_mod_exp_lim_w`, `update_set_grad_w`, ...), with
+    `{"enabled": ..., "value": ..., "rampTms": ...}` where `value` is the
+    element's value in IEEE 2030.5 terms. The old methods (`update_qv`,
+    `update_p_lim`, `update_const_pf`, `update_fixed_w`, `update_connect`,
+    `update_es_permit_service`, `update_pricing_mode`, ...) and their SunSpec
+    parameter names are removed. `opModConnect` and `opModEnergize` now arrive
+    separately, and the may-trip curves and `opModWattPF` reach a connector for
+    the first time. A clear or an event end sends `{"enabled": False}`, and an
+    event end now withdraws every element the ended event set except connect,
+    energize and the permits, where it used to withdraw only the elements the
+    old method table covered.
+    `apply_operation` takes the new control names (`op_mod_max_lim_w`).
+  - A command observer, `WriteHistory`, the audit trail and device records now
+    receive the new vocabulary. `CommandObserver.record_command`, `WriteHistory`,
+    `AuditRecord` and `DeviceRecord` carry `control="op_mod_max_lim_w"` with
+    `{"enabled", "value", "rampTms"}` where they carried `p_lim` with
+    `{"p_lim_mode_enable", "p_lim_w"}`. The same holds for every control: the
+    name is the method without `update_` (`op_mod_volt_var`, `op_mod_fixed_w`,
+    ...) and the values are the connector contract's. Code that filters or
+    stores records by the old names must change.
+  - A connector class that defines an `update_*` method the client no longer
+    calls (for example one written for the old method table) is logged once at
+    WARNING, naming each such method. The controls for the elements it does not
+    define are not applied.
+  - A control element marked `disabled="true"` now withdraws its mode
+    (`{"enabled": False}`) instead of being skipped. IEEE 2030.5-2023 says a
+    disabled DERControl mode follows the rules as if it were not disabled, so it
+    takes part in event precedence, and the curve or setpoint of a superseded
+    event no longer stays on the device.
+  - The DefaultDERControl settings (`update_set_grad_w`, `update_set_soft_grad_w`
+    and the enter-service settings) update the setting and are never withdrawn.
+  - `modesSupported` and `modesEnabled` must be an `int` from 0 to 4294967295.
+    Any other value is logged as a warning and reported as `00000000`
+    (`modesSupported`) or left out (`modesEnabled`).
+  - `rtgMaxVarNeg` and `setMaxVarNeg` are negative in IEEE 2030.5. The print
+    connector and the SunSpec adapter now send them negative; they sent the
+    magnitude.
+  - `fetch_monitoring` readings that differ only in multiplier are two readings:
+    the snapshot keeps both, the second keyed by its `reading_key` plus
+    `:m<multiplier>`.
+  - `PointEntry` holds the `Reading` it was acquired as, and `DeviceSnapshot`
+    entries are keyed by `reading_key`. `DeviceSnapshot.reading_overrides`,
+    `split_quality`, `typed_overrides` and `QUALITY_SUFFIX` are removed.
+  - In `py20305.telemetry.mup`, `create_mup` and `create_meter_reading_list` take
+    the readings and a `registered` map from `plan_registration`;
+    `registration_slots`, `ac_type_of`, `READING_TYPE_SPECS`,
+    `PHASED_SLOT_BY_SYSTEM_SLOT` and the override arguments are removed.
+
+- **The SunSpec Modbus connector stays, as an adapter on the IEEE 2030.5 connector
+  contract (#87).** It moves to `py20305.connectors.sunspec` (`SunSpecConnector`,
+  `SunSpecDeviceConfig`) and keeps everything SunSpec inside that package. For its
+  users:
+
+  - The `sunspec` device type, `SunSpecDeviceConfig` with its transports and the
+    meter-only `power_sign`, the meter reader and its power-sign calibration, and
+    the `sunspec` extra are unchanged. `all` and the container image include the
+    extra.
+  - `fetch_monitoring` returns readings. The system voltage carries the wiring's
+    line-to-line PhaseCode and the system current its total PhaseCode, so under
+    the default reading profile both register under new mRIDs; every other
+    reading keeps the mRID 0.16 registered for it. The line-to-line voltages and
+    the state of energy are posted under the default profile too.
+  - Ratings and settings use the `rtg*` and `set*` names, with `rtgMaxA` from the
+    model 702 current rating. Status uses the DERStatus codes: `inverterStatus`
+    is the model 701 state plus one, `operationalModeStatus` is off (1) or
+    operational (2), `connectStatus` and `genConnectStatus` are the 2023 and
+    2018 bitmaps, and only the alarms IEEE 2030.5 names reach `alarmStatus`.
+  - Controls arrive as `update_<element>` calls. `opModConnect` and
+    `opModEnergize` are now applied, through the model 703 enter-service permit.
+  - `ConnectorSunSpec` and `py20305.connectors.sunspec_core` are gone. The Modbus
+    core, `SunSpecModbusConnector`, with its SunSpec-named points and `update_*`
+    methods, is now `py20305.connectors.sunspec.SunSpecModbusConnector`, for an
+    application that keeps its own conversion. `py20305.connectors.translation`
+    and the points list are removed.
+  - `ConnectorConfigRegistry` takes a `reading_profile` and passes it to the
+    connector.
+
+- **Two defaults change with the server schema profile (#89).**
+  A server whose DeviceCapability has no `schemaVer`, or one below 2.2, and a
+  default configuration now get 2018-shaped messages. Before, the default was
+  2023-shaped messages unless `server_2018_compat` was set. A server that
+  implements 2023 but omits `schemaVer` needs `server.schema.base: 2023`. The
+  decision and its evidence are logged at INFO. Until that decision is made, an
+  `auto` profile acts as 2018 as well, so a host that sends before discovery
+  sends the same shape. The synthetic URI for a created
+  subscription whose response has no Location header is now its own option,
+  `server.missing_location_fallback`, and is off unless it or the deprecated
+  `server_2018_compat: true` is set; both editions require the header.
+
+  **The internal functions take `profile=` in place of `server_2018_compat` (#89).**
+  `to_xml`, `build_der_status`, `create_log_event_xml`,
+  `translate_code_for_revision` and `compat_hint_suffix` take a `ServerProfile`.
+  `to_xml` leaves 2023 elements and attributes off the model before it
+  serializes, instead of removing `schemaVer` and `subscribable` from the root tag
+  afterwards, and it does so for every element the profile does not permit, not
+  only those two attributes. `Sep2Client`, `CsipClient` and `SubscriptionManager`
+  keep `server_2018_compat` as a deprecated keyword (see the deprecation entry).
+
+### Deprecated
+
+- **`server_2018_compat` is deprecated (#89).**
+  In the configuration (`server.server_2018_compat`) and as a keyword of
+  `Sep2Client`, `CsipClient` and `SubscriptionManager`, `true` means base 2018
+  plus the missing-Location fallback (`server.missing_location_fallback`, or
+  `missing_location_fallback=True`), and `false` means base 2023. Setting it
+  raises a `DeprecationWarning`; the configuration also logs a warning that names
+  the replacement. Passing it to a constructor together with `profile` is a
+  `TypeError`, and an explicit `server.schema.base` wins over it in the
+  configuration. It is kept for one release line.
+
+### Removed
+
+- **The forwarders package, the MQTT transport and the `forwarders` configuration
+  section are removed (#85).** py20305 no longer publishes traffic itself; it
+  hands records to observers (see the `added` entry), and an embedding
+  application publishes them on whatever transport it uses. Removed:
+
+  - `py20305.forwarders`: `ForwarderManager`, `MQTTForwarder`,
+    `MQTTForwarderAdapter`, the `ProtocolMessage` envelope and its types, the
+    OCSF Network Activity builder, the connection-telemetry emitter, LFDI
+    extraction, and the forwarder configuration models;
+  - the `forwarders` section of the client configuration, which is now refused
+    with a message naming the replacement, and the runner's forwarder wiring;
+  - the `mqtt` extra (aiomqtt), which `all` and the container image no longer
+    include;
+  - `py20305.client.observer.ConnectionObserver` and the `connection_observer`
+    argument and property of `Sep2Client`, and the `forwarder` property;
+  - `NotificationServer.connection_observer`.
+
+  A configuration file that used `forwarders` now fails to start. The runner
+  attaches no observers, so a deployment that published traffic from the
+  configuration file has to embed the client in an application instead: build
+  `CsipClient`, call `attach_observers(Observers(...))` with callables that publish
+  the records, and run it. See `docs/observers.md`.
+
+  `py20305.forwarders.audit` moves to `py20305.audit`, and its `AuditEmitter`
+  takes an observer instead of a forwarder.
+
+### Fixed
+
+- **DERCapability carries `rtgMaxA` (#83).** A connector's nameplate may report
+  `rtgMaxA`, the maximum continuous AC current in amperes RMS, as a number or a
+  value and multiplier. It is sent as DERCapability `rtgMaxA`, and omitted when
+  absent.
+
+- **A phased system voltage or current is registered under its own mRID (#84).**
+  A reading's mRID now follows its whole ReadingType, so a system voltage or
+  current that carries a phase code is a different reading from the unphased
+  one and is registered under a different mRID. IEEE 2030.5-2023 §10.11.3 Rule n
+  forbids changing a reading's ReadingType once created, and a server holding the
+  unphased reading keeps it until it removes it.
+
+- **DERStatus values are checked against their IEEE 2030.5 types (#85).**
+  `build_der_status` leaves out, with a warning, an `inverterStatus` outside 0 to
+  10, an `operationalModeStatus` outside 0 to 3, a `localControlModeStatus`
+  outside 0 to 1, a `storageModeStatus` outside 0 to 2, a `stateOfChargeStatus`
+  outside 0 to 10000, a `connectStatus` with bits other than 0 and 1, a
+  `genConnectStatus` or `storConnectStatus` with bits above 4, and an
+  `alarmStatus` with bits above 10, instead of sending a code the server would
+  take as fact. Each edition sends only the connect field the connector supplied for it:
+  `connectStatus` to a 2023 server, which never receives `genConnectStatus` or
+  `storConnectStatus` (that edition forbids them), and `genConnectStatus` and
+  `storConnectStatus` to a 2018 server, which never receives `connectStatus`. The
+  bitmaps are not converted into each other, so a field the connector does not
+  supply is not sent. This is a behavior change: the earlier release sent
+  `connect_data or gen_connect_data`, one value, to both editions. A server now
+  receives only its own edition's field. Every payload sent to a 2023
+  server carries `schemaVer="2.2"`. The print connector reports a running device
+  (`inverterStatus` 4, `operationalModeStatus` 2).
+
+  **A poll that loses lines 2 and 3 no longer moves a multi-phase device's
+  readings (#85).** Under the signed-load convention the reading profile now
+  decides the wiring from something stable: a device is multi-phase once any
+  poll showed a line 2 or line 3 reading, a phase total or a line-to-line
+  voltage, or once a line 2, line 3 or multi-phase total reading is registered.
+  A later poll with only line 1 posts it under line 1's mRID, never under the
+  system total's. When two readings of one poll resolve to the same mRID, the
+  reading dropped is logged instead of silently skipped. The SunSpec adapter
+  keeps the last `ACType` it read, so a read that omits it keeps the wiring.
+
+  **An exchange that fails after its status arrived is recorded as failed (#85).**
+  A body cut short or a connection reset after the headers produces an
+  `ExchangeRecord` with `status` and also `error_kind` and `error`, and a `lost`
+  `ConnectionEvent`. It was recorded as a success. Protocol-level errors
+  (an error status, a redirect, a rate limit, an unusable body) still leave
+  `error_kind` empty.
+
+  **Net readings keep their sign under the signed-load convention (#85).** A
+  connector reading of real or reactive power with flowDirection 4 (Net) is signed
+  by the role like any other power reading instead of being posted as a
+  magnitude.
+
+  **A hashed MirrorMeterReading mRID depends on the reading profile (#85).** Each
+  profile derives a different ReadingType from the same reading, and a
+  ReadingType never changes under an mRID.
+
+  **Exchanges under a discovered EndDevice name its LFDI (#85).** The client
+  registers each discovered EndDevice href with its LFDI after discovery and
+  rediscovery, so `device_lfdi` and `end_device_href` are set on those records
+  without the embedder registering prefixes.
+
+  **`QueuedObserver.close(timeout=...)` returns within the timeout (#85).** It
+  blocked forever when the queue was full and the target stuck. A record offered
+  while the observer closes is queued or counted in `dropped`, and the records
+  left queued when `close` gives up are counted too.
+
+  **The SunSpec adapter says it does not apply `rampTms` (#85).** The ramp time is
+  ignored, with one INFO line per device, instead of being passed to a core that
+  never read it.
+
+  **The print connector supplies the 2018 connect status too (#85).** It reports
+  `genConnectStatus` beside `connectStatus` (connected), so a 2018 server receives a
+  connect status from it.
+
+  **Registered readings survive a restart (#85).** IEEE 2030.5-2023 section
+  10.10.3 rule n) says that once created, the ReadingType of a MirrorMeterReading
+  SHALL NOT be modified. Under the default reading profile a power reading's
+  flowDirection comes from the sign of its value when it is registered, so a client
+  that restarted while a battery was charging registered the same mRID as Reverse
+  (19) where it had registered Forward (1). `TelemetryManager`
+  and `TelemetryCoordinator` now have `to_checkpoint()` and
+  `restore_from_checkpoint()` for the registered readings of every device, with a
+  version field. Restore ignores, with a warning, data of another version or shape,
+  data written under another reading profile or power direction, and any device or
+  reading it cannot parse. `set_on_registration_change()` calls back after the set of
+  registered readings changes. In the runner, the new `telemetry.state_file` setting
+  (and `--telemetry-state-file`) names a file that is loaded at start, written
+  atomically after each registration change and at shutdown, and shown by `--check`.
+  It is off when unset. With no saved registration for a device (an upgrade from
+  0.16, a lost file, or the setting unset) the readings register from the current sign
+  as before, and the client logs one warning per device saying so. A registration
+  made by 0.16 cannot be recovered this way: the first start with a state file records
+  whatever the current sign gives.
+
+- **MirrorUsagePoint exchanges name the mirrored device (#86).** A
+  MirrorUsagePoint is POSTed to the MirrorUsagePointList and its readings to the
+  location the server returns, and neither path names an EndDevice, so every
+  device's meter readings were attributed to the client certificate's LFDI. A
+  MirrorUsagePoint whose `deviceLFDI` names a device registered with
+  `update_device_lfdi_prefixes` is now attributed to that device, and so is every
+  readings POST to its location, including after rediscovery; the exchange
+  record carries it as `device_lfdi` and `end_device_href`. A `deviceLFDI` that
+  names no registered device names no device.
+
+- **Supersession compares only events whose programs reach a common device (#92).**
+  `compute_supersession` compared every pair of active and scheduled events and
+  worked out both events' compared modes again for each pair, so its cost grew
+  with the square of the events held, across every program. It runs after each
+  control fetch, so a client relaying many programs, each reaching its own
+  devices, spent its event loop there and answered notifications late. A pair
+  can only supersede when its programs reach a common device, so only those
+  pairs are compared now, and each event's modes are worked out once. The
+  results, and the order they are returned in, are unchanged.
+
 ## [0.16.2] - 2026-10-29
 
 ### Fixed
