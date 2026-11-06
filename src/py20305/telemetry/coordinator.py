@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from py20305.telemetry.mup import DeviceRole, PowerDirection, ReadingProfile
 
@@ -157,6 +157,33 @@ class TelemetryCoordinator:
         #: that never mirrors readings would log the same line on every
         #: structural change.
         self._warned_no_mup = False
+        #: A checkpoint and a change callback given before the metering manager
+        #: exists. The manager is built once a MirrorUsagePointList is known.
+        self._pending_checkpoint: Any = None
+        self._on_registration_change: Callable[[], None] | None = None
+
+    def restore_from_checkpoint(self, data: Any) -> None:
+        """Restore the registered readings from :meth:`to_checkpoint` data.
+
+        May be called before ``setup``; the data is applied when the metering
+        manager is built. Data that cannot be used is ignored with a warning.
+        """
+        self._pending_checkpoint = data
+        if self._telemetry is not None:
+            self._telemetry.restore_from_checkpoint(data)
+
+    def to_checkpoint(self) -> dict[str, Any] | None:
+        """Return the registered readings as JSON-safe data, or None with no metering manager."""
+        return self._telemetry.to_checkpoint() if self._telemetry is not None else None
+
+    def set_on_registration_change(self, callback: Callable[[], None] | None) -> None:
+        """Call ``callback`` after the readings registered with the server change.
+
+        Use it to store :meth:`to_checkpoint`.
+        """
+        self._on_registration_change = callback
+        if self._telemetry is not None:
+            self._telemetry.set_on_registration_change(callback)
 
     @property
     def telemetry(self) -> TelemetryManager | None:
@@ -214,6 +241,9 @@ class TelemetryCoordinator:
             power_direction=self._power_direction,
             site_interval_history=self._site_interval_history,
         )
+        self._telemetry.set_on_registration_change(self._on_registration_change)
+        if self._pending_checkpoint is not None:
+            self._telemetry.restore_from_checkpoint(self._pending_checkpoint)
 
     def _setup_der_resources(self) -> None:
         """Build the DER resource manager.

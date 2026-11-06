@@ -469,6 +469,17 @@ async def _discover_programs_from_pages(
             )
 
 
+def register_device_prefixes(client: Sep2Client, state: DiscoveredState) -> None:
+    """Tell ``client`` each discovered EndDevice's LFDI, keyed by its href.
+
+    Exchange records then name the device a request concerns. A request for
+    anything under an EndDevice href is attributed to that EndDevice.
+    """
+    client.update_discovered_devices(
+        {href: edev.lfdi.hex() for href, edev in state.end_devices.items() if edev.lfdi}
+    )
+
+
 async def discover(
     client: Sep2Client,
     state: DiscoveredState,
@@ -531,6 +542,7 @@ async def discover(
     if not edev_list_href:
         logger.warning("No EndDeviceListLink in DeviceCapability")
         _set_time_poll_rate(state)
+        register_device_prefixes(client, state)
         return
 
     edev_pages = await client.get_list(edev_list_href, EndDeviceList)
@@ -763,6 +775,8 @@ async def discover(
 
     _set_time_poll_rate(state)
 
+    register_device_prefixes(client, state)
+
     logger.info(
         "Discovery complete: %d devices, %d programs",
         len(state.end_devices),
@@ -775,11 +789,10 @@ async def _refresh_curves_for_program(client: Sep2Client, derp_state: DerProgram
 
     Curves are referenced by the DERControl's curve-link fields
     (opModVoltVar.href, opModVoltWatt.href, etc.). When a server creates a
-    new DERControl that references a freshly-created DERCurve, the
-    the client must re-fetch curves alongside controls -- otherwise the
-    cached curve list is stale and ``_find_curve`` in the translation layer
-    returns ``None``, which falls back to ``{<mode>_mode_enable: 0}``
-    (the operator's volt-var write silently disables the mode on the device).
+    new DERControl that references a freshly-created DERCurve, the client
+    must re-fetch curves alongside controls. Otherwise the cached curve list
+    is stale, the control names a curve the client does not hold, and the
+    element is withdrawn (``{"enabled": False}``) instead of applied.
 
     Failures are logged but not raised; the caller continues with whatever
     cached curves are available.
@@ -1008,6 +1021,7 @@ async def refresh_end_device_lists(client: Sep2Client, state: DiscoveredState) -
                 state.end_devices[edev_href].device = edev
                 state.end_devices[edev_href].lfdi = edev.l_fdi or b""
 
+    register_device_prefixes(client, state)
     logger.debug("Refreshed EndDevice list with %d devices", len(state.end_devices))
 
 

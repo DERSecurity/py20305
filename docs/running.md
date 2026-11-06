@@ -43,7 +43,7 @@ py20305 --config client.yaml --check
 ```
 
 Validates the file, resolves the certificate, and prints the LFDI the utility
-has to register. Connects to nothing. A mistake is reported with the field that
+has to register, and the telemetry state file when one is set. Connects to nothing. A mistake is reported with the field that
 caused it:
 
 ```
@@ -116,9 +116,10 @@ W and var, and export negative (see [Meters](#meters)).
 `signed_as_reported` posts W, var and power factor with the sign the connector
 reports, for every role: for a DER, positive while it delivers power and negative while it
 absorbs it, so a charging battery posts negative W. It omits flowDirection from
-every ReadingType, keeps the `default` values of every other field, and
-registers no energy totals, since `WhFwd` and `WhRev` differ only by
-flowDirection. A cycle with no reading to post, such as a charger with no
+every ReadingType that does not state one, keeps the `default` values of every other field, and
+gives no energy total a slot, since `WhFwd` and `WhRev` differ only by
+flowDirection; a connector that states a flowDirection for one still has it
+registered. A cycle with no reading to post, such as a charger with no
 vehicle plugged in, sends no readings POST at all; the MirrorUsagePoint stays.
 A connector that declares its readings (see
 [Connectors](connectors.md)) gets a MirrorUsagePoint of exactly those, posted
@@ -140,6 +141,33 @@ modes never posts a value under a ReadingType registered for another mode. They
 apply to total and per-line W and var. `power_direction` is refused with
 `signed_load_convention` and `signed_as_reported`, which already sign every
 value. Like the profile, it is read at startup.
+
+### Keeping registrations across restarts
+
+IEEE 2030.5 does not let the server's ReadingType for a reading change once it is
+created (2030.5-2023 10.10.3 rule n). Under the `default` profile and
+`power_direction: default`, a reading's flowDirection comes from the sign of its
+value when it is first registered. A client that restarts while a battery charges
+would register the same reading as Reverse instead of Forward.
+
+`telemetry.state_file` names a file that keeps what was registered. The client
+loads it at start and repeats each registration exactly, writes it again after
+every change to the registered readings (through a temporary file and a rename),
+and writes it at shutdown. `--telemetry-state-file` sets the same path from the
+command line, and `--check` shows it. Unset, nothing is kept.
+
+```yaml
+telemetry:
+  state_file: telemetry-state.json
+```
+
+A file written under another `reading_profile` or `power_direction`, of another
+version, or damaged is ignored with a warning, and so is any entry in it that
+does not parse. Without a saved registration for a device, which includes the first
+start after upgrading from 0.16, the readings register from the current sign and
+the client logs one warning per device saying that they may differ from an earlier
+registration. An embedding application stores the same data with
+`TelemetryCoordinator.to_checkpoint()` and `restore_from_checkpoint()`.
 
 Rediscovery re-reads every path. A server that moves its resources, or that
 brings the MirrorUsagePoint function set online only after the client
@@ -229,7 +257,9 @@ the load convention's sign: negative on export. A site meter's import positive
 values already follow it, so they are posted as the meter reports them: import
 positive, export negative. A DER meter's values, like a DER's, are positive for
 the DER's output, which is export, so they are negated. The power factor takes
-the sign of the reactive power posted with it.
+the sign of the reactive power posted with it. A real or reactive power reading
+the connector marks Net (flowDirection 4) is signed the same way, in the same
+frame, and keeps its flowDirection.
 
 The [operations history](history.md) keeps a site meter's readings in a series
 of their own, beside the devices'.
@@ -405,13 +435,6 @@ logging:
 ```
 
 `--log-level DEBUG` overrides the configured level for one run. It does not change where the logs go.
-
-When the MQTT forwarder loses its broker connection it logs one warning with
-the reason, a reminder every five minutes while the broker stays unreachable,
-and one info line with the downtime when it reconnects. A broker that refuses
-the connection for bad credentials or missing authorization is logged as an
-error, and the forwarder keeps retrying. See
-[Forwarding](forwarding.md#when-the-broker-connection-drops).
 
 Only the runner configures logging. The library itself just calls `getLogger`,
 so embedding it never takes handler policy away from your application.

@@ -26,7 +26,7 @@ repeated here.
 - Python 3.11, 3.12 and 3.13, on Linux, Windows and macOS.
 - The base install is the protocol client: `aiohttp`, `cryptography`, `pydantic` 2,
   `xsdata-pydantic` and `lxml`. Everything else is an extra: `api` (FastAPI and uvicorn),
-  `cli` (PyYAML), `sunspec` (pysunspec2 and pyserial) and `mqtt` (aiomqtt).
+  `cli` (PyYAML) and `sunspec` (pysunspec2 and pyserial).
 - Build: `setuptools`. Tests: `pytest` with `pytest-asyncio` in auto mode, `pytest-aiohttp`
   and `pytest-timeout`. Lint: `ruff`, line length 100. Types: `mypy` with
   `disallow_untyped_defs`. Documentation: MkDocs 1.x with Material and mkdocstrings.
@@ -298,7 +298,7 @@ State the decision in one sentence, then the reason, then what it costs.
 | Subscriptions and the notification listener | `src/py20305/subscription/` |
 | Device connectors | `src/py20305/connectors/` |
 | The management API | `src/py20305/api/` |
-| Traffic forwarding | `src/py20305/forwarders/` |
+| Observers: records of exchanges, device I/O and audit | `src/py20305/observers.py`, `src/py20305/audit.py` |
 | Certificates and identity | `src/py20305/security/` |
 | Generated models and the schemas they come from | `src/py20305/models/`, `src/py20305/schemas/` |
 | The runner and its configuration | `src/py20305/cli.py`, `src/py20305/config.py` |
@@ -359,7 +359,7 @@ pull request.
 
 | When you | Also update |
 |---|---|
-| Add or change a feature | The guide that covers it under `docs/` (`running.md`, `connectors.md`, `discovery.md`, `forwarding.md`, `api.md`, `docker.md`), the README where it describes what the client does, and the docstrings |
+| Add or change a feature | The guide that covers it under `docs/` (`running.md`, `connectors.md`, `discovery.md`, `observers.md`, `api.md`, `docker.md`), the README where it describes what the client does, and the docstrings |
 | Add a guide page | `nav` in `mkdocs.yml`, and links to it from the pages a reader would come from |
 | Add a public module | `docs/reference/`, so its docstrings are published |
 | Add or change a setting | The configuration model in `src/py20305/config.py`, `docs/running.md`, and `examples/client.example.yaml` |

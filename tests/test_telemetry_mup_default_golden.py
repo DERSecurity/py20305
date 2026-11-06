@@ -1,10 +1,11 @@
-"""The DEFAULT reading profile's MUP and readings stay byte-identical.
+"""The MUP and readings for every encoding release 0.16 had stay byte-identical.
 
-The expected XML in ``fixtures/mup_default_golden.json`` was rendered by the
-release before reading profiles existed. It deliberately preserves that
-release's behavior, including flowDirection taken from the sign of the value
-the MUP was built with. Regenerate it only for an intended change to the
-DEFAULT encoding:
+The expected XML in ``fixtures/mup_default_golden.json`` was rendered by release
+0.16, which read flat monitoring dicts. Each case here gives the readings that
+carry the same ReadingTypes, so a server holding a 0.16 registration keeps
+receiving readings under the mRIDs it knows. The fixture preserves 0.16's
+behavior, including flowDirection taken from the sign of the value the MUP was
+built with. Regenerate it only for an intended change to these encodings:
 
     python -m tests.test_telemetry_mup_default_golden
 """
@@ -17,9 +18,15 @@ from typing import Any
 
 import pytest
 
-from py20305.connectors.base import ReadingOverride
-from py20305.telemetry.mup import create_meter_reading_list, create_mup
+from py20305.telemetry.mup import (
+    DeviceRole,
+    PowerDirection,
+    ReadingProfile,
+    create_meter_reading_list,
+    create_mup,
+)
 from py20305.xml.serialization import to_xml
+from tests.legacy_readings import readings_from
 
 LFDI = "1234567890abcdef1234567890abcdef12345678"
 FIXTURE = Path(__file__).parent / "fixtures" / "mup_default_golden.json"
@@ -37,45 +44,79 @@ _LINES = {
         ("A", 8.4),
     )
 }
-# Keys only SIGNED_LOAD_CONVENTION reads; DEFAULT output must ignore them.
-_PROFILE_ONLY = {"VL1L2": 241.5, "VL2L3": 242.5, "VL3L1": 240.5, "WHAvail": 9800}
+_SPLIT_LINES = {key: value for key, value in _LINES.items() if key.endswith(("L1", "L2"))}
+_LINE_TO_LINE = {"VL1L2": 241.5, "VL2L3": 242.5, "VL3L1": 240.5}
+_SIGNED = ReadingProfile.SIGNED_LOAD_CONVENTION
 
+#: Each case: the monitoring dict release 0.16 read, the wiring it reported
+#: (``ACType`` 0 single, 1 split, 2 three phase), and the encoding options.
 CASES: dict[str, dict[str, Any]] = {
     "single_phase": {"monitoring": {**_SYSTEM, "A": 14.6}},
-    "three_phase": {"monitoring": {**_SYSTEM, "A": 25.3, "ACType": 2, **_LINES, **_PROFILE_ONLY}},
-    "split_phase_partial": {
-        "monitoring": {**_SYSTEM, "A": 12.7, "ACType": 1, "WL1": 900.0, "VL1L2": 240.0},
-    },
-    "overrides_and_stale": {
+    "three_phase": {"monitoring": {**_SYSTEM, "A": 25.3, **_LINES}, "wiring": "three"},
+    "split_phase": {"monitoring": {**_SYSTEM, "A": 12.7, **_SPLIT_LINES}, "wiring": "split"},
+    "stale_with_quality": {
         "monitoring": {**_SYSTEM, "A": 12.7, "W__quality": 0x20},
-        "overrides": {
-            "W": ReadingOverride(data_qualifier=8, quality_flags=0x02),
-            "A": ReadingOverride(multiplier=-2),
-            "V": ReadingOverride(phase=129),
-        },
         "stale": True,
+    },
+    "energy_totals": {
+        "monitoring": {**_SYSTEM, "A": 14.6, "WhFwd": 125_000.0, "WhRev": 4_200.0},
+    },
+    "net": {
+        "monitoring": {**_SYSTEM, "A": 25.3, **_LINES},
+        "wiring": "three",
+        "power_direction": PowerDirection.NET,
+    },
+    "split_direction": {
+        "monitoring": {**_SYSTEM, "A": 25.3, **_LINES},
+        "wiring": "three",
+        "power_direction": PowerDirection.SPLIT,
+    },
+    "signed_load_single_phase": {
+        "monitoring": {**_SYSTEM, "A": 14.6, "WHAvail": 9800},
+        "wiring": "single",
+        "profile": _SIGNED,
+    },
+    "signed_load_three_phase": {
+        "monitoring": {**_SYSTEM, "A": 25.3, **_LINES, **_LINE_TO_LINE, "WHAvail": 9800},
+        "wiring": "three",
+        "profile": _SIGNED,
+    },
+    "signed_load_split_phase_site_meter": {
+        "monitoring": {**_SYSTEM, "A": 12.7, **_SPLIT_LINES, "VL1L2": 240.0},
+        "wiring": "split",
+        "profile": _SIGNED,
+        "role": DeviceRole.SITE_METER,
     },
 }
 
+_AC_TYPE = {"single": 0, "split": 1, "three": 2}
+
 
 def render(case: dict[str, Any]) -> dict[str, str]:
-    monitoring = case["monitoring"]
-    overrides = case.get("overrides")
-    mup = create_mup(LFDI, monitoring, 300, overrides)
-    readings = create_meter_reading_list(
+    """Render a case's MUP and readings with the current implementation."""
+    profile = case.get("profile", ReadingProfile.DEFAULT)
+    wiring = case.get("wiring")
+    readings = readings_from(case["monitoring"], wiring=wiring if profile is _SIGNED else None)
+    options: dict[str, Any] = {
+        "profile": profile,
+        "power_direction": case.get("power_direction", PowerDirection.DEFAULT),
+        "role": case.get("role", DeviceRole.DER),
+    }
+    mup = create_mup(LFDI, readings, 300, **options)
+    reading_list = create_meter_reading_list(
         LFDI,
-        monitoring,
+        readings,
         timestamp=1_760_000_000,
-        overrides=overrides,
         post_rate=300,
         next_update_time=1_760_000_300,
         stale=case.get("stale", False),
+        **options,
     )
-    return {"mup": to_xml(mup).decode(), "readings": to_xml(readings).decode()}
+    return {"mup": to_xml(mup).decode(), "readings": to_xml(reading_list).decode()}
 
 
 @pytest.mark.parametrize("name", sorted(CASES))
-def test_default_profile_output_is_unchanged(name: str) -> None:
+def test_release_0_16_output_is_unchanged(name: str) -> None:
     expected = json.loads(FIXTURE.read_text(encoding="utf-8"))
     assert render(CASES[name]) == expected[name]
 

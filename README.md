@@ -45,8 +45,7 @@ pip install py20305
 ```
 
 The base install is the protocol client. Extras add what you may not need:
-`sunspec` for Modbus devices, `api` for the HTTP management API, `mqtt` for
-traffic forwarding, or `all`.
+`sunspec` for Modbus devices, `api` for the HTTP management API, or `all`.
 
 ## Running it as a service
 
@@ -115,12 +114,13 @@ Swap in `SunSpecDeviceConfig` when you have one. Full walkthrough in the
 | **Subscriptions** | Subscribe/notify as an alternative to polling, with a notification listener |
 | **Runner** | A CLI, config file, connection retry and signal-handled shutdown |
 | **Management API** | Optional HTTP API for observing and nudging a running client |
-| **Forwarding** | Optional MQTT publication of every captured exchange |
+| **Observers** | Optional hooks that hand an embedding application a record of every HTTP exchange, connection event, protocol anomaly, device read and write, and audit record |
 
 ## Standards
 
 **IEEE 2030.5-2018 and 2030.5-2023.** Both XSDs ship with the package and
-validation runs against them. The generated bindings track 2023; a
+validation runs against them, layered so a body that carries CSIP-AUS
+extensions is checked against both the IEEE 2030.5 and the CSIP-AUS schemas. The generated bindings track 2023; a
 `server_2018_compat` flag adjusts behavior for servers still on 2018.
 
 **CSIP-AUS**, including DOE (dynamic operating envelope) limits. The client

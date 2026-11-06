@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
+from py20305.audit import AuditEmitter
 from py20305.client.discovery import (
     _extract_href,
     discover,
@@ -39,7 +40,7 @@ from py20305.events.comms_loss import CommsLossState
 from py20305.events.dispatch import ControlDispatcher, NullDispatcher
 from py20305.events.processor import EventProcessor
 from py20305.events.tariff import TariffProcessor
-from py20305.forwarders.audit import AuditEmitter
+from py20305.observers import Observers
 from py20305.subscription.manager import (
     StoredNotification,
     SubscriptionManager,
@@ -242,7 +243,7 @@ class CsipClient:
         #: self-reregistration on comms-loss recovery. Cert-derived and stable.
         self._own_lfdi: str | None = None
         #: Audit trail for event lifecycle and loss-of-communications records.
-        #: Disabled until the host attaches a forwarder and configures it.
+        #: Disabled until the host attaches a history or an audit observer.
         self._audit = AuditEmitter()
         self._history: History | None = None
         #: Whether the current comms-loss episode was a simulation, so the
@@ -298,8 +299,23 @@ class CsipClient:
 
     @property
     def audit(self) -> AuditEmitter:
-        """The audit trail emitter. Attach a forwarder and configure it to enable."""
+        """The audit trail emitter. Attach a history or an audit observer to enable it."""
         return self._audit
+
+    @property
+    def observers(self) -> Observers:
+        """The exchange, connection and anomaly observers attached to this client."""
+        return self._http.observers
+
+    def attach_observers(self, observers: Observers | None) -> None:
+        """Report this client's exchanges, connections and anomalies to ``observers``.
+
+        Covers the requests the client sends and, once subscriptions are
+        attached, the notifications its listener receives. None detaches them.
+        """
+        self._http.observers = observers
+        if self._notification_server is not None:
+            self._notification_server.observers = self._http.observers
 
     @property
     def history(self) -> History | None:
@@ -342,6 +358,7 @@ class CsipClient:
         if notification_server is not None:
             self._notification_server = notification_server
             notification_server.on_notification = self._handle_notification
+            notification_server.observers = self._http.observers
 
     def set_on_structural_change(
         self, callback: Callable[[], Awaitable[None]] | None

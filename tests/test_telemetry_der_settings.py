@@ -28,24 +28,24 @@ def _print_demo_configuration() -> dict:
     """Representative configuration data (loosely based on PrintDemoConnector)
     that exercises every DERSettings field, including the storage settings."""
     return {
-        "WMax": 10000,
+        "setMaxW": 10000,
         "WMaxOvrExt": 8500,
-        "WOvrExtPF": 0.850,
+        "setMinPFOverExcited": 0.850,
         "WMaxUndExt": 8500,
-        "WUndExtPF": 0.850,
-        "VAMax": 10000,
-        "VarMaxInj": 4400,
-        "VarMaxAbs": 4400,
-        "WChaRteMax": 10000,
-        "VAChaRteMax": 10000,
-        "WDisChaRteMax": 10000,
-        "VADisChaRteMax": 10000,
-        "WhMax": 30000,
-        "AhMax": 120,
-        "VNom": 240,
-        "VMax": 264,
-        "VMin": 211,
-        "CtrlModes": 93323888,
+        "setMinPFUnderExcited": 0.850,
+        "setMaxVA": 10000,
+        "setMaxVar": 4400,
+        "setMaxVarNeg": -4400,
+        "setMaxChargeRateW": 10000,
+        "setMaxChargeRateVA": 10000,
+        "setMaxDischargeRateW": 10000,
+        "setMaxDischargeRateVA": 10000,
+        "setMaxWh": 30000,
+        "setMaxAh": 120,
+        "setVNom": 240,
+        "setMaxV": 264,
+        "setMinV": 211,
+        "modesEnabled": 93323888,
     }
 
 
@@ -53,43 +53,53 @@ class TestBuildDerSettings:
     """Tests for build_der_settings model construction."""
 
     def test_integer_value(self) -> None:
-        model = build_der_settings({"WMax": 10000}, updated_time=0)
+        model = build_der_settings({"setMaxW": 10000}, updated_time=0)
         assert isinstance(model.set_max_w, ActivePower)
         assert model.set_max_w.value == 10000
         assert model.set_max_w.multiplier.value == 0
 
     def test_float_pf_value(self) -> None:
-        model = build_der_settings({"WMax": 1000, "WOvrExtPF": 0.85}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000, "setMinPFOverExcited": 0.85}, updated_time=0)
         assert isinstance(model.set_min_pfover_excited, PowerFactor)
         assert model.set_min_pfover_excited.displacement == 85
         assert model.set_min_pfover_excited.multiplier.value == -2
 
     def test_ctrl_modes_bitmap(self) -> None:
-        model = build_der_settings({"WMax": 1000, "CtrlModes": 93323888}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000, "modesEnabled": 93323888}, updated_time=0)
         assert model.modes_enabled is not None
         assert model.modes_enabled.value == (93323888).to_bytes(4, "big")
+
+    def test_a_modes_value_that_is_not_an_int_is_left_out_with_a_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            model = build_der_settings({"setMaxW": 1000, "modesEnabled": "0x03"})
+
+        assert model.modes_enabled is None
+        assert any("modesEnabled" in r.getMessage() for r in caplog.records)
 
     def test_non_standard_fields_dropped(self) -> None:
         """WMaxOvrExt and WMaxUndExt are not valid DERSettings fields per XSD."""
         model = build_der_settings(
-            {"WMax": 1000, "WMaxOvrExt": 8500, "WMaxUndExt": 8500}, updated_time=0
+            {"setMaxW": 1000, "WMaxOvrExt": 8500, "WMaxUndExt": 8500}, updated_time=0
         )
         # These fields don't exist on the model
         assert not hasattr(model, "set_over_excited_w")
 
     def test_missing_optional_fields_are_none(self) -> None:
-        model = build_der_settings({"WMax": 1000}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000}, updated_time=0)
         assert model.set_max_va is None
         assert model.set_max_var is None
         assert model.modes_enabled is None
 
     def test_none_value_omitted(self) -> None:
-        model = build_der_settings({"WMax": 1000, "VAMax": None}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000, "setMaxVA": None}, updated_time=0)
         assert model.set_max_va is None
 
     def test_discharge_rate_present(self) -> None:
         model = build_der_settings(
-            {"WMax": 1000, "WDisChaRteMax": 15000, "VADisChaRteMax": 16000}, updated_time=0
+            {"setMaxW": 1000, "setMaxDischargeRateW": 15000, "setMaxDischargeRateVA": 16000},
+            updated_time=0,
         )
         assert model.set_max_discharge_rate_w is not None
         assert model.set_max_discharge_rate_w.value == 15000
@@ -97,58 +107,60 @@ class TestBuildDerSettings:
         assert model.set_max_discharge_rate_va.value == 16000
 
     def test_discharge_rate_zero_reported_as_is(self) -> None:
-        model = build_der_settings({"WMax": 1000, "WDisChaRteMax": 0}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000, "setMaxDischargeRateW": 0}, updated_time=0)
         assert model.set_max_discharge_rate_w is not None
         assert model.set_max_discharge_rate_w.value == 0
 
     def test_discharge_rate_omitted_when_missing(self) -> None:
-        model = build_der_settings({"WMax": 1000}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000}, updated_time=0)
         assert model.set_max_discharge_rate_w is None
         assert model.set_max_discharge_rate_va is None
 
     def test_energy_capacity_present(self) -> None:
-        model = build_der_settings({"WMax": 1000, "WhMax": 30000, "AhMax": 120}, updated_time=0)
+        model = build_der_settings(
+            {"setMaxW": 1000, "setMaxWh": 30000, "setMaxAh": 120}, updated_time=0
+        )
         assert model.set_max_wh is not None
         assert model.set_max_wh.value == 30000
         assert model.set_max_ah is not None
         assert model.set_max_ah.value == 120
 
     def test_energy_capacity_zero_reported_as_is(self) -> None:
-        model = build_der_settings({"WMax": 1000, "WhMax": 0, "AhMax": 0}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000, "setMaxWh": 0, "setMaxAh": 0}, updated_time=0)
         assert model.set_max_wh is not None
         assert model.set_max_wh.value == 0
         assert model.set_max_ah is not None
         assert model.set_max_ah.value == 0
 
     def test_energy_capacity_omitted_when_missing(self) -> None:
-        model = build_der_settings({"WMax": 1000}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000}, updated_time=0)
         assert model.set_max_wh is None
         assert model.set_max_ah is None
 
     def test_wmax_required(self) -> None:
-        with pytest.raises(ValueError, match="WMax is required"):
+        with pytest.raises(ValueError, match="setMaxW is required"):
             build_der_settings({}, updated_time=0)
 
     def test_updated_time_set(self) -> None:
-        model = build_der_settings({"WMax": 1000}, updated_time=1707000000)
+        model = build_der_settings({"setMaxW": 1000}, updated_time=1707000000)
         assert model.updated_time.value == 1707000000
 
     def test_updated_time_defaults_to_now(self) -> None:
         before = int(time.time())
-        model = build_der_settings({"WMax": 1000})
+        model = build_der_settings({"setMaxW": 1000})
         after = int(time.time())
         assert before <= model.updated_time.value <= after
 
     def test_grad_w_default_zero(self) -> None:
-        model = build_der_settings({"WMax": 1000}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000}, updated_time=0)
         assert model.set_grad_w == 0
 
     def test_grad_w_from_connector(self) -> None:
-        model = build_der_settings({"WMax": 1000, "GradW": 100}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000, "setGradW": 100}, updated_time=0)
         assert model.set_grad_w == 100
 
     def test_grad_w_float_truncated(self) -> None:
-        model = build_der_settings({"WMax": 1000, "GradW": 50.7}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000, "setGradW": 50.7}, updated_time=0)
         assert model.set_grad_w == 50
 
     def test_full_print_demo(self) -> None:
@@ -188,16 +200,16 @@ class TestDerSettingsXml:
         assert parsed.set_grad_w == 0
 
     def test_xml_has_namespace(self) -> None:
-        model = build_der_settings({"WMax": 1000}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000}, updated_time=0)
         xml = to_xml(model)
         assert NS.encode() in xml
 
     def test_xml_returns_bytes(self) -> None:
-        model = build_der_settings({"WMax": 1000}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000}, updated_time=0)
         assert isinstance(to_xml(model), bytes)
 
     def test_xml_schema_validation_minimal(self) -> None:
-        model = build_der_settings({"WMax": 1000}, updated_time=1707000000)
+        model = build_der_settings({"setMaxW": 1000}, updated_time=1707000000)
         xml = to_xml(model)
         errors = validate_xml(xml)
         assert errors == [], f"Schema validation errors: {errors}"
@@ -210,7 +222,7 @@ class TestDerSettingsXml:
         assert errors == [], f"Schema validation errors: {errors}"
 
     def test_xml_omits_none_fields(self) -> None:
-        model = build_der_settings({"WMax": 1000}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000}, updated_time=0)
         xml = to_xml(model)
         root = fromstring(xml.decode("utf-8"))
 
@@ -219,7 +231,7 @@ class TestDerSettingsXml:
         assert root.find(f"{{{NS}}}setMaxW") is not None
 
     def test_xml_grad_w_plain_integer(self) -> None:
-        model = build_der_settings({"WMax": 1000}, updated_time=0)
+        model = build_der_settings({"setMaxW": 1000}, updated_time=0)
         xml = to_xml(model)
         root = fromstring(xml.decode("utf-8"))
 
@@ -243,20 +255,20 @@ class TestCsipAusDoeModesEnabled:
     defaults to export + import limits, only in csip_aus_mode)."""
 
     def test_default_export_import_when_not_provided(self):
-        st = build_der_settings({"WMax": 5000}, csip_aus_mode=True)
+        st = build_der_settings({"setMaxW": 5000}, csip_aus_mode=True)
         assert len(st.other_element) == 1
         assert st.other_element[0].value == b"\x03"  # opModExpLimW | opModImpLimW
 
     def test_connector_provided_value(self):
-        st = build_der_settings({"WMax": 5000, "DoeModesEnabled": 0x05}, csip_aus_mode=True)
+        st = build_der_settings({"setMaxW": 5000, "doeModesEnabled": 0x05}, csip_aus_mode=True)
         assert st.other_element[0].value == b"\x05"
 
     def test_omitted_without_csip_aus_mode(self):
-        st = build_der_settings({"WMax": 5000, "DoeModesEnabled": 0x05})
+        st = build_der_settings({"setMaxW": 5000, "doeModesEnabled": 0x05})
         assert st.other_element == []
 
     def test_serializes_with_csipaus_namespace(self):
-        st = build_der_settings({"WMax": 5000, "DoeModesEnabled": 0x0F}, csip_aus_mode=True)
+        st = build_der_settings({"setMaxW": 5000, "doeModesEnabled": 0x0F}, csip_aus_mode=True)
         xml = to_xml(st, include_csipaus=True)
         assert b"<csipaus:doeModesEnabled>0F</csipaus:doeModesEnabled>" in xml
 
@@ -266,7 +278,7 @@ class TestCsipAusDoeModesEnabled:
         sequence makes a CSIP-AUS server reject the DERSettings PUT with an
         'element is not expected' schema error."""
         st = build_der_settings(
-            {"WMax": 5000, "CtrlModes": 0x03, "DoeModesEnabled": 0x03},
+            {"setMaxW": 5000, "modesEnabled": 0x03, "doeModesEnabled": 0x03},
             updated_time=1707000000,
             csip_aus_mode=True,
         )
@@ -278,9 +290,9 @@ class TestCsipAusDoeModesEnabled:
 
 
 def test_doe_modes_enabled_masks_reserved_bits_and_rejects_bool():
-    st = build_der_settings({"WMax": 5000, "DoeModesEnabled": 0xFF}, csip_aus_mode=True)
+    st = build_der_settings({"setMaxW": 5000, "doeModesEnabled": 0xFF}, csip_aus_mode=True)
     assert st.other_element[0].value == b"\x0f"
-    st = build_der_settings({"WMax": 5000, "DoeModesEnabled": -1}, csip_aus_mode=True)
+    st = build_der_settings({"setMaxW": 5000, "doeModesEnabled": -1}, csip_aus_mode=True)
     assert st.other_element[0].value == b"\x0f"
-    st = build_der_settings({"WMax": 5000, "DoeModesEnabled": True}, csip_aus_mode=True)
+    st = build_der_settings({"setMaxW": 5000, "doeModesEnabled": True}, csip_aus_mode=True)
     assert st.other_element[0].value == b"\x03"

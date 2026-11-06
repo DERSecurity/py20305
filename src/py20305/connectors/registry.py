@@ -41,21 +41,20 @@ class LazyConnectorProxy:
         object.__setattr__(self, "_instance", None)
         # Lazily-allocated asyncio.Lock that serialises ``aresolve`` calls
         # so two concurrent first-touch awaits don't both spawn the
-        # factory (which for ``ConnectorSunSpec`` would mean two TCP
-        # connections + two scans against the same Modbus slave). The
-        # lock binds to whichever loop first awaited it; rebind if the
-        # running loop changes (crash-recovery rebuild + session-scoped
-        # test fixtures) -- same pattern as
-        # ``ConnectorSunSpec._get_lock``.
+        # factory (for a connector that connects and scans its device on
+        # construction, that would mean two connections and two scans
+        # against the same device). The lock binds to whichever loop first
+        # awaited it; rebind if the running loop changes (crash-recovery
+        # rebuild + session-scoped test fixtures).
         object.__setattr__(self, "_aresolve_lock", None)
         object.__setattr__(self, "_aresolve_lock_loop", None)
-        # Cache for permanent construction failures (e.g. Modbus
-        # exception codes 1-4 from ``ConnectorSunSpec``'s scan). Without
-        # the cache, every poll cycle re-runs the factory and re-scans
-        # the broken slave -- on a demo deployment that drove
-        # the diagnostics panel counts up by ~6/min per misconfigured
-        # device. With the cache, the proxy re-raises the same exception
-        # for ``_PERMANENT_FAILURE_TTL_SECONDS`` before letting another
+        # Cache for permanent construction failures (for example a device
+        # that refuses the connector's scan). Without the cache, every
+        # poll cycle re-runs the factory and re-scans the broken device
+        # -- on a demo deployment that drove the diagnostics panel counts
+        # up by ~6/min per misconfigured device. With the cache, the proxy
+        # re-raises the same exception for ``_PERMANENT_FAILURE_TTL_SECONDS``
+        # before letting another
         # construction attempt through, so a device that comes back
         # online (firmware reload, model registration) recovers without
         # a restart.
@@ -95,9 +94,9 @@ class LazyConnectorProxy:
         """Return the underlying connector, creating it on demand.
 
         Synchronous: blocks the calling thread for the duration of the
-        factory (which for ``ConnectorSunSpec`` includes a Modbus scan
-        with retries). Use ``aresolve`` from the async hot paths so the
-        event loop can keep handling other requests during construction.
+        factory (which may connect to and scan the device, with retries).
+        Use ``aresolve`` from the async hot paths so the event loop can keep
+        handling other requests during construction.
 
         Permanent construction failures (factory raised
         ``ConnectorConnectionError(permanent=True)``) are cached for
@@ -148,11 +147,10 @@ class LazyConnectorProxy:
         the factory runs at most once per proxy even when N coroutines
         race for first-touch construction. Without it, the per-device
         4 cycle types (metering / capability / settings / status) firing
-        close together at startup could each spawn their own
-        ``ConnectorSunSpec.__init__`` and open duplicate Modbus
-        connections -- the exact fan-out this wrapper exists to make
-        safe. Note: ``asyncio.to_thread`` itself
-        uses the default ``ThreadPoolExecutor`` (size
+        close together at startup could each construct their own
+        connector and open duplicate device connections -- the exact
+        fan-out this wrapper exists to make safe. Note: ``asyncio.to_thread``
+        itself uses the default ``ThreadPoolExecutor`` (size
         ``min(32, cpu_count + 4)``), so concurrent first-touch awaits
         across *different* proxies can still queue behind the pool;
         wall-clock for first dashboard load with N >> pool_size devices
@@ -186,7 +184,9 @@ class LazyConnectorProxy:
 #: path so configuring a device you don't have never imports its driver.
 #: ``custom`` is absent by design -- it carries its own ``class_path``.
 CONNECTOR_TYPE_MAP: dict[str, str] = {
-    "sunspec": "py20305.connectors.sunspec.ConnectorSunSpec",
+    # Needs the ``sunspec`` extra; imported only when a device of this type
+    # is first used.
+    "sunspec": "py20305.connectors.sunspec.connector.SunSpecConnector",
     "print_demo": "py20305.connectors.print_demo.PrintDemoConnector",
 }
 
@@ -213,6 +213,8 @@ class ConnectorConfigRegistry:
         self,
         devices: list[DeviceConfig],
         factory_resolver: Callable[[Any], Callable[[], Any] | None] | None = None,
+        *,
+        reading_profile: Any = None,
     ) -> None:
         """Build a registry from typed device configs.
 
@@ -228,10 +230,15 @@ class ConnectorConfigRegistry:
                 not on every lookup, and the callable it returns is invoked
                 lazily like any other -- so a resolver may close over
                 expensive state without paying for it up front.
+            reading_profile: The client's
+                :class:`~py20305.telemetry.mup.ReadingProfile`, passed as
+                ``reading_profile`` to a connector class that sets
+                ``takes_reading_profile``, whose readings depend on it.
         """
         self._device_configs: dict[str, DeviceConfig] = {}
         self._device_proxies: dict[str, LazyConnectorProxy] = {}
         self._factory_resolver = factory_resolver
+        self._reading_profile = reading_profile
 
         for device in devices:
             self._device_configs[device.lfdi] = device
@@ -325,8 +332,12 @@ class ConnectorConfigRegistry:
                 ) from exc
             kwargs = device.connector_kwargs()
 
+        reading_profile = self._reading_profile
+
         def factory() -> Any:
             cls = self._import_class(class_path)
+            if reading_profile is not None and getattr(cls, "takes_reading_profile", False):
+                return cls(**kwargs, reading_profile=reading_profile)
             return cls(**kwargs)
 
         return LazyConnectorProxy(name=device.lfdi, factory=factory)

@@ -17,6 +17,7 @@ a GET happened to run.
 from __future__ import annotations
 
 import _ssl
+import hashlib
 import logging
 import ssl
 from collections.abc import Callable
@@ -39,14 +40,52 @@ class Address:
 
 @dataclass(frozen=True)
 class SocketPair:
-    """The two ends of an established TCP connection.
+    """The two ends of an established TCP connection, and its TLS facts.
 
-    Either side may be ``None`` when the transport does not expose it — an
-    unknown address is reported as unknown rather than invented.
+    Either side may be ``None`` when the transport does not expose it: an
+    unknown address is reported as unknown rather than invented. The TLS
+    fields are None on a plain TCP connection and wherever the transport does
+    not expose them.
     """
 
     local: Address | None
     remote: Address | None
+    tls_version: str | None = None
+    tls_cipher: str | None = None
+    peer_cert_sha256: str | None = None
+
+
+def socket_pair_of(transport: object) -> SocketPair:
+    """Return the addresses and TLS facts of an asyncio transport.
+
+    Never raises: a fact the transport does not expose is None.
+    """
+    get = getattr(transport, "get_extra_info", None)
+    if get is None:
+        return SocketPair(local=None, remote=None)
+    try:
+        local = _as_address(get("sockname"))
+        remote = _as_address(get("peername"))
+        ssl_obj = get("ssl_object")
+    except Exception:  # pylint: disable=broad-exception-caught
+        return SocketPair(local=None, remote=None)
+    version = cipher = fingerprint = None
+    if ssl_obj is not None:
+        try:
+            version = ssl_obj.version()
+            negotiated = ssl_obj.cipher()
+            cipher = negotiated[0] if negotiated else None
+            der = ssl_obj.getpeercert(binary_form=True)
+            fingerprint = hashlib.sha256(der).hexdigest() if der else None
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.debug("Could not read the TLS facts of a connection", exc_info=True)
+    return SocketPair(
+        local=local,
+        remote=remote,
+        tls_version=version,
+        tls_cipher=cipher,
+        peer_cert_sha256=fingerprint,
+    )
 
 
 def _as_address(info: object) -> Address | None:
@@ -142,15 +181,13 @@ class Ieee2030TCPConnector(aiohttp.TCPConnector):
         connection is established is both the only place it is available and
         the honest granularity for it.
 
-        Never raises: connection telemetry must not be able to break the
-        connection it is describing.
+        Never raises: an observer must not be able to break the connection it
+        is describing.
         """
         if self._on_connect is None:
             return
         try:
-            sockname = transport.get_extra_info("sockname")  # type: ignore[attr-defined]
-            peername = transport.get_extra_info("peername")  # type: ignore[attr-defined]
-            self._on_connect(SocketPair(local=_as_address(sockname), remote=_as_address(peername)))
+            self._on_connect(socket_pair_of(transport))
         except Exception:
             # Warn once: an observer that never fires is indistinguishable from
             # a client that never connects, and both look like silence.

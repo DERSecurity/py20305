@@ -27,7 +27,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
 
 from py20305.client import CsipClient, TlsConfig
 from py20305.client.dnssd import (
@@ -43,16 +42,15 @@ from py20305.client.errors import (
     Sep2TlsError,
 )
 from py20305.config import ClientConfig, ConfigError, load_config
-from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
 from py20305.connectors.dispatcher import ConnectorDispatcher
 from py20305.connectors.registry import ConnectorConfigRegistry
 from py20305.security import compute_cert_fingerprint, compute_lfdi, compute_sfdi
+from py20305.telemetry.checkpoint import load_checkpoint, save_checkpoint
 from py20305.version_info import get_package_version, get_version_string
 
 if TYPE_CHECKING:
     from py20305.api import ClientAPIService
     from py20305.config import LoggingConfig
-    from py20305.forwarders import ForwarderConfig, ForwarderManager
     from py20305.telemetry.coordinator import TelemetryCoordinator
 
 logger = logging.getLogger("py20305.cli")
@@ -86,10 +84,6 @@ class ConnectionState:
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
 EXIT_CONNECT_FAILED = 3
-
-# How often the runner closes connection-event windows whose length has
-# passed and sends events held during a broker outage.
-CONNECTION_WINDOW_SWEEP_SECONDS = 10.0
 
 
 def setup_logging(config: LoggingConfig) -> None:
@@ -132,6 +126,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Override the configured log level.",
+    )
+    parser.add_argument(
+        "--telemetry-state-file",
+        type=Path,
+        help=(
+            "Keep the readings registered with the server in this file, so a restart "
+            "repeats them. Overrides telemetry.state_file."
+        ),
     )
     parser.add_argument(
         "--discover",
@@ -280,48 +282,20 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
     )
     own_lfdi = compute_lfdi(config.tls.client_cert.read_text())
 
-    registry = ConnectorConfigRegistry(config.devices)
+    from py20305.telemetry.mup import ReadingProfile
+
+    registry = ConnectorConfigRegistry(
+        config.devices, reading_profile=ReadingProfile(config.telemetry.reading_profile)
+    )
 
     sole_device = config.devices[0].lfdi if len(config.devices) == 1 else None
     holder: dict[str, CsipClient] = {}
     resolve_lfdi = make_lfdi_resolver(lambda: holder.get("client"), sole_device)
 
-    # Built before the client, because the dispatcher takes the emitter and the
-    # client takes the dispatcher. Both are None when nothing is configured,
-    # and every path downstream of them is a no-op in that case.
-    forwarder = build_forwarder(config, own_lfdi)
-    telemetry = (
-        DeviceTelemetryEmitter(
-            forwarder,
-            config.forwarders.device_telemetry,
-            client_id=own_lfdi,
-            audit=config.forwarders.audit,
-        )
-        if config.forwarders is not None
-        else None
-    )
-    # Enabled with nowhere to publish. Device telemetry rides the forwarder's
-    # transport rather than owning one, so this configuration silently records
-    # nothing -- which looks exactly like a device that is never read or
-    # written, and is worth saying out loud.
-    if config.forwarders is not None and forwarder is None:
-        for name, section in (
-            ("device telemetry", config.forwarders.device_telemetry),
-            ("the audit trail", config.forwarders.audit),
-        ):
-            if section.enabled:
-                logger.warning(
-                    "%s is enabled but no forwarder is configured or enabled; nothing "
-                    "will be published. Configure `forwarders.mqtt` alongside it.",
-                    name,
-                )
-
     client = CsipClient(
         config.server.url,
         tls=tls,
-        dispatcher=ConnectorDispatcher(
-            registry, lfdi_resolver=resolve_lfdi, telemetry=telemetry
-        ),
+        dispatcher=ConnectorDispatcher(registry, lfdi_resolver=resolve_lfdi),
         dcap_path=config.server.dcap_path,
         registration_pins=config.registration_pins or None,
         server_2018_compat=config.server.server_2018_compat,
@@ -329,56 +303,11 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
         fsa_stale_seconds=config.server.fsa_stale_seconds,
         heartbeat_seconds=config.subscription.backstop_poll_seconds,
     )
-    # The transport reads this to publish each exchange, and `run` reads it
-    # back to start and stop the transport -- so the manager needs no second
-    # channel out of here and this function keeps its shape.
-    client.http.forwarder = forwarder
-    if config.forwarders is not None:
-        client.audit.attach_forwarder(forwarder)
-        client.audit.configure(config.forwarders.audit, client_id=own_lfdi)
-        if telemetry is not None:
-            # One counter for the client's writes and its lifecycle records.
-            telemetry.configure(config.forwarders.device_telemetry, sequence=client.audit.sequence)
-
-    # Connection telemetry: the client's own connection outcomes, on their own
-    # topic. Attached through the observer seam so the client stays ignorant
-    # of the forwarder package; the emitter rides the same transport as the
-    # protocol messages.
-    if config.forwarders is not None and config.forwarders.connection_telemetry.enabled:
-        if forwarder is None:
-            # Same silent-nothing failure mode as device telemetry above: an
-            # enabled channel with no transport records nothing and looks like
-            # a client that never connects.
-            logger.warning(
-                "connection telemetry is enabled but no forwarder is configured or "
-                "enabled; nothing will be published. Configure `forwarders.mqtt` "
-                "alongside it."
-            )
-        else:
-            from py20305.forwarders.connection_telemetry import ConnectionTelemetryEmitter
-
-            emitter = ConnectionTelemetryEmitter(
-                forwarder,
-                config.forwarders.connection_telemetry,
-                product_version=get_package_version(),
-            )
-            parsed = urlparse(config.server.url)
-            emitter.set_server(
-                parsed.hostname,
-                parsed.port or (443 if parsed.scheme == "https" else 80),
-                base_url=config.server.url,
-            )
-            client.http.connection_observer = emitter
-            # The forwarder reports its own broker connection through the same
-            # emitter. Attached before the forwarder starts, so the first
-            # connection attempt is reported too.
-            forwarder.connection_observer = emitter
 
     # Subscribe/notify. Attached after construction because the manager needs
     # the client's transport, which exists only once the client does. The
     # client starts and stops the listener with its own lifecycle.
     if config.subscription.enabled:
-        from py20305.forwarders.connection_telemetry import ConnectionTelemetryEmitter
         from py20305.subscription.manager import SubscriptionManager
         from py20305.subscription.notification_server import NotificationServer
 
@@ -388,10 +317,6 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
             tls=tls,
             client_cert_mode=config.subscription.notification_client_cert_mode,
         )
-        # Inbound notification requests are connections too; report them
-        # through the same emitter when connection telemetry is on.
-        if isinstance(client.http.connection_observer, ConnectionTelemetryEmitter):
-            notification_server.connection_observer = client.http.connection_observer
         # The validator guarantees external_host when enabled.
         external_host = config.subscription.notification_external_host
         assert external_host is not None
@@ -411,11 +336,6 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
             "subscriptions on; notifications delivered to %s",
             notification_server.build_notification_uri(external_host),
         )
-    # Configuring a schema directory has to actually turn validation on.
-    # Without this the validator stays unset and every forwarded frame is
-    # reported valid, which is worse than not offering the setting at all.
-    if config.forwarders is not None and config.forwarders.schema_dir is not None:
-        client.http.set_schema_validator(str(config.forwarders.schema_dir))
     holder["client"] = client
     return client, own_lfdi
 
@@ -532,38 +452,6 @@ def _advertised_port(config: ClientConfig) -> int | None:
             config.subscription.notification_host,
         )
     return None
-
-
-def build_forwarder(config: ClientConfig, own_lfdi: str) -> ForwarderManager | None:
-    """Assemble the forwarder transport from configuration.
-
-    Returns None when nothing is configured or every configured forwarder is
-    disabled, so a deployment that does not forward never starts a broker
-    connection and never imports the MQTT client.
-
-    Args:
-        config: The loaded configuration.
-        own_lfdi: This client's own LFDI, used to attribute an exchange that
-            names no device.
-    """
-    forwarders = config.forwarders
-    if forwarders is None or not forwarders.has_enabled_forwarders():
-        return None
-
-    from py20305.forwarders import ForwarderManager, MQTTForwarder, MQTTForwarderAdapter
-
-    manager = ForwarderManager()
-    if forwarders.mqtt is not None and forwarders.mqtt.enabled:
-        manager.add_forwarder(MQTTForwarderAdapter(MQTTForwarder(forwarders.mqtt)))
-        logger.info(
-            "forwarding to %s:%s under %s",
-            forwarders.mqtt.endpoint,
-            forwarders.mqtt.port,
-            forwarders.mqtt.topic_base,
-        )
-    # Set after the forwarders are registered so it propagates to each of them.
-    manager.client_lfdi = own_lfdi
-    return manager
 
 
 def make_lfdi_resolver(
@@ -837,27 +725,6 @@ async def _run_client(
     api_task: asyncio.Task[None] | None = None
     api_service: ClientAPIService | None = None
     telemetry: TelemetryCoordinator | None = None
-    # Started before the connect attempt, so the exchanges of a connection that
-    # never succeeds are forwarded too -- those are the ones worth having.
-    forwarder = client.http.forwarder
-    retry_task: asyncio.Task[None] | None = None
-    if forwarder is not None:
-        await forwarder.start()
-        # A broker that is briefly unreachable at boot -- which is exactly
-        # where a broker restarted alongside this client would be -- leaves
-        # its forwarder stopped while the manager reports itself running, and
-        # every message after that is dropped. Retrying in the background is
-        # what keeps that a delay rather than an outage for the process
-        # lifetime.
-        retry_task = asyncio.create_task(
-            _retry_forwarders(forwarder, stop, config.forwarders)
-        )
-    sweep_task: asyncio.Task[None] | None = None
-    emitter = _connection_emitter(client)
-    if emitter is not None:
-        sweep_task = asyncio.create_task(
-            _sweep_connection_events(emitter, stop), name="connection-event-sweep"
-        )
     try:
         # Started before connecting, not after. The API's whole value during an
         # outage is reporting that there is one -- and /reconnect exists to cut
@@ -952,29 +819,16 @@ async def _run_client(
         return EXIT_OK
     finally:
         if telemetry is not None:
+            if config.telemetry.state_file is not None:
+                # Before the shutdown, which drops the devices' registrations.
+                save_telemetry_state(telemetry, config.telemetry.state_file)
             # `shutdown`, not `stop_metering` per device: that one drops the
             # device's state and leaves the scheduler's tasks running until
             # something calls cancel_all, which nothing else here does.
             await telemetry.shutdown()
         if api_task is not None:
             api_task.cancel()
-        if retry_task is not None:
-            retry_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await retry_task
-        if sweep_task is not None:
-            sweep_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await sweep_task
         await client.shutdown()
-        # After the client has stopped making connections, and before the
-        # transport stops, so the last windows and any held events are sent.
-        if emitter is not None:
-            emitter.flush()
-        # After the client, so exchanges from its shutdown are queued before
-        # the transport drains rather than after it has stopped accepting.
-        if forwarder is not None:
-            await forwarder.stop()
         # Last, so intervals still open when telemetry stopped are written.
         if client.history is not None:
             client.history.close()
@@ -1007,6 +861,17 @@ def _connector_resolver(dispatcher: ConnectorDispatcher) -> Callable[[str], Any]
         return proxy.aresolve()
 
     return resolve
+
+
+def save_telemetry_state(coordinator: TelemetryCoordinator, path: Path) -> None:
+    """Write the readings registered with the server to ``path``; log, never raise."""
+    checkpoint = coordinator.to_checkpoint()
+    if checkpoint is None:
+        return
+    try:
+        save_checkpoint(path, checkpoint)
+    except OSError as exc:
+        logger.warning("Cannot write the telemetry state file %s: %s", path, exc)
 
 
 def _attach_api_telemetry(
@@ -1080,6 +945,14 @@ def _start_telemetry(
         site_interval_history=history.site_intervals if history is not None else None,
         der_resource_put_policy=config.telemetry.der_resource_put_policy,
     )
+    state_file = config.telemetry.state_file
+    if state_file is not None:
+        stored = load_checkpoint(state_file)
+        if stored is not None:
+            coordinator.restore_from_checkpoint(stored)
+        coordinator.set_on_registration_change(
+            lambda: save_telemetry_state(coordinator, state_file)
+        )
     coordinator.setup()
     coordinator.start_device_telemetry()
     _attach_api_telemetry(api_service, coordinator)
@@ -1115,56 +988,6 @@ def _start_telemetry(
         config.telemetry.der_capability_poll_rate_seconds,
     )
     return coordinator
-
-
-def _connection_emitter(client: CsipClient) -> Any:
-    """Return the client's connection telemetry emitter, or None when it has none."""
-    from py20305.forwarders.connection_telemetry import ConnectionTelemetryEmitter
-
-    observer = client.http.connection_observer
-    return observer if isinstance(observer, ConnectionTelemetryEmitter) else None
-
-
-async def _sweep_connection_events(emitter: Any, stop: asyncio.Event) -> None:
-    """Close expired connection-event windows and send held events on a timer, until stopped.
-
-    Windows also close on later activity through the emitter. Without the
-    timer, a link that goes quiet is not reported until the next connection,
-    and events held during a broker outage wait for the next event.
-    """
-    while not stop.is_set():
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), timeout=CONNECTION_WINDOW_SWEEP_SECONDS)
-        if stop.is_set():
-            return
-        emitter.flush_expired()
-
-
-async def _retry_forwarders(
-    forwarder: ForwarderManager,
-    stop: asyncio.Event,
-    config: ForwarderConfig | None,
-) -> None:
-    """Keep trying to start forwarders that are not running, until stopped.
-
-    Only forwarders that failed are retried, so a healthy one is never
-    restarted underneath its queue. The interval is deliberately unhurried:
-    the failure this recovers from is a broker being down, and hammering it
-    helps nobody.
-    """
-    interval = config.retry_interval_seconds if config is not None else 0
-    if interval <= 0:
-        return
-    while not stop.is_set():
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), timeout=interval)
-        if stop.is_set():
-            return
-        if not forwarder.failed_forwarders():
-            continue
-        recovered = await forwarder.retry_failed()
-        if recovered:
-            logger.info("forwarding resumed on %d forwarder(s)", recovered)
 
 
 async def _serve_api(
@@ -1288,6 +1111,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
 
+    if args.telemetry_state_file:
+        config = config.model_copy(
+            update={
+                "telemetry": config.telemetry.model_copy(
+                    update={"state_file": args.telemetry_state_file.resolve()}
+                )
+            }
+        )
+
     if args.log_level:
         config = config.model_copy(
             update={"logging": config.logging.model_copy(update={"level": args.log_level})}
@@ -1325,6 +1157,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  client LFDI : {lfdi}")
         print(f"  client SFDI : {compute_sfdi(lfdi)}")
         print(f"  devices     : {len(config.devices)}")
+        state_file = config.telemetry.state_file
+        print(f"  telemetry state : {state_file if state_file is not None else 'off'}")
         finding = f"on, {config.discovery.transport}" if config.discovery.enabled else "off"
         print(f"  discovery   : {finding}")
         print(f"  announcing  : {config.advertise.transport}")

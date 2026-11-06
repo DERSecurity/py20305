@@ -1,258 +1,110 @@
-"""Southbound device telemetry -- what this client reads from and writes to a DER.
+"""Southbound device telemetry: what this client reads from and writes to a DER.
 
-The forwarder already carries the client's *northbound* IEEE 2030.5 exchanges to
-a monitoring system. The southbound half -- the Modbus traffic between this
-client and the device it controls -- was not reported at all, so a monitoring
-system watching the client saw the commands it received from the utility and
-never the commands it issued to the equipment.
+The exchange observer reports the client's IEEE 2030.5 traffic with the
+server. The southbound half, the traffic between this client and the devices
+it controls through connectors, is reported here, so a monitoring system sees
+the commands the client issued to the equipment beside the ones it received.
 
-That asymmetry matters more than it sounds. A curtailment that arrives over
-2030.5 and a curtailment that reaches the inverter are different facts, and the
-gap between them is where a compromised or misbehaving client shows up.
-Reporting both halves on the same channel lets a consumer compare them.
+A curtailment that arrives over IEEE 2030.5 and a curtailment that reaches the
+inverter are different facts, and the gap between them is where a compromised
+or misbehaving client shows up.
 
-The wire format is :class:`~py20305.forwarders.types.ProtocolMessage`, the same
-envelope the northbound path uses, with ``protocol`` set to ``modbus``. It goes
-to the same topic as the rest of the captured traffic, so a collector needs no
-new subscription and no new parser: a consumer already reading these envelopes
-tells the two apart by the ``protocol`` field. An operator who wants them
-separated sets ``topic_suffix``.
-
-Direction follows the data, not the initiator: a reading pulled off a device is
-``upstream``, a control written to one is ``downstream``.
+:class:`DeviceTelemetryEmitter` hands one
+:class:`~py20305.observers.DeviceRecord` per read and per write to a device
+observer. The reading source, the telemetry managers and the control
+dispatcher share one emitter.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from types import MappingProxyType
+from typing import Any
 
-from py20305.forwarders.audit import AuditSequence, mrid_hex
-from py20305.forwarders.base import EventFrame
-from py20305.forwarders.config import PROTOCOL_MESSAGE_TOPIC_SUFFIX, AuditConfig
-from py20305.forwarders.types import (
-    NetworkEndpoint,
-    Protocol,
-    ProtocolMessage,
-    ProtocolMetadata,
-    WireDirection,
+from py20305.observers import (
+    MAX_ERROR_CHARS,
+    DeviceObserver,
+    DeviceOperation,
+    DeviceOutcome,
+    DeviceRecord,
+    ObserverGuard,
 )
-
-if TYPE_CHECKING:
-    from py20305.forwarders.config import DeviceTelemetryConfig
-    from py20305.forwarders.manager import ForwarderManager
 
 logger = logging.getLogger(__name__)
 
-# Modbus TCP's registered port. Used only when a connector reports an address
-# with no port of its own -- an RTU device has no TCP port at all, and inventing
-# one would be worse than reporting the serial line it actually uses.
-_DEFAULT_MODBUS_PORT = 502
 
-# The unspecified address, used when a connector exposes none. This is the same
-# placeholder the protocol-message path already uses for an endpoint it cannot
-# resolve. It reads as "unknown" to anyone looking at the record, which a
-# device's logical name in an `ip` field does not -- that looks like an address.
-_UNKNOWN_IP = "0.0.0.0"
-
-
-def _unknown_endpoint() -> NetworkEndpoint:
-    """An endpoint standing for "not known", never for a real address.
-
-    Used only where the envelope requires one. ``ProtocolMessage`` types
-    ``source`` as a required ``NetworkEndpoint`` and ``destination`` as
-    optional, so an unknown source has to be *represented* while an unknown
-    destination can simply be omitted. That is why the two sides are handled
-    differently for the same underlying condition: it is the shared envelope's
-    shape, not a judgment about the two directions.
-    """
-    return NetworkEndpoint(ip=_UNKNOWN_IP, port=0)
-
-
-# Upper bound on a device's error text. A Modbus exception message is normally
-# short, but it originates outside this process and lands on a topic an operator
-# may have scoped for telemetry rather than arbitrary device output.
-MAX_ERROR_CHARS = 512
-
-
-def _split_endpoint(endpoint_id: str | None) -> NetworkEndpoint | None:
-    """Turn a connector's endpoint identifier into a :class:`NetworkEndpoint`.
-
-    Connectors identify a device as ``"host:port"`` for TCP or
-    ``"rtu:/dev/ttyUSB0"`` for a serial line. A serial device has no IP address,
-    so it is reported by its line rather than being forced into an address shape
-    it does not have.
-
-    Args:
-        endpoint_id: The connector's endpoint identifier, if it has one.
-
-    Returns:
-        The endpoint, or ``None`` when there is nothing usable to report.
-    """
-    if not endpoint_id:
-        return None
-    if endpoint_id.startswith("rtu:"):
-        # No address for a serial line; the port field carries no meaning here,
-        # so the line itself goes in `ip` and the port stays at the Modbus
-        # default rather than being invented per-device.
-        return NetworkEndpoint(ip=endpoint_id, port=_DEFAULT_MODBUS_PORT)
-    host, _, port = endpoint_id.rpartition(":")
-    if not host:
-        return NetworkEndpoint(ip=endpoint_id, port=_DEFAULT_MODBUS_PORT)
-    try:
-        return NetworkEndpoint(ip=host, port=int(port))
-    except ValueError:
-        return NetworkEndpoint(ip=endpoint_id, port=_DEFAULT_MODBUS_PORT)
+def mrid_hex(mrid: bytes | None) -> str | None:
+    """Return an mRID as uppercase hex, the form the ``mRID`` element takes on the wire."""
+    return mrid.hex().upper() if mrid is not None else None
 
 
 def _bound_error(error: str | None) -> str | None:
-    """Cap a device's error text, noting the original length when it is cut.
+    """Cut a device's error text to :data:`~py20305.observers.MAX_ERROR_CHARS`.
 
-    The text originates outside this process and lands on a topic an operator
-    may have scoped for telemetry rather than arbitrary device output, so its
-    length is not the device's to choose.
+    The text originates outside this process, so its length is not the
+    device's to choose.
     """
     if error is None or len(error) <= MAX_ERROR_CHARS:
         return error
     return error[:MAX_ERROR_CHARS] + f"... [truncated, {len(error)} chars]"
 
 
-def device_protocol(connector: object) -> Protocol:
-    """What the connector speaks, for the envelope's ``protocol`` field.
+def device_protocol(connector: object) -> str:
+    """Return what the connector speaks, as it declares it in ``telemetry_protocol``.
 
-    Read off the connector rather than assumed, because the same emitter sits
-    behind every connector the dispatcher and the reading source drive -- a
-    custom one, or the hardware-free demo. Labelling those `modbus` would put
-    a false claim about the wire on the monitoring channel, and a consumer
-    filtering by protocol would act on it.
-
-    Unknown or malformed values fall back to ``GENERIC`` rather than raising:
-    this runs inside the data path, and a connector's mislabelling is not
-    worth failing a control write over.
+    A connector that declares nothing usable is reported as ``generic``.
     """
     declared = getattr(connector, "telemetry_protocol", None)
-    if isinstance(declared, Protocol):
-        return declared
-    if isinstance(declared, str):
-        try:
-            return Protocol.from_string(declared)
-        except ValueError:
-            logger.debug("Connector declared unknown protocol %r; reporting generic", declared)
-    return Protocol.GENERIC
+    if isinstance(declared, str) and declared:
+        return declared.lower()
+    return "generic"
 
 
-def device_endpoint(connector: object) -> NetworkEndpoint | None:
-    """Best-effort address of the device behind a connector.
+def device_endpoint(connector: object) -> str | None:
+    """Return the connector's device address, such as ``host:port``, or None.
 
-    Read defensively: a connector is third-party-shaped code and a custom one
-    may expose nothing at all. An event with no device address is still worth
-    sending -- the device identifier carries the attribution -- so this returns
-    ``None`` rather than raising.
+    Read defensively: a custom connector may expose nothing at all.
     """
     endpoint_id = getattr(connector, "endpoint_id", None)
-    if not isinstance(endpoint_id, str):
-        return None
-    return _split_endpoint(endpoint_id)
+    return endpoint_id if isinstance(endpoint_id, str) and endpoint_id else None
 
 
 class DeviceTelemetryEmitter:
-    """Publishes southbound device reads and writes to the monitoring system.
+    """Reports southbound device reads and writes to a device observer.
 
     One instance per client, shared by the reading source and the control
-    dispatcher -- the two places every southbound read and write already funnels
-    through, so emission lives in two places rather than in each of the
-    connector's sixteen operations.
+    dispatcher, the two places every southbound read and write passes through.
 
-    Nothing here may raise into the data path. Telemetry that can break a
-    control write is worse than absent telemetry, so every entry point swallows
-    its own errors and logs them.
+    Nothing here may raise into the data path: the observer's exceptions are
+    caught and counted, and a record that cannot be built is counted in
+    :attr:`emit_failures`.
     """
 
-    def __init__(
-        self,
-        forwarder: ForwarderManager | None,
-        config: DeviceTelemetryConfig,
-        *,
-        client_id: str | None = None,
-        audit: AuditConfig | None = None,
-        sequence: AuditSequence | None = None,
-    ) -> None:
-        """Create an emitter.
-
-        Args:
-            forwarder: Where events go. ``None`` disables emission.
-            config: Whether telemetry is on, and its topic.
-            client_id: Identifier recorded as the forwarding system.
-            audit: The audit trail switch. When on, writes are published even
-                with telemetry off, and each carries a ``boot_id`` and ``seq``.
-            sequence: The audit counter. Defaults to one of its own; pass the
-                client's (``client.audit.sequence``) to share its stream.
-        """
-        self._forwarder = forwarder
-        self._config = config
-        self._audit = audit if audit is not None else AuditConfig()
-        self._sequence = sequence if sequence is not None else AuditSequence()
-        self._forwarder_id = client_id or ""
-        #: The client's own advertised host, used as the endpoint on
-        #: whichever side of the exchange it sits. Empty until configured.
-        self._source_host = ""
-        #: Emission failures since start. Telemetry that stopped working must
-        #: not look the same as a client with nothing to report.
+    def __init__(self, observer: DeviceObserver | None = None) -> None:
+        """Create an emitter that reports to ``observer``; None reports nothing."""
+        self._observer = observer
+        self._guard = ObserverGuard("device observer")
+        #: Records that could not be built.
         self.emit_failures = 0
 
     @property
     def enabled(self) -> bool:
-        """Whether device reads will actually be emitted."""
-        return self._config.enabled and self._forwarder is not None
+        """Whether device reads are reported."""
+        return self._observer is not None
 
     @property
     def writes_enabled(self) -> bool:
-        """Whether device writes will actually be emitted.
+        """Whether device writes are reported."""
+        return self._observer is not None
 
-        The audit trail needs the writes without the reads, which are the
-        high-volume half, so either switch publishes writes.
-        """
-        return (self._config.enabled or self._audit.enabled) and self._forwarder is not None
+    @property
+    def observer_failures(self) -> int:
+        """How many times the device observer raised."""
+        return self._guard.failures
 
-    def attach_forwarder(self, forwarder: ForwarderManager | None) -> None:
-        """Point the emitter at the transport once one exists.
-
-        The forwarder is built from configuration after the client's components
-        are constructed, so an emitter that captured it at ``__init__`` would
-        hold ``None`` for the process's lifetime and emit nothing.
-        """
-        self._forwarder = forwarder
-
-    def configure(
-        self,
-        config: DeviceTelemetryConfig,
-        *,
-        client_id: str | None = None,
-        source_host: str | None = None,
-        audit: AuditConfig | None = None,
-        sequence: AuditSequence | None = None,
-    ) -> None:
-        """Apply operator configuration after construction.
-
-        Args:
-            config: Whether telemetry is on, and its topic.
-            client_id: Identifier recorded as the forwarding system.
-            source_host: The client's own advertised host, reported as its
-                endpoint on whichever side of the exchange it sits.
-            audit: The audit trail switch. Left as it was when omitted.
-            sequence: The client's audit counter (``client.audit.sequence``),
-                so writes number in the same stream as its lifecycle records.
-                Left as it was when omitted.
-        """
-        self._config = config
-        if audit is not None:
-            self._audit = audit
-        if sequence is not None:
-            self._sequence = sequence
-        if client_id is not None:
-            self._forwarder_id = client_id
-        if source_host is not None:
-            self._source_host = source_host
+    def attach_observer(self, observer: DeviceObserver | None) -> None:
+        """Report to ``observer`` from now on, or stop with None."""
+        self._observer = observer
 
     def record_read(
         self,
@@ -261,25 +113,27 @@ class DeviceTelemetryEmitter:
         *,
         connector: object = None,
         lfdi: str | None = None,
+        resource: str = "monitoring",
     ) -> None:
-        """Report one set of readings pulled off a device.
+        """Report one set of values read from a device.
 
         Args:
             device: Device identifier the client knows it by.
-            values: The points read. Sent verbatim so the collector sees what
-                the device actually reported, not a re-derived summary.
-            connector: The connector the read went through, for its address.
+            values: The values read, as the connector returned them.
+            connector: The connector the read went through.
             lfdi: The device's LFDI when one is known.
+            resource: What was read: ``monitoring``, ``nameplate``,
+                ``configuration``, ``status`` or ``availability``.
         """
-        if not values or not self.enabled:
-            # Nothing was read, or reads are not being reported. An empty
-            # envelope would be indistinguishable from a device reporting
-            # all-zero, which is a real reading.
+        if not values or self._observer is None:
+            # An empty record would be indistinguishable from a device
+            # reporting all zero, which is a real reading.
             return
         self._emit(
+            operation=DeviceOperation.READ,
             device=device,
-            body={"points": dict(values), "operation": "read"},
-            direction=WireDirection.UPSTREAM,
+            resource=resource,
+            values=values,
             connector=connector,
             lfdi=lfdi,
         )
@@ -298,143 +152,72 @@ class DeviceTelemetryEmitter:
         applied_mrid: bytes | None = None,
         cause_mrid: bytes | None = None,
     ) -> None:
-        """Report one control written to a device.
-
-        A rejected write is reported too, with its error. A command that was
-        attempted and failed is exactly what an audit trail should retain -- the
-        northbound side may still believe it succeeded.
+        """Report one control written to a device, or refused or failed.
 
         Args:
             device: Device identifier the client knows it by.
-            control: Control name, e.g. ``"p_lim"``, in the same vocabulary the
-                management API uses.
+            control: Control name, in the same vocabulary the management API
+                uses.
             params: The parameters written.
-            connector: The connector the write went through, for its address.
+            connector: The connector the write went through.
             lfdi: The device's LFDI when one is known.
-            error: The failure reason, when the write was rejected.
-            error_type: The failure's exception class name.
+            error: The failure reason, when the write was refused or failed.
+            error_type: The failure's exception class name, or ``refused``
+                when the command authority refused the write.
             origin: Who issued the write, e.g. ``"ieee2030_5"``.
             applied_mrid: The mRID of the control written, when it was a
                 DERControl or DefaultDERControl.
             cause_mrid: The event whose lifecycle produced the write: the event
                 itself on activation, the event that ended on a fallback.
         """
-        if not self.writes_enabled:
+        if self._observer is None:
             return
-        body: dict[str, Any] = {
-            "control": control,
-            "params": dict(params),
-            "operation": "write",
-        }
-        if error_type is not None:
-            body["error_type"] = error_type
-        # Indexed fields rather than body text: the body travels as one string,
-        # and these are what an audit query joins on.
-        extra: dict[str, Any] = {}
-        if origin is not None:
-            extra["origin"] = str(origin)
-        if applied_mrid is not None:
-            extra["applied_mrid"] = mrid_hex(applied_mrid)
-        if cause_mrid is not None:
-            extra["cause_mrid"] = mrid_hex(cause_mrid)
-        # Bounded once, then used everywhere the text appears. The envelope
-        # carries it in two places, and capping only one of them leaves the
-        # device able to put an arbitrarily long string on the wire through the
-        # other -- which is the whole thing the cap exists to prevent.
-        bounded = _bound_error(error)
-        if bounded is not None:
-            body["error"] = bounded
+        if error is None:
+            outcome = DeviceOutcome.OK
+        elif error_type == "refused":
+            outcome = DeviceOutcome.REFUSED
+        else:
+            outcome = DeviceOutcome.FAILED
         self._emit(
+            operation=DeviceOperation.WRITE,
             device=device,
-            body=body,
-            direction=WireDirection.DOWNSTREAM,
+            resource=control,
+            values=params,
             connector=connector,
             lfdi=lfdi,
-            is_valid=error is None,
-            validation_error=bounded,
-            extra=extra,
+            outcome=outcome,
+            error=_bound_error(error),
+            error_type=error_type,
+            origin=str(origin) if origin is not None else None,
+            applied_mrid=mrid_hex(applied_mrid),
+            cause_mrid=mrid_hex(cause_mrid),
         )
-
-    def _client_side(self) -> NetworkEndpoint:
-        """This client's end of a southbound exchange.
-
-        Reported by its advertised host once one is configured. Before that,
-        the unspecified address -- what the 2030.5 side of this transport
-        already emits when an endpoint is unknown, so a collector reading both
-        halves sees one convention rather than two.
-        """
-        return NetworkEndpoint(ip=self._source_host or _UNKNOWN_IP, port=0)
 
     def _emit(
         self,
         *,
+        operation: DeviceOperation,
         device: str,
-        body: dict[str, Any],
-        direction: WireDirection,
+        resource: str,
+        values: dict[str, Any],
         connector: object,
         lfdi: str | None,
-        is_valid: bool = True,
-        validation_error: str | None = None,
-        extra: dict[str, Any] | None = None,
+        **fields: Any,
     ) -> None:
-        """Build the envelope and hand it to the transport.
-
-        Source is where the exchange came from and destination where it went,
-        which is the contract the 2030.5 side of this transport already
-        follows. A reading is pulled off the device, so the device is the
-        source; a control is written to it, so the device is the destination.
-        Putting the device in ``source`` for both would tell a collector that
-        the inverter issued the command.
-        """
-        if self._forwarder is None:
-            return
         try:
-            device_ep = device_endpoint(connector)
-            metadata: dict[str, Any] = {"device": device, **(extra or {})}
-            if direction is WireDirection.DOWNSTREAM and self._audit.enabled:
-                metadata.update(self._sequence.stamp())
-
-            if direction is WireDirection.UPSTREAM:
-                # The device initiated nothing, but the data came from it. The
-                # envelope requires a source, so an unknown one is represented
-                # by the unspecified address rather than by the device's
-                # logical name in an `ip` field -- that looks like an address.
-                source = device_ep or _unknown_endpoint()
-                destination: NetworkEndpoint | None = self._client_side()
-            else:
-                source = self._client_side()
-                # Omitted rather than invented when the connector has no
-                # address; the device identifier carries the attribution.
-                destination = device_ep
-            message = ProtocolMessage(
+            record = DeviceRecord(
+                operation=operation,
+                device=device,
+                lfdi=lfdi,
+                resource=resource,
+                values=MappingProxyType(dict(values)),
                 protocol=device_protocol(connector),
-                direction=direction,
-                client_id=lfdi or device,
-                payload=body,
-                source=source,
-                destination=destination,
-                forwarder_id=self._forwarder_id,
-                protocol_data=ProtocolMetadata(
-                    lfdi=lfdi,
-                    message_type=body.get("operation"),
-                    extra=metadata,
-                ),
-                is_valid=is_valid,
-                validation_error=validation_error,
+                endpoint=device_endpoint(connector),
+                **fields,
             )
-            self._forwarder.queue_event(
-                EventFrame(
-                    payload=message.to_dict(),
-                    topic_suffix=self._config.topic_suffix or PROTOCOL_MESSAGE_TOPIC_SUFFIX,
-                    kind="device-telemetry",
-                )
-            )
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             self.emit_failures += 1
-            if self.emit_failures == 1:
-                logger.warning(
-                    "Device telemetry failed to record an exchange; further failures log at debug",
-                    exc_info=True,
-                )
-            else:
-                logger.debug("Device telemetry failed to record an exchange", exc_info=True)
+            log = logger.warning if self.emit_failures == 1 else logger.debug
+            log("Could not build a device record", exc_info=True)
+            return
+        self._guard.deliver(self._observer, record)

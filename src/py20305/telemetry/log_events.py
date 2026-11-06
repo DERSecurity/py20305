@@ -82,8 +82,8 @@ def alarm_bits_to_log_events(previous: int, current: int) -> list[tuple[int, int
     unchanged bitmap yields ``[]`` -- CSIP s4.6.3 wants alarms reported "as they
     occur", so a persisting alarm is not re-posted every cycle.
 
-    Reserved bits (>= 11, which SunSpec does populate) are skipped: IEEE assigns
-    them no code, so there is nothing compliant to send. Callers that want to
+    Reserved bits (>= 11) are skipped: IEEE assigns them no code, so there is
+    nothing compliant to send. Callers that want to
     surface them should inspect ``unmapped_alarm_bits``.
     """
     changed = previous ^ current
@@ -99,10 +99,9 @@ def alarm_bits_to_log_events(previous: int, current: int) -> list[tuple[int, int
 def unmapped_alarm_bits(alarm_status: int) -> list[int]:
     """Set bits in *alarm_status* that have no IEEE-assigned LogEvent code.
 
-    SunSpec model 701 ``Alrm`` populates bits 11..16 (AC_UNDER_VOLT,
-    BLOWN_STRING_FUSE, ...), which fall in the IEEE reserved range. They still
-    reach the server via ``DERStatus.alarmStatus`` (the bitmap's proper home);
-    they just can't be expressed as a LogEvent.
+    A connector may report bits in the IEEE reserved range. They still reach
+    the server via ``DERStatus.alarmStatus`` (the bitmap's proper home); they
+    just can't be expressed as a LogEvent.
     """
     return [
         bit

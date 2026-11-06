@@ -16,7 +16,6 @@ you may not need:
 |---|---|---|
 | `sunspec` | `pysunspec2`, `pyserial` | Talking to a SunSpec Modbus device |
 | `api` | `fastapi`, `uvicorn` | The HTTP management API |
-| `mqtt` | `aiomqtt` | Forwarding captured traffic to a monitoring system |
 | `all` | all of the above | |
 
 ```bash
@@ -125,4 +124,4 @@ writing a connector of your own.
 
 - [Connecting devices](connectors.md) — connectors, and how to write one
 - [Management API](api.md) — observing a running client over HTTP
-- [Forwarding traffic](forwarding.md) — publishing exchanges to a monitor
+- [Observers](observers.md) — records of exchanges, connections and anomalies

@@ -24,13 +24,18 @@ from py20305.client.errors import Sep2ConnectionError, Sep2ProtocolError
 from py20305.client.polling import PollScheduler
 from py20305.client.timebase import ServerTimebase
 from py20305.connectors.base import ConnectorError
+from py20305.connectors.reading import Reading, ReadingIdentity
 from py20305.models.sep import MirrorUsagePoint, MirrorUsagePointList
 from py20305.readings import (
-    QUALITY_SUFFIX,
     DeviceSnapshot,
     DirectConnectorSource,
     MeasurementSource,
     Quality,
+)
+from py20305.telemetry.checkpoint import (
+    CHECKPOINT_VERSION,
+    reading_from_dict,
+    reading_to_dict,
 )
 from py20305.telemetry.der_availability import build_der_availability
 from py20305.telemetry.log_events import (
@@ -48,18 +53,18 @@ from py20305.telemetry.mup import (
     DeviceRole,
     PowerDirection,
     ReadingProfile,
-    ac_type_of,
+    RegisteredReading,
     create_meter_reading_list,
     create_mup,
     mup_mrid,
-    registration_slots,
+    plan_registration,
     undeclared_readings,
 )
 from py20305.xml.serialization import to_xml
 
 if TYPE_CHECKING:
     from py20305.client.http import Sep2Client
-    from py20305.connectors.base import BaseConnector, ReadingOverride
+    from py20305.connectors.base import BaseConnector
     from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
     from py20305.history.intervals import IntervalHistory
 
@@ -71,28 +76,27 @@ logger = logging.getLogger(__name__)
 MIN_POST_RATE = 30
 
 
-def _monitoring_payload(
-    snapshot: DeviceSnapshot,
-) -> tuple[dict[str, Any], dict[str, ReadingOverride] | None]:
-    """Rebuild the raw ``fetch_monitoring`` shape the MUP builder expects.
+def _snapshot_readings(snapshot: DeviceSnapshot) -> list[Reading]:
+    """Return the readings in a snapshot, in the order the connector gave them."""
+    return [entry.reading for entry in snapshot.entries.values()]
 
-    ``create_meter_reading_list`` reads per-cycle quality inline as
-    ``"<key>__quality"``, so the store's structured entries are flattened back
-    into that shape here. The bridge disappears when the MUP builder is taught
-    to consume snapshots directly, which belongs with the telemetry split
-    rather than with the store.
-    """
-    values: dict[str, Any] = {}
-    for key, entry in snapshot.entries.items():
-        values[key] = entry.value
-        if entry.protocol_quality is not None:
-            values[f"{key}{QUALITY_SUFFIX}"] = entry.protocol_quality
-    # Passed through whole, including overrides for keys absent from this
-    # cycle: create_mup registers the full ReadingType set and those still
-    # apply. None rather than {} only because that's what the connector
-    # contract yields when it supplies no overrides at all.
-    overrides = snapshot.reading_overrides
-    return values, dict(overrides) if overrides else None
+
+#: Phase codes of a single line; any other phase is a total.
+_PER_LINE_PHASES = frozenset({128, 129, 64, 65, 32, 33})
+
+
+def _total(readings: list[Reading], uom: int) -> float | None:
+    """Return the instantaneous total of ``uom`` (W or var) across the device, if read."""
+    for reading in readings:
+        if (
+            reading.uom == uom
+            and reading.phase not in _PER_LINE_PHASES
+            and reading.kind == 37
+            and reading.data_qualifier == 12
+            and reading.flow_direction in (None, 4)
+        ):
+            return reading.value
+    return None
 
 
 @dataclass
@@ -102,24 +106,21 @@ class DeviceTelemetryState:
     lfdi: str
     mup_posted: bool = False
     mup_href: str | None = None
-    #: mRID slots the last successful MUP POST registered. Kept across a 400/404
-    #: reset so the re-created MUP still registers readings absent that cycle.
-    registered_slots: frozenset[int] = frozenset()
-    #: ACType the last successful MUP POST was built with. The totals' phase
-    #: code derives from it, so a cycle without ACType falls back to it rather
-    #: than re-POSTing with no phase, and a change to it re-POSTs.
-    registered_ac_type: int | None = None
-    #: Slot set and ACType of a re-POST the server refused with a 4xx. Not
-    #: retried until the registration changes again or the process restarts;
-    #: a 5xx or a connection error is retried every cycle.
-    rejected_registration: tuple[frozenset[int], int | None] | None = None
+    #: MirrorMeterReadings the last successful MUP POST registered, by mRID.
+    #: Kept across a 400/404 reset so the re-created MUP still registers
+    #: readings absent that cycle, with the ReadingTypes the server holds.
+    registered: dict[bytes, RegisteredReading] = field(default_factory=dict)
+    #: mRIDs of a re-POST the server refused with a 4xx. Not retried until the
+    #: registration changes again or the process restarts; a 5xx or a
+    #: connection error is retried every cycle.
+    rejected_registration: frozenset[bytes] | None = None
     #: The connector's declared readings the last successful MUP POST was built
     #: from (SIGNED_AS_REPORTED). Readings outside it are not posted, since the
     #: MUP holds no ReadingType for them (Rule h.3).
-    registered_declaration: frozenset[str] | None = None
+    registered_declaration: frozenset[ReadingIdentity] | None = None
     #: Returned-but-undeclared readings last warned about, so the warning is
     #: repeated only when that set changes.
-    warned_undeclared: frozenset[str] = frozenset()
+    warned_undeclared: frozenset[ReadingIdentity] = frozenset()
     post_rate: int = 300
     #: postRate read back from the created MUP (B.17.1). It outranks the
     #: ``post_rate`` a later ``start_metering`` passes in, since the MUP is
@@ -277,6 +278,10 @@ class TelemetryManager:
             connector_resolver, telemetry=device_telemetry
         )
         self._devices: dict[str, DeviceTelemetryState] = {}
+        #: Registrations restored from a checkpoint, by device LFDI, for a device
+        #: that has not been started yet.
+        self._restored: dict[str, dict[bytes, RegisteredReading]] = {}
+        self._on_registration_change: Callable[[], None] | None = None
         self._scheduler = PollScheduler()
         self._intervals = interval_history
         self._site_intervals = site_interval_history
@@ -325,10 +330,9 @@ class TelemetryManager:
             if existing.mup_posted:
                 new_state.mup_posted = existing.mup_posted
                 new_state.mup_href = existing.mup_href
-                new_state.registered_slots = existing.registered_slots
+                new_state.registered = existing.registered
                 new_state.registered_declaration = existing.registered_declaration
                 new_state.warned_undeclared = existing.warned_undeclared
-                new_state.registered_ac_type = existing.registered_ac_type
                 new_state.rejected_registration = existing.rejected_registration
                 if existing.server_post_rate is not None:
                     new_state.server_post_rate = existing.server_post_rate
@@ -349,6 +353,8 @@ class TelemetryManager:
             # and the new state defaults to telemetry_blocked=False.
             new_state.telemetry_blocked = existing.telemetry_blocked
             new_state.blocked_reason = existing.blocked_reason
+        if not new_state.registered and lfdi_norm in self._restored:
+            new_state.registered = dict(self._restored[lfdi_norm])
         self._devices[lfdi_norm] = new_state
         # The planner acquires on this cadence; the metering cycle reads what
         # it stored. Declared as post_rate so a default deployment sees the
@@ -394,7 +400,9 @@ class TelemetryManager:
         """
         values = await getattr(connector, method)()
         if self._telemetry is not None and isinstance(values, dict):
-            self._telemetry.record_read(lfdi, values, connector=connector, lfdi=lfdi)
+            self._telemetry.record_read(
+                lfdi, values, connector=connector, lfdi=lfdi, resource=method.removeprefix("fetch_")
+            )
         return values  # type: ignore[no-any-return]
 
     async def _metering_cycle(self, lfdi: str) -> None:
@@ -446,7 +454,7 @@ class TelemetryManager:
             # First-touch construction can block (Modbus scan + retries);
             # the async resolver path offloads that to a worker thread on
             # the first call and short-circuits on subsequent cycles
-            #. Sync resolvers are still accepted for backward
+            # . Sync resolvers are still accepted for backward
             # compat with embedded callers that wire in a custom callback.
             # Still resolved here for the LogEvent and DERAvailability stages,
             # which read the connector directly.
@@ -481,26 +489,23 @@ class TelemetryManager:
             # staleness marker -- the fabrication that flagging avoids.
             self._report_acquisition_failure(lfdi, connector_name, snapshot.error)
 
-        monitoring, overrides = _monitoring_payload(snapshot)
+        readings = _snapshot_readings(snapshot)
         # The acquisition instant, carried into the server timebase rather
         # than read from it. A second now() call would reintroduce post time.
         acquired_at = int(snapshot.last_success + self._timebase.offset())
         stale = snapshot.quality is not Quality.GOOD
-        self._keep_interval(
-            lfdi, snapshot.last_success + self._timebase.offset(), monitoring, stale
-        )
-        monitoring = self._with_registered_ac_type(state, monitoring)
+        self._keep_interval(lfdi, snapshot.last_success + self._timebase.offset(), readings, stale)
 
         # Stage 1: MUP creation or meter readings
         if not state.mup_posted:
-            await self._post_mup(state, monitoring, overrides, snapshot.declared_readings)
+            await self._post_mup(state, readings, snapshot.declared_readings)
         else:
-            self._warn_undeclared(state, monitoring)
-            if self._registration_grew(state, monitoring):
+            self._warn_undeclared(state, readings)
+            if self._registration_grew(state, readings):
                 # A reading first supplied after the MUP was posted needs its
                 # ReadingType registered before readings for it are posted
                 # (Rule h.2); without it the server answers 400 (Rule h.3).
-                await self._post_mup(state, monitoring, overrides)
+                await self._post_mup(state, readings)
             # Post cadence, not acquisition cadence -- see
             # create_meter_reading_list. The planner may read sooner (a tighter
             # consumer) or much later (a device in backoff); the next POST is
@@ -509,8 +514,7 @@ class TelemetryManager:
             next_update = int(self._timebase.now()) + state.post_rate
             await self._post_readings(
                 state,
-                monitoring,
-                overrides,
+                readings,
                 timestamp=acquired_at,
                 next_update_time=next_update,
                 stale=stale,
@@ -537,9 +541,7 @@ class TelemetryManager:
             return self._site_intervals
         return self._intervals
 
-    def _keep_interval(
-        self, lfdi: str, at: float, monitoring: dict[str, Any], stale: bool
-    ) -> None:
+    def _keep_interval(self, lfdi: str, at: float, readings: list[Reading], stale: bool) -> None:
         """Integrate one reading into the interval history. Never raises.
 
         A stale reading is not integrated: it repeats an old value, and holding
@@ -553,7 +555,7 @@ class TelemetryManager:
             if stale:
                 history.interrupt(lfdi)
             else:
-                history.observe(lfdi, at, monitoring)
+                history.observe(lfdi, at, {"W": _total(readings, 38), "Var": _total(readings, 63)})
         except Exception:
             logger.debug("Interval history failed for %s", lfdi[:8], exc_info=True)
 
@@ -602,33 +604,32 @@ class TelemetryManager:
     async def _post_mup(
         self,
         state: DeviceTelemetryState,
-        monitoring_data: dict[str, Any],
-        overrides: dict[str, ReadingOverride] | None = None,
-        declared: frozenset[str] | None = None,
+        readings: list[Reading],
+        declared: frozenset[ReadingIdentity] | None = None,
     ) -> None:
         """POST MUP to server, track location and server-preferred postRate.
 
         The first POST of a device's MUP posts no readings that cycle; they
-        begin on the next one. A re-POST under SIGNED_LOAD_CONVENTION, made
-        when the registered set grows, is followed by that cycle's readings.
+        begin on the next one. A re-POST, made when the registered set grows,
+        is followed by that cycle's readings.
 
         IEEE B.17.1: The server MAY modify postRate to indicate its preferred
         posting rate. We read back the created MUP to honour the server's rate.
         """
-        slots = registration_slots(
-            monitoring_data,
-            self._reading_profile,
-            state.registered_slots,
-            self._power_direction,
-            declared,
+        plan = plan_registration(
+            state.lfdi,
+            readings,
+            profile=self._reading_profile,
+            power_direction=self._power_direction,
+            registered=state.registered,
+            declared=declared,
         )
         mup = create_mup(
             state.lfdi,
-            monitoring_data,
+            readings,
             state.post_rate,
-            overrides,
             profile=self._reading_profile,
-            registered=state.registered_slots,
+            registered=state.registered,
             power_direction=self._power_direction,
             role=state.role,
             revenue_quality=state.revenue_quality,
@@ -639,11 +640,16 @@ class TelemetryManager:
 
         try:
             location = await self._client.post_bytes(self._mup_list_href_source(), body)
+            first_registration = not state.registered
+            registration_changed = plan.keys() != state.registered.keys()
             state.mup_posted = True
-            state.registered_slots = slots
+            state.registered = plan
             state.registered_declaration = declared
-            state.registered_ac_type = ac_type_of(monitoring_data)
             state.rejected_registration = None
+            if first_registration:
+                self._warn_registered_from_sign(state)
+            if registration_changed:
+                self._registration_changed()
 
             if location:
                 state.mup_href = location
@@ -657,7 +663,7 @@ class TelemetryManager:
                 # refused the new registration, not the device -- a 403 too,
                 # which here is not the Rule e block below -- so the registered
                 # readings keep posting and this registration is not retried.
-                state.rejected_registration = (slots, ac_type_of(monitoring_data))
+                state.rejected_registration = frozenset(plan)
             elif e.status_code == 403:
                 # IEEE 2030.5-2023 §10.11.3 Rule e + a.4: the body's mRID
                 # already exists on the server and is owned by a different
@@ -733,29 +739,165 @@ class TelemetryManager:
                 exc_info=True,
             )
 
-    def _registration_grew(
-        self, state: DeviceTelemetryState, monitoring_data: dict[str, Any]
-    ) -> bool:
-        """Whether the posted MUP no longer describes this cycle's readings.
+    def _warn_registered_from_sign(self, state: DeviceTelemetryState) -> None:
+        """Warn once when the default profile registered from the current sign.
 
-        True when the cycle supplies a reading the MUP did not register, or
-        reports a different ACType, which changes the totals' phase code. Only
-        SIGNED_LOAD_CONVENTION registers readings as they appear. DEFAULT
-        registers its set once, as it always has.
+        The flowDirection of a power reading comes from the sign of its value
+        under the default profile. With no saved registration to repeat, a
+        device that registered earlier with another sign now registers with this
+        one, and IEEE 2030.5-2023 section 10.10.3 rule n) forbids the server's
+        ReadingType from changing.
         """
-        if self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION:
-            return False
-        ac_type = ac_type_of(monitoring_data)
-        slots = registration_slots(
-            monitoring_data, self._reading_profile, state.registered_slots, self._power_direction
-        )
-        if (slots, ac_type) == state.rejected_registration:
-            return False
-        return ac_type != state.registered_ac_type or slots != state.registered_slots
+        if (
+            self._reading_profile is ReadingProfile.DEFAULT
+            and self._power_direction is PowerDirection.DEFAULT
+            and state.lfdi not in self._restored
+        ):
+            logger.warning(
+                "No saved registration for %s: its ReadingTypes are registered from the "
+                "current sign of each value and may differ from an earlier registration. "
+                "Set telemetry.state_file to keep registrations across restarts.",
+                state.lfdi[:8],
+            )
 
-    def _warn_undeclared(
-        self, state: DeviceTelemetryState, monitoring_data: dict[str, Any]
-    ) -> None:
+    def set_on_registration_change(self, callback: Callable[[], None] | None) -> None:
+        """Call ``callback`` after a MUP POST registered a different set of readings.
+
+        Use it to store :meth:`to_checkpoint`. An exception the callback raises
+        is logged and does not stop the metering cycle.
+        """
+        self._on_registration_change = callback
+
+    def _registration_changed(self) -> None:
+        if self._on_registration_change is None:
+            return
+        try:
+            self._on_registration_change()
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("the registration checkpoint callback failed")
+
+    def to_checkpoint(self) -> dict[str, Any]:
+        """Return the registered readings of every device as JSON-safe data.
+
+        Store it and hand it to :meth:`restore_from_checkpoint` after a restart,
+        so the readings register again with the ReadingTypes the server holds.
+        """
+        devices: dict[str, dict[bytes, RegisteredReading]] = {
+            lfdi: dict(registered) for lfdi, registered in self._restored.items()
+        }
+        for lfdi, state in self._devices.items():
+            if state.registered:
+                devices[lfdi] = dict(state.registered)
+        return {
+            "version": CHECKPOINT_VERSION,
+            "reading_profile": self._reading_profile.value,
+            "power_direction": self._power_direction.value,
+            "devices": [
+                {
+                    "lfdi": lfdi,
+                    "mup_mrid": mup_mrid(lfdi).hex(),
+                    "readings": [reading_to_dict(r) for r in registered.values()],
+                }
+                for lfdi, registered in sorted(devices.items())
+                if registered
+            ],
+        }
+
+    def restore_from_checkpoint(self, data: Any) -> int:
+        """Load registrations from :meth:`to_checkpoint` data; return how many devices.
+
+        Anything that cannot be used is ignored with a warning: data of another
+        version or shape, a checkpoint written under another reading profile or
+        power direction, and any device or reading that does not parse. A device
+        already started with registrations of its own keeps them.
+        """
+        if not isinstance(data, dict) or data.get("version") != CHECKPOINT_VERSION:
+            logger.warning(
+                "Ignoring the telemetry checkpoint: it is not version %d data", CHECKPOINT_VERSION
+            )
+            return 0
+        if (
+            data.get("reading_profile") != self._reading_profile.value
+            or data.get("power_direction") != self._power_direction.value
+        ):
+            logger.warning(
+                "Ignoring the telemetry checkpoint: it was written under reading_profile "
+                "%r and power_direction %r, not %r and %r",
+                data.get("reading_profile"),
+                data.get("power_direction"),
+                self._reading_profile.value,
+                self._power_direction.value,
+            )
+            return 0
+        entries = data.get("devices")
+        if not isinstance(entries, list):
+            logger.warning("Ignoring the telemetry checkpoint: devices is not a list")
+            return 0
+        restored = 0
+        for entry in entries:
+            try:
+                lfdi, registered = self._parse_device(entry)
+            except ValueError as exc:
+                logger.warning("Ignoring a device in the telemetry checkpoint: %s", exc)
+                continue
+            self._restored[lfdi] = registered
+            state = self._devices.get(lfdi)
+            if state is not None and not state.registered:
+                state.registered = dict(registered)
+            restored += 1
+        return restored
+
+    @staticmethod
+    def _parse_device(entry: Any) -> tuple[str, dict[bytes, RegisteredReading]]:
+        if not isinstance(entry, dict):
+            raise ValueError("a device entry must be an object")
+        lfdi = entry.get("lfdi")
+        if not isinstance(lfdi, str) or len(lfdi) != 40:
+            raise ValueError("lfdi must be 40 hex characters")
+        try:
+            lfdi = lfdi.lower()
+            expected = mup_mrid(lfdi).hex()
+        except ValueError as exc:
+            raise ValueError("lfdi must be 40 hex characters") from exc
+        if entry.get("mup_mrid") != expected:
+            raise ValueError(f"the MirrorUsagePoint mRID does not belong to {lfdi[:8]}")
+        readings = entry.get("readings")
+        if not isinstance(readings, list):
+            raise ValueError("readings must be a list")
+        registered: dict[bytes, RegisteredReading] = {}
+        for item in readings:
+            try:
+                reading = reading_from_dict(item)
+            except ValueError as exc:
+                logger.warning(
+                    "Ignoring a reading of %s in the telemetry checkpoint: %s", lfdi[:8], exc
+                )
+                continue
+            registered[reading.mrid] = reading
+        if not registered:
+            raise ValueError(f"no usable readings for {lfdi[:8]}")
+        return lfdi, registered
+
+    def _registration_grew(self, state: DeviceTelemetryState, readings: list[Reading]) -> bool:
+        """Return whether this cycle supplies a reading the posted MUP did not register.
+
+        A re-POST repeats every registered ReadingType unchanged (see
+        :func:`~py20305.telemetry.mup.plan_registration`), so it never changes
+        a ReadingType the server holds (Rule n).
+        """
+        plan = plan_registration(
+            state.lfdi,
+            readings,
+            profile=self._reading_profile,
+            power_direction=self._power_direction,
+            registered=state.registered,
+            declared=state.registered_declaration,
+        )
+        if frozenset(plan) == state.rejected_registration:
+            return False
+        return plan.keys() != state.registered.keys()
+
+    def _warn_undeclared(self, state: DeviceTelemetryState, readings: list[Reading]) -> None:
         """Warn when the connector returns readings it did not declare.
 
         They are not posted -- the MUP holds no ReadingType for them -- which a
@@ -765,32 +907,15 @@ class TelemetryManager:
         declared = state.registered_declaration
         if self._reading_profile is not ReadingProfile.SIGNED_AS_REPORTED or declared is None:
             return
-        undeclared = undeclared_readings(monitoring_data, declared)
+        undeclared = undeclared_readings(readings, declared)
         if undeclared and undeclared != state.warned_undeclared:
             logger.warning(
                 "Readings %s for %s are not declared by its connector and are not posted; "
                 "add them to declared_readings() to register them",
-                ", ".join(sorted(undeclared)),
+                ", ".join(sorted(repr(identity) for identity in undeclared)),
                 state.lfdi[:8],
             )
         state.warned_undeclared = undeclared
-
-    def _with_registered_ac_type(
-        self, state: DeviceTelemetryState, monitoring_data: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Fill a missing ACType from the one the MUP was registered with.
-
-        Under SIGNED_LOAD_CONVENTION the totals' phase code and the per-line
-        block both derive from ACType, so a cycle that omits it must not
-        re-POST the MUP as if the device had none.
-        """
-        if (
-            self._reading_profile is not ReadingProfile.SIGNED_LOAD_CONVENTION
-            or state.registered_ac_type is None
-            or ac_type_of(monitoring_data) is not None
-        ):
-            return monitoring_data
-        return {**monitoring_data, "ACType": state.registered_ac_type}
 
     async def _readback_post_rate(
         self,
@@ -841,8 +966,7 @@ class TelemetryManager:
     async def _post_readings(
         self,
         state: DeviceTelemetryState,
-        monitoring_data: dict[str, Any],
-        overrides: dict[str, ReadingOverride] | None = None,
+        readings: list[Reading],
         *,
         timestamp: int | None = None,
         next_update_time: int | None = None,
@@ -862,30 +986,28 @@ class TelemetryManager:
             logger.warning("No MUP href for %s, cannot post readings", state.lfdi[:8])
             return
 
-        readings = create_meter_reading_list(
+        reading_list = create_meter_reading_list(
             state.lfdi,
-            monitoring_data,
+            readings,
             timestamp=int(self._timebase.now()) if timestamp is None else timestamp,
-            overrides=overrides,
             post_rate=state.post_rate,
             next_update_time=next_update_time,
             stale=stale,
             profile=self._reading_profile,
-            registered=state.registered_slots,
+            registered=state.registered,
             power_direction=self._power_direction,
             role=state.role,
             declared=state.registered_declaration,
         )
-        if (
-            self._reading_profile is ReadingProfile.SIGNED_AS_REPORTED
-            and not readings.mirror_meter_reading
+        if self._reading_profile is ReadingProfile.SIGNED_AS_REPORTED and not (
+            reading_list.mirror_meter_reading
         ):
             # A device with nothing to report this cycle (an EV charger with no
             # vehicle plugged in, say) sends nothing rather than an empty list
             # (CSIP G27: data a DER cannot provide SHALL not be sent).
             logger.debug("No readings for %s this cycle, skipping POST", state.lfdi[:8])
             return
-        body = to_xml(readings, server_2018_compat=self._client.server_2018_compat)
+        body = to_xml(reading_list, server_2018_compat=self._client.server_2018_compat)
 
         try:
             await self._client.post_bytes(state.mup_href, body)

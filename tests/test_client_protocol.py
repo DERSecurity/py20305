@@ -357,7 +357,7 @@ class TestLfdiRequestHeader:
         NOT sent unless the operator opts in. IEEE 2030.5 §6.11.7.2 expects
         servers to derive LFDI from the cert."""
         client = self._client_with_cert(tmp_path, lfdi_test_client_cert_pem)
-        # LFDI is still computed (forwarder attribution still wants it)
+        # LFDI is still computed (exchange records carry it)
         # but it must NOT be on the wire.
         assert client._client_lfdi is not None
         assert "LFDI" not in client._default_headers()
@@ -434,7 +434,7 @@ class TestLfdiRequestHeader:
         observable behavior as the default; this test guards against a
         future default flip silently changing the explicit-False case."""
         client = self._client_with_cert(tmp_path, lfdi_test_client_cert_pem, send_lfdi_header=False)
-        # LFDI is still computed (forwarder attribution still wants it) but
+        # LFDI is still computed (exchange records carry it) but
         # it must NOT be on the wire.
         assert client._client_lfdi is not None
         assert "LFDI" not in client._default_headers()
@@ -486,12 +486,12 @@ class TestLfdiRequestHeader:
         finally:
             await new_session.close()
 
-    def test_disabled_header_does_not_disable_forwarder_attribution(
+    def test_disabled_header_still_computes_the_client_lfdi(
         self, tmp_path: Path, lfdi_test_client_cert_pem: str
     ):
         """`send_lfdi_header=False` is about the *wire* header, not LFDI
-        computation. The forwarder still relies on `_client_lfdi` for
-        message attribution -- it must remain populated even when the
+        computation. Exchange records carry `_client_lfdi` as
+        `client_lfdi`, so it must remain populated even when the
         header is off (which, post-flip, is the default)."""
         client = self._client_with_cert(tmp_path, lfdi_test_client_cert_pem, send_lfdi_header=False)
         assert client._client_lfdi is not None

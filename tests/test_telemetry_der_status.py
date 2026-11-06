@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from xml.etree.ElementTree import fromstring
 
+import pytest
+
 from py20305.models.sep.sep import (
     ConnectStatusType,
     ConnectStatusType2,
@@ -81,18 +83,59 @@ class TestBuildDerStatus:
         # When connectStatus is present, gen_connect_status should be None
         assert model.gen_connect_status is None
 
-    def test_gen_connect_status_fallback(self) -> None:
-        """genConnectStatus populates both connect_status and gen_connect_status."""
+    def test_2023_server_gets_no_connect_status_when_only_a_2018_bitmap_is_supplied(self) -> None:
         model = build_der_status(
-            {"readingTime": 0, "genConnectStatus": {"dateTime": 100, "value": 1}}
+            {
+                "readingTime": 0,
+                "genConnectStatus": {"dateTime": 100, "value": 0b101},
+                "storConnectStatus": {"dateTime": 100, "value": 0b101},
+            }
         )
-        # Backward compat: gen_connect_status still populated
+        assert model.connect_status is None
+        assert model.gen_connect_status is None
+        assert model.stor_connect_status is None
+
+    def test_2018_server_gets_no_gen_connect_status_when_only_connect_status_is_supplied(
+        self,
+    ) -> None:
+        model = build_der_status(
+            {"readingTime": 0, "connectStatus": {"dateTime": 100, "value": 0b11}},
+            server_2018_compat=True,
+        )
+        assert model.gen_connect_status is None
+        assert model.stor_connect_status is None
+        assert model.connect_status is None
+
+    def test_2018_server_gets_gen_connect_status_and_no_connect_status(self) -> None:
+        model = build_der_status(
+            {"readingTime": 0, "genConnectStatus": {"dateTime": 100, "value": 0b10111}},
+            server_2018_compat=True,
+        )
+        assert model.connect_status is None
         assert isinstance(model.gen_connect_status, ConnectStatusType)
-        assert model.gen_connect_status.date_time.value == 100
-        assert model.gen_connect_status.value == b"\x01"
-        # Also populates connect_status from the fallback
-        assert isinstance(model.connect_status, ConnectStatusType2)
-        assert model.connect_status.value == b"\x01"
+        assert model.gen_connect_status.value == bytes([0b10111])
+
+    def test_2018_server_receives_the_2018_bitmap_when_both_are_supplied(self) -> None:
+        """ConnectStatusType (2018) and ConnectStatusType2 (2023) define
+        different bits above bit 0, so each edition gets its own bitmap."""
+        data = {
+            "readingTime": 0,
+            "connectStatus": {"dateTime": 100, "value": 0b11},
+            "genConnectStatus": {"dateTime": 100, "value": 0b10111},
+        }
+        model = build_der_status(data, server_2018_compat=True)
+        assert model.connect_status is None
+        assert model.gen_connect_status.value == bytes([0b10111])
+
+    def test_2023_server_receives_the_2023_bitmap_when_both_are_supplied(self) -> None:
+        data = {
+            "readingTime": 0,
+            "connectStatus": {"dateTime": 100, "value": 0b11},
+            "genConnectStatus": {"dateTime": 100, "value": 0b10111},
+        }
+        model = build_der_status(data)
+        assert model.connect_status.value == bytes([0b11])
+        assert model.gen_connect_status is None
 
     def test_inverter_status(self) -> None:
         model = build_der_status(
@@ -157,12 +200,25 @@ class TestBuildDerStatus:
         assert isinstance(model.storage_mode_status, StorageModeStatusType)
         assert model.storage_mode_status.value == 2
 
-    def test_stor_connect_status(self) -> None:
+    def test_stor_connect_status_goes_to_a_2018_server(self) -> None:
         model = build_der_status(
-            {"readingTime": 0, "storConnectStatus": {"dateTime": 700, "value": 1}}
+            {"readingTime": 0, "storConnectStatus": {"dateTime": 700, "value": 1}},
+            server_2018_compat=True,
         )
         assert isinstance(model.stor_connect_status, ConnectStatusType)
-        assert model.stor_connect_status.value == b"\x01"
+        assert model.stor_connect_status.value == b""
+        assert model.connect_status is None
+
+    def test_2023_server_never_gets_stor_connect_status(self) -> None:
+        model = build_der_status(
+            {
+                "readingTime": 0,
+                "connectStatus": {"dateTime": 700, "value": 0b11},
+                "storConnectStatus": {"dateTime": 700, "value": 0b101},
+            }
+        )
+        assert model.stor_connect_status is None
+        assert model.connect_status.value == bytes([0b11])
 
     def test_gen_connect_none_value_omitted(self) -> None:
         model = build_der_status(
@@ -281,3 +337,120 @@ def test_connector_timestamps_win_over_default_time():
     assert model.reading_time.value == 555
     assert model.connect_status is not None
     assert model.connect_status.date_time.value == 556
+
+
+class TestIeee2030_5Values:
+    """Values outside their IEEE 2030.5 type are left out, not sent.
+
+    Ranges from the IEEE 2030.5 schemas: InverterStatusType 0 to 10,
+    OperationalModeStatusType 0 to 3, LocalControlModeStatusType 0 to 1,
+    StorageModeStatusType 0 to 2, stateOfChargeStatus 0 to 10000;
+    ConnectStatusType2 bits 0 to 1, ConnectStatusType bits 0 to 4, alarmStatus
+    bits 0 to 10.
+    """
+
+    @staticmethod
+    def _stamped(value: int) -> dict[str, int]:
+        return {"dateTime": 100, "value": value}
+
+    @pytest.mark.parametrize(
+        ("field", "attr", "highest"),
+        [
+            ("inverterStatus", "inverter_status", 10),
+            ("operationalModeStatus", "operational_mode_status", 3),
+            ("localControlModeStatus", "local_control_mode_status", 1),
+            ("storageModeStatus", "storage_mode_status", 2),
+        ],
+    )
+    def test_enumerations_accept_their_range_and_leave_out_the_rest(
+        self, field: str, attr: str, highest: int
+    ) -> None:
+        for value in (0, highest):
+            model = build_der_status({"readingTime": 0, field: self._stamped(value)})
+            assert getattr(model, attr).value == value
+        for value in (highest + 1, -1):
+            model = build_der_status({"readingTime": 0, field: self._stamped(value)})
+            assert getattr(model, attr) is None
+
+    def test_state_of_charge_is_hundredths_of_a_percent(self) -> None:
+        model = build_der_status({"readingTime": 0, "stateOfChargeStatus": self._stamped(10000)})
+        assert model.state_of_charge_status.value.value == 10000
+        model = build_der_status({"readingTime": 0, "stateOfChargeStatus": self._stamped(10001)})
+        assert model.state_of_charge_status is None
+
+    def test_connect_bitmaps_with_reserved_bits_are_left_out(self) -> None:
+        model = build_der_status({"readingTime": 0, "connectStatus": self._stamped(0b100)})
+        assert model.connect_status is None
+        model = build_der_status(
+            {"readingTime": 0, "genConnectStatus": self._stamped(0b100000)},
+            server_2018_compat=True,
+        )
+        assert model.gen_connect_status is None
+        model = build_der_status(
+            {"readingTime": 0, "genConnectStatus": self._stamped(0b10111)},
+            server_2018_compat=True,
+        )
+        assert model.gen_connect_status.value == bytes([0b10111])
+
+    def test_alarm_status_with_reserved_bits_is_left_out(self) -> None:
+        model = build_der_status({"readingTime": 0, "alarmStatus": 1 << 11})
+        assert model.alarm_status is None
+        # A rejected bitmap must not become an explicit clear.
+        model = build_der_status(
+            {"readingTime": 0, "alarmStatus": (1 << 11) | 1}, always_send_alarm_status=True
+        )
+        assert model.alarm_status is None
+        model = build_der_status({"readingTime": 0, "alarmStatus": (1 << 10) | 1})
+        assert model.alarm_status == ((1 << 10) | 1).to_bytes(4, "big")
+
+    def test_2023_payload_has_no_deprecated_connect_fields_and_validates(self) -> None:
+        now = 1700000000
+        model = build_der_status(
+            {
+                "readingTime": now,
+                "connectStatus": self._stamped(0b11),
+                "genConnectStatus": self._stamped(0b00101),
+                "storConnectStatus": self._stamped(0b00001),
+            }
+        )
+        xml = to_xml(model)
+        root = fromstring(xml.decode("utf-8"))
+        assert root.find(f"{{{NS}}}genConnectStatus") is None
+        assert root.find(f"{{{NS}}}storConnectStatus") is None
+        assert root.find(f"{{{NS}}}connectStatus") is not None
+        assert validate_xml(xml) == []
+        assert root.get("schemaVer") == "2.2"
+
+    def test_2018_payload_has_the_2018_fields_and_no_connect_status(self) -> None:
+        now = 1700000000
+        model = build_der_status(
+            {
+                "readingTime": now,
+                "connectStatus": self._stamped(0b11),
+                "genConnectStatus": self._stamped(0b00101),
+                "storConnectStatus": self._stamped(0b00001),
+            },
+            server_2018_compat=True,
+        )
+        root = fromstring(to_xml(model, server_2018_compat=True).decode("utf-8"))
+        assert root.find(f"{{{NS}}}genConnectStatus") is not None
+        assert root.find(f"{{{NS}}}storConnectStatus") is not None
+        assert root.find(f"{{{NS}}}connectStatus") is None
+        assert root.get("schemaVer") is None
+
+    def test_sunspec_status_gives_each_edition_its_own_bitmap(self) -> None:
+        from py20305.connectors.sunspec._ieee2030_5 import status
+
+        raw = {
+            "inverterStatus": {"dateTime": 100, "value": 4},
+            "connectStatus": {"dateTime": 100, "value": 1},
+        }
+        supplied = status(raw)
+
+        new = build_der_status(supplied)
+        old = build_der_status(supplied, server_2018_compat=True)
+
+        assert new.connect_status is not None
+        assert new.gen_connect_status is None
+        assert old.gen_connect_status is not None
+        assert old.connect_status is None

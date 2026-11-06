@@ -1,7 +1,8 @@
 """Connector system for DER device communication.
 
-Provides the BaseConnector interface, control mode translation,
-connector registry, and concrete implementations.
+Provides the BaseConnector interface, control mode translation, the
+connector registry and the dispatcher. Connectors that drive a device's own
+protocol belong to the application; the package ships only the print connector.
 """
 
 from py20305.connectors.base import (
@@ -19,7 +20,6 @@ from py20305.connectors.registry import (
     ConnectorRegistryError,
     LazyConnectorProxy,
 )
-from py20305.connectors.translation import translate_to_sunspec
 
 __all__ = [
     "BaseConnector",
@@ -33,5 +33,4 @@ __all__ = [
     "ConnectorValueError",
     "ConnectorWriteError",
     "LazyConnectorProxy",
-    "translate_to_sunspec",
 ]

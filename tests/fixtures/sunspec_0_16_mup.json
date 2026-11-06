@@ -1,0 +1,536 @@
+{
+  "default": {
+    "Apparent Power": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "4608247263446ABABABABABA0000D17E",
+      "multiplier": 0,
+      "phase": null,
+      "uom": 61
+    },
+    "Apparent Power L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634414ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 128,
+      "uom": 61
+    },
+    "Apparent Power L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634420ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 64,
+      "uom": 61
+    },
+    "Apparent Power L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634426ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 32,
+      "uom": 61
+    },
+    "Current": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "4608247263447ABABABABABA0000D17E",
+      "multiplier": -1,
+      "phase": null,
+      "uom": 5
+    },
+    "Current L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634415ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 128,
+      "uom": 5
+    },
+    "Current L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634421ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 64,
+      "uom": 5
+    },
+    "Current L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634427ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 32,
+      "uom": 5
+    },
+    "Frequency": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "4608247263443ABABABABABA0000D17E",
+      "multiplier": -3,
+      "phase": null,
+      "uom": 33
+    },
+    "Power Factor": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 0,
+      "mRID": "4608247263445ABABABABABA0000D17E",
+      "multiplier": -3,
+      "phase": null,
+      "uom": 65
+    },
+    "Power Factor L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 0,
+      "mRID": "46082472634413ABABABABAB0000D17E",
+      "multiplier": -3,
+      "phase": 128,
+      "uom": 65
+    },
+    "Power Factor L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 0,
+      "mRID": "46082472634419ABABABABAB0000D17E",
+      "multiplier": -3,
+      "phase": 64,
+      "uom": 65
+    },
+    "Power Factor L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 0,
+      "mRID": "46082472634425ABABABABAB0000D17E",
+      "multiplier": -3,
+      "phase": 32,
+      "uom": 65
+    },
+    "Reactive Power": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "4608247263442ABABABABABA0000D17E",
+      "multiplier": 0,
+      "phase": null,
+      "uom": 63
+    },
+    "Reactive Power L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634411ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 128,
+      "uom": 63
+    },
+    "Reactive Power L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634417ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 64,
+      "uom": 63
+    },
+    "Reactive Power L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634423ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 32,
+      "uom": 63
+    },
+    "Real Power": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "4608247263441ABABABABABA0000D17E",
+      "multiplier": 0,
+      "phase": null,
+      "uom": 38
+    },
+    "Real Power L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634410ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 128,
+      "uom": 38
+    },
+    "Real Power L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634416ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 64,
+      "uom": 38
+    },
+    "Real Power L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 12,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634422ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 32,
+      "uom": 38
+    },
+    "Voltage": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 2,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "4608247263444ABABABABABA0000D17E",
+      "multiplier": -1,
+      "phase": null,
+      "uom": 29
+    },
+    "Voltage L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 2,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634412ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 129,
+      "uom": 29
+    },
+    "Voltage L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 2,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634418ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 65,
+      "uom": 29
+    },
+    "Voltage L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 2,
+      "flow_direction": 1,
+      "kind": 37,
+      "mRID": "46082472634424ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 33,
+      "uom": 29
+    }
+  },
+  "signed_load_convention": {
+    "Apparent Power": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "4608247263446ABABABABABA0000D17E",
+      "multiplier": 0,
+      "phase": 224,
+      "uom": 61
+    },
+    "Apparent Power L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634414ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 128,
+      "uom": 61
+    },
+    "Apparent Power L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634420ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 64,
+      "uom": 61
+    },
+    "Apparent Power L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634426ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 32,
+      "uom": 61
+    },
+    "Current": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "4608247263447ABABABABABA0000D17E",
+      "multiplier": 0,
+      "phase": 224,
+      "uom": 5
+    },
+    "Current L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634415ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 128,
+      "uom": 5
+    },
+    "Current L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634421ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 64,
+      "uom": 5
+    },
+    "Current L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634427ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 32,
+      "uom": 5
+    },
+    "Frequency": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "4608247263443ABABABABABA0000D17E",
+      "multiplier": -3,
+      "phase": null,
+      "uom": 33
+    },
+    "Power Factor": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "4608247263445ABABABABABA0000D17E",
+      "multiplier": -3,
+      "phase": null,
+      "uom": 65
+    },
+    "Power Factor L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634413ABABABABAB0000D17E",
+      "multiplier": -3,
+      "phase": 128,
+      "uom": 65
+    },
+    "Power Factor L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634419ABABABABAB0000D17E",
+      "multiplier": -3,
+      "phase": 64,
+      "uom": 65
+    },
+    "Power Factor L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634425ABABABABAB0000D17E",
+      "multiplier": -3,
+      "phase": 32,
+      "uom": 65
+    },
+    "Reactive Power": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "4608247263442ABABABABABA0000D17E",
+      "multiplier": 0,
+      "phase": 224,
+      "uom": 63
+    },
+    "Reactive Power L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634411ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 128,
+      "uom": 63
+    },
+    "Reactive Power L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634417ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 64,
+      "uom": 63
+    },
+    "Reactive Power L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634423ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 32,
+      "uom": 63
+    },
+    "Real Power": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "4608247263441ABABABABABA0000D17E",
+      "multiplier": 0,
+      "phase": 224,
+      "uom": 38
+    },
+    "Real Power L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634410ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 128,
+      "uom": 38
+    },
+    "Real Power L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634416ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 64,
+      "uom": 38
+    },
+    "Real Power L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634422ABABABABAB0000D17E",
+      "multiplier": 0,
+      "phase": 32,
+      "uom": 38
+    },
+    "Voltage": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "4608247263444ABABABABABA0000D17E",
+      "multiplier": -1,
+      "phase": null,
+      "uom": 29
+    },
+    "Voltage L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634412ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 129,
+      "uom": 29
+    },
+    "Voltage L1-L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634428ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 132,
+      "uom": 29
+    },
+    "Voltage L2": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634418ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 65,
+      "uom": 29
+    },
+    "Voltage L2-L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634429ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 66,
+      "uom": 29
+    },
+    "Voltage L3": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634424ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 33,
+      "uom": 29
+    },
+    "Voltage L3-L1": {
+      "accumulation_behaviour": 12,
+      "data_qualifier": 0,
+      "flow_direction": 0,
+      "kind": 0,
+      "mRID": "46082472634430ABABABABAB0000D17E",
+      "multiplier": -1,
+      "phase": 40,
+      "uom": 29
+    }
+  }
+}

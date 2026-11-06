@@ -20,6 +20,7 @@ from py20305.xml.serialization import (
     validate_xml,
 )
 from tests.conftest import make_time
+from tests.legacy_readings import readings_from
 
 
 def test_application_sep_xml_constant():
@@ -145,7 +146,7 @@ def test_to_xml_2018_compat_omits_subscribable():
 
     mup = create_mup(
         "a" * 40,
-        {"W": 1000, "Var": 0, "Hz": 60, "V": 240, "PF": 1, "VA": 1000, "A": 4},
+        readings_from({"W": 1000, "Var": 0, "Hz": 60, "V": 240, "PF": 1, "VA": 1000, "A": 4}),
         300,
     )
     xml_bytes = to_xml(mup, server_2018_compat=True)
@@ -162,7 +163,7 @@ def test_to_xml_includes_subscribable_by_default():
 
     mup = create_mup(
         "a" * 40,
-        {"W": 1000, "Var": 0, "Hz": 60, "V": 240, "PF": 1, "VA": 1000, "A": 4},
+        readings_from({"W": 1000, "Var": 0, "Hz": 60, "V": 240, "PF": 1, "VA": 1000, "A": 4}),
         300,
     )
     xml_bytes = to_xml(mup)
@@ -303,7 +304,7 @@ def test_time_tariff_interval_without_rate_component_link_still_parses():
 
 
 def _doe_modes_supported_capability() -> Dercapability:
-    return build_der_capability({"WMaxRtg": 5000}, csip_aus_mode=True)
+    return build_der_capability({"rtgMaxW": 5000}, csip_aus_mode=True)
 
 
 def test_to_xml_writes_csipaus_extensions_in_the_given_namespace():

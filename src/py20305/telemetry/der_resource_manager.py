@@ -154,7 +154,9 @@ class DerResourceManager:
         """
         values = await getattr(connector, method)()
         if self._telemetry is not None and isinstance(values, dict):
-            self._telemetry.record_read(lfdi, values, connector=connector, lfdi=lfdi)
+            self._telemetry.record_read(
+                lfdi, values, connector=connector, lfdi=lfdi, resource=method.removeprefix("fetch_")
+            )
         return values  # type: ignore[no-any-return]
 
     def start_device(
@@ -224,8 +226,8 @@ class DerResourceManager:
     async def _resolve_connector_async(self, lfdi: str) -> BaseConnector:
         """Resolve connector via the injected resolver.
 
-        First-touch construction of a SunSpec connector runs a synchronous
-        Modbus scan; an async resolver offloads that to a worker thread.
+        First-touch construction of a connector may run a synchronous device
+        scan; an async resolver offloads that to a worker thread.
         Cache hits return without yielding the loop, so this stays cheap
         on every cycle after the first per-device call.
 
@@ -340,7 +342,7 @@ class DerResourceManager:
                 )
             except ValueError as e:
                 # The connector returned configuration missing a required field
-                # (WMax / setMaxW is mandatory in the IEEE 2030.5 DERSettings
+                # (setMaxW is mandatory in the IEEE 2030.5 DERSettings
                 # schema). This is a connector-contract problem, not an
                 # unexpected crash -- report it as an actionable, deduplicated
                 # warning instead of letting it fall through to the generic
@@ -350,7 +352,7 @@ class DerResourceManager:
                 report(
                     "warnings",
                     f"DERSettings PUT skipped for {lfdi[:8]}: {e}. The connector's "
-                    "fetch_configuration() must return a non-null WMax (nameplate "
+                    "fetch_configuration() must return a non-null setMaxW (maximum "
                     "active power in watts); DERSettings cannot be built without it.",
                     source="der_resource",
                     dedup_key=f"der_put:{lfdi}:settings_config",

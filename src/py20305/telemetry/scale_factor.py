@@ -16,6 +16,7 @@ from py20305.models.sep.sep import (
     ActivePower,
     AmpereHour,
     ApparentPower,
+    CurrentRms,
     PowerFactor,
     PowerOfTenMultiplierType,
     ReactivePower,
@@ -123,7 +124,7 @@ def _convert_dict_sf(
         return None
 
     # PowerOfTenMultiplierType is xs:byte (-128..127).  Values outside
-    # this range indicate garbage data (e.g. misaligned SunSpec registers).
+    # this range indicate garbage data (e.g. misaligned device registers).
     if mult < -128 or mult > 127:
         logger.warning("Multiplier %d out of range (-128..127), omitting field", mult)
         return None
@@ -180,6 +181,14 @@ def to_amp_hour(value: Any) -> AmpereHour | None:
     if sf is None:
         return None
     return AmpereHour(multiplier=_multiplier(sf["multiplier"]), value=sf["value"])
+
+
+def to_current_rms(value: Any) -> CurrentRms | None:
+    """Convert a connector value to a ``CurrentRms`` model, or *None*."""
+    sf = get_sf(value)
+    if sf is None:
+        return None
+    return CurrentRms(multiplier=_multiplier(sf["multiplier"]), value=sf["value"])
 
 
 def to_reactive_power(value: Any) -> ReactivePower | None:

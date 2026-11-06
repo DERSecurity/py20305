@@ -1,7 +1,8 @@
 """Measurement vocabulary, and the source interface that supplies it.
 
 One acquisition of a device's monitoring data becomes one :class:`DeviceSnapshot`
-holding a :class:`PointEntry` per monitoring key. Entries are immutable: an
+holding a :class:`PointEntry` per reading, keyed by
+:func:`~py20305.connectors.reading.reading_key`. Entries are immutable: an
 acquisition replaces a device's snapshot rather than mutating it, so a reader
 that holds a snapshot always sees a coherent set of points from a single device
 read.
@@ -25,73 +26,71 @@ from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from py20305.connectors.base import BaseConnector, ReadingOverride
+from py20305.connectors.base import BaseConnector
+from py20305.connectors.reading import (
+    Reading,
+    ReadingIdentity,
+    effective_multiplier,
+    is_valid_reading,
+    reading_identity,
+    reading_key,
+)
 
 if TYPE_CHECKING:
     from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
 
-#: Suffix a connector uses to report a per-quantity protocol quality value
-#: inline with the value itself, as ``"<key>__quality"``. Part of the connector
-#: contract rather than of any store, so it travels with the vocabulary.
-QUALITY_SUFFIX = "__quality"
 
+def index_readings(readings: object) -> dict[str, Reading]:
+    """Return a connector's readings keyed by :func:`reading_key`.
 
-def split_quality(values: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
-    """Separate measured keys from their ``"<key>__quality"`` companions.
-
-    Lives with the vocabulary rather than with any store because it encodes the
-    connector convention itself, and every path that turns a raw
-    ``fetch_monitoring`` response into entries has to apply it identically. A
-    second copy would drift.
+    A connector is third-party code and may return anything. A value that is not
+    a list or tuple raises ``TypeError``; an entry that is not a valid
+    :class:`Reading`, or repeats an earlier reading's identity, is dropped with
+    a warning (see :func:`~py20305.telemetry.mup.valid_readings`). Identity
+    includes the multiplier, so two readings that differ only in multiplier are
+    both kept: the second is keyed by its ``reading_key`` plus ``:m<multiplier>``.
+    Every path that turns a ``fetch_monitoring`` response into entries applies
+    this, so the snapshots agree.
     """
-    measured: dict[str, Any] = {}
-    quality: dict[str, int] = {}
-    for key, value in values.items():
-        if key.endswith(QUALITY_SUFFIX):
-            base = key[: -len(QUALITY_SUFFIX)]
-            # A non-int here would be a connector bug. Drop it rather than
-            # carrying it: the MUP path validates qualityFlags again and would
-            # log the same complaint once per cycle forever. bool is excluded
-            # explicitly -- it is an int subclass, and True would post as 1.
-            if isinstance(value, int) and not isinstance(value, bool):
-                quality[base] = value
-        else:
-            measured[key] = value
-    return measured, quality
+    if not isinstance(readings, list | tuple):
+        raise TypeError(
+            f"fetch_monitoring returned {type(readings).__name__}, expected a list of Reading"
+        )
+    from py20305.telemetry.mup import valid_readings
+
+    indexed: dict[str, Reading] = {}
+    for reading in valid_readings(readings):
+        key = reading_key(reading)
+        if key in indexed:
+            key = f"{key}:m{effective_multiplier(reading)}"
+        indexed[key] = reading
+    return indexed
 
 
-def typed_overrides(overrides: dict[str, Any] | None) -> dict[str, ReadingOverride] | None:
-    """Keep only well-formed :class:`ReadingOverride` values from a connector's dict.
+def typed_declaration(declared: Any) -> frozenset[ReadingIdentity] | None:
+    """A connector's ``declared_readings()`` as a set of identities, or None if malformed.
 
-    Here for the same reason as :func:`split_quality`: it encodes the connector
-    contract, and every path that turns a raw ``reading_overrides()`` response
-    into a snapshot has to apply it identically or the snapshots disagree.
-    :attr:`DeviceSnapshot.reading_overrides` is typed
-    ``Mapping[str, ReadingOverride]``, and the values arrive from third-party
-    code through an ``Any``, so nothing but this check keeps the annotation
-    honest.
-    """
-    if overrides is None:
-        return None
-    return {k: v for k, v in overrides.items() if isinstance(v, ReadingOverride)}
-
-
-def typed_declaration(declared: Any) -> frozenset[str] | None:
-    """A connector's ``declared_readings()`` as a set of keys, or None if malformed.
-
-    For the same reason as :func:`typed_overrides`: the value comes from
-    third-party code, and a declaration narrows what the MirrorUsagePoint
-    registers, so anything other than a collection of strings is treated as no
-    declaration rather than guessed at.
+    The value comes from third-party code, and a declaration narrows what the
+    MirrorUsagePoint registers, so anything other than a collection of
+    :class:`~py20305.connectors.reading.ReadingIdentity` or
+    :class:`~py20305.connectors.reading.Reading` is treated as no declaration
+    rather than guessed at. A ``Reading`` stands for its identity; its value is
+    ignored.
     """
     if not isinstance(declared, set | frozenset | list | tuple):
         return None
-    if not all(isinstance(key, str) for key in declared):
-        return None
-    return frozenset(declared)
+    identities: set[ReadingIdentity] = set()
+    for item in declared:
+        if isinstance(item, ReadingIdentity):
+            identities.add(item)
+        elif is_valid_reading(item):
+            identities.add(reading_identity(item))
+        else:
+            return None
+    return frozenset(identities)
 
 
-def declared_readings_of(connector: Any) -> frozenset[str] | None:
+def declared_readings_of(connector: Any) -> frozenset[ReadingIdentity] | None:
     """``connector.declared_readings()``, typed; None when absent or broken.
 
     Optional on the connector contract, so a connector that predates it, or does
@@ -127,9 +126,9 @@ class Quality(Enum):
 
 @dataclass(frozen=True, slots=True)
 class PointEntry:
-    """One monitoring key's value and everything acquired alongside it."""
+    """One reading and when it was acquired."""
 
-    value: Any
+    reading: Reading
     #: Wall-clock epoch seconds at which the acquisition that produced this
     #: value *began*. Not read-completion time: on a multi-second Modbus scan
     #: the two differ, and stamping completion would make the sample look
@@ -140,9 +139,16 @@ class PointEntry:
     #: the age a reader sees grows while the device is unreachable.
     source_timestamp: float
     quality: Quality
-    #: The connector's per-cycle ``"<key>__quality"``, carried verbatim. None
-    #: when the connector supplied none for this key this cycle.
-    protocol_quality: int | None
+
+    @property
+    def value(self) -> float:
+        """Return the reading's value."""
+        return self.reading.value
+
+    @property
+    def protocol_quality(self) -> int | None:
+        """Return the qualityFlags the connector gave the reading, if any."""
+        return self.reading.quality_flags
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,14 +161,6 @@ class DeviceSnapshot:
     """
 
     entries: Mapping[str, PointEntry]
-    #: The connector's ``reading_overrides()`` as of this acquisition, keyed by
-    #: monitoring key. Device-level rather than per-entry because it legitimately
-    #: covers keys absent from this cycle's values: ``create_mup`` registers the
-    #: *full* ReadingType set, so an override for a quantity the connector isn't
-    #: reporting right now still shapes what gets registered. Read after the
-    #: values because an out-of-process connector populates it from the same
-    #: ``fetch_monitoring`` response.
-    reading_overrides: Mapping[str, ReadingOverride]
     #: Store-wide monotonic counter identifying the acquisition these entries
     #: came from. Orders acquisitions across devices.
     sequence: int
@@ -179,7 +177,7 @@ class DeviceSnapshot:
     #: The connector's ``declared_readings()``, or None when it declares none.
     #: Device-level, like :attr:`reading_overrides`, and kept through a failed
     #: acquisition because it describes the device rather than a sample.
-    declared_readings: frozenset[str] | None = None
+    declared_readings: frozenset[ReadingIdentity] | None = None
 
 
 def with_freshness(snapshot: DeviceSnapshot, max_age: float | None, now: float) -> DeviceSnapshot:
@@ -203,17 +201,15 @@ def with_freshness(snapshot: DeviceSnapshot, max_age: float | None, now: float) 
             entry
             if entry.quality is not Quality.GOOD
             else PointEntry(
-                value=entry.value,
+                reading=entry.reading,
                 source_timestamp=entry.source_timestamp,
                 quality=Quality.STALE,
-                protocol_quality=entry.protocol_quality,
             )
         )
         for key, entry in snapshot.entries.items()
     }
     return DeviceSnapshot(
         entries=MappingProxyType(entries),
-        reading_overrides=snapshot.reading_overrides,
         sequence=snapshot.sequence,
         last_success=snapshot.last_success,
         quality=Quality.STALE,
@@ -322,17 +318,8 @@ class DirectConnectorSource:
             # completion instead would report it fresher, which is the more
             # dangerous direction for a field that drives staleness.
             started = self._clock()
-            values = await connector.fetch_monitoring()
-            # A connector is third-party code and may return anything. Coerce a
-            # non-dict override map away, and drop individual values that aren't
-            # ReadingOverride, rather than letting either reach the
-            # MirrorUsagePoint path; reject a non-dict value map outright --
-            # there is no reading to salvage from it.
-            raw_overrides = connector.reading_overrides()
-            overrides = typed_overrides(raw_overrides if isinstance(raw_overrides, dict) else None)
+            readings = index_readings(await connector.fetch_monitoring())
             declared = declared_readings_of(connector)
-            if not isinstance(values, dict):
-                raise TypeError(f"fetch_monitoring returned {type(values).__name__}, expected dict")
         except Exception as exc:
             # Broad by intent. A connector is third-party code, including
             # out-of-process connectors, so any failure has to degrade to
@@ -350,16 +337,14 @@ class DirectConnectorSource:
             # with.
             carried = {
                 key: PointEntry(
-                    value=entry.value,
+                    reading=entry.reading,
                     source_timestamp=entry.source_timestamp,
                     quality=Quality.COMM_LOST,
-                    protocol_quality=entry.protocol_quality,
                 )
                 for key, entry in (previous.entries if previous else {}).items()
             }
             return DeviceSnapshot(
                 entries=MappingProxyType(carried),
-                reading_overrides=previous.reading_overrides if previous else MappingProxyType({}),
                 sequence=self._sequence,
                 last_success=previous.last_success if previous else None,
                 quality=Quality.COMM_LOST,
@@ -367,19 +352,12 @@ class DirectConnectorSource:
                 declared_readings=previous.declared_readings if previous else None,
             )
 
-        measured, protocol_quality = split_quality(values)
         entries = {
-            key: PointEntry(
-                value=value,
-                source_timestamp=started,
-                quality=Quality.GOOD,
-                protocol_quality=protocol_quality.get(key),
-            )
-            for key, value in measured.items()
+            key: PointEntry(reading=reading, source_timestamp=started, quality=Quality.GOOD)
+            for key, reading in readings.items()
         }
         snapshot = DeviceSnapshot(
             entries=MappingProxyType(entries),
-            reading_overrides=MappingProxyType(dict(overrides or {})),
             sequence=self._sequence,
             last_success=started,
             quality=Quality.GOOD,
@@ -390,5 +368,7 @@ class DirectConnectorSource:
         # After the snapshot, not before: telemetry reports a read that
         # actually produced one, and a read that raised produced no reading.
         if self._telemetry is not None:
-            self._telemetry.record_read(device, values, connector=connector)
+            self._telemetry.record_read(
+                device, {key: r.value for key, r in readings.items()}, connector=connector
+            )
         return snapshot

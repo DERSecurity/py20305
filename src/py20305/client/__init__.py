@@ -27,7 +27,6 @@ if TYPE_CHECKING:
     from py20305.client.errors import Sep2ProtocolError as Sep2ProtocolError
     from py20305.client.errors import Sep2TlsError as Sep2TlsError
     from py20305.client.http import Sep2Client as Sep2Client
-    from py20305.client.observer import ConnectionObserver as ConnectionObserver
     from py20305.client.polling import PollScheduler as PollScheduler
     from py20305.client.retry import RetryPolicy as RetryPolicy
     from py20305.client.retry import with_retry as with_retry
@@ -38,7 +37,6 @@ if TYPE_CHECKING:
 #: Exported name -> the submodule that defines it.
 _EXPORTS: dict[str, str] = {
     "Address": "connector",
-    "ConnectionObserver": "observer",
     "CsipClient": "csip_client",
     "DiscoveredState": "state",
     "SocketPair": "connector",

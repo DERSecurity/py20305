@@ -11,6 +11,7 @@ from py20305.connectors.base import (
     ConnectorTimeoutError,
     ConnectorWriteError,
 )
+from py20305.connectors.modes import ALL_ELEMENTS
 
 
 class TestErrorHierarchy:
@@ -37,31 +38,21 @@ class TestBaseConnector:
         assert c.connector_name == "BaseConnector"
 
     @pytest.mark.asyncio
-    async def test_fetch_monitoring_returns_null_dict(self):
-        c = BaseConnector()
-        result = await c.fetch_monitoring()
-        assert isinstance(result, dict)
-        assert set(result.keys()) == {"W", "Var", "Hz", "V", "PF", "VA", "A"}
-        assert all(v is None for v in result.values())
-
-    def test_reading_overrides_default_none(self):
-        # Connectors opt in; the default declares no overrides.
-        assert BaseConnector().reading_overrides() is None
+    async def test_fetch_monitoring_returns_no_readings(self):
+        assert await BaseConnector().fetch_monitoring() == []
 
     @pytest.mark.asyncio
-    async def test_fetch_nameplate_returns_null_dict(self):
-        c = BaseConnector()
-        result = await c.fetch_nameplate()
-        assert isinstance(result, dict)
-        assert "WMaxRtg" in result
-        assert "CtrlModes" in result
+    async def test_fetch_nameplate_uses_der_capability_names(self):
+        result = await BaseConnector().fetch_nameplate()
+        assert "rtgMaxW" in result
+        assert "modesSupported" in result
+        assert all(value is None for value in result.values())
 
     @pytest.mark.asyncio
-    async def test_fetch_configuration_returns_null_dict(self):
-        c = BaseConnector()
-        result = await c.fetch_configuration()
-        assert isinstance(result, dict)
-        assert "WMax" in result
+    async def test_fetch_configuration_uses_der_settings_names(self):
+        result = await BaseConnector().fetch_configuration()
+        assert "setMaxW" in result
+        assert "modesEnabled" in result
 
     @pytest.mark.asyncio
     async def test_fetch_status_returns_dict(self):
@@ -71,37 +62,11 @@ class TestBaseConnector:
         assert "alarmStatus" in result
 
     @pytest.mark.asyncio
-    async def test_all_update_methods_return_none(self):
+    async def test_every_control_method_returns_none(self):
         c = BaseConnector()
-        methods = [
-            "update_qv",
-            "update_pv",
-            "update_qp",
-            "update_p_lim",
-            "update_p_lim_inj",
-            "update_p_lim_abs",
-            "update_pf",
-            "update_const_q",
-            "update_const_pf",
-            "update_ov",
-            "update_uv",
-            "update_ov_mc",
-            "update_uv_mc",
-            "update_of",
-            "update_uf",
-            "update_fixed_w",
-            "update_p_ramp",
-            "update_es_permit_service",
-            "update_exp_lim",
-            "update_imp_lim",
-            "update_gen_lim",
-            "update_load_lim",
-            "update_pricing_mode",
-        ]
-        for method_name in methods:
-            method = getattr(c, method_name)
-            result = await method({})
-            assert result is None, f"{method_name} should return None"
+        for element in ALL_ELEMENTS:
+            result = await getattr(c, element.method)({"enabled": False})
+            assert result is None, f"{element.method} should return None"
 
     @pytest.mark.asyncio
     async def test_all_methods_are_async(self):

@@ -26,6 +26,11 @@ from py20305.connectors.control_errors import DeviceNotConfiguredError
 from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
 from py20305.connectors.errors import ConnectorError
 from py20305.connectors.modes import (
+    CONTROL_ELEMENTS,
+    DISABLED,
+    DOE_ELEMENTS,
+    ELEMENT_BY_MODE,
+    METHOD_BY_ELEMENT,
     translate_controls,
     translate_default_controls,
 )
@@ -50,90 +55,48 @@ BY_DESIGN = "by_design"
 #: the live offer is missing a mode it should carry. Actionable.
 OFFER_MISSING = "offer_missing"
 
-#: The call that disables each control mode: the ``update_*`` method and the
-#: parameters that turn the mode off. Every entry is what a clear sends; the
-#: event-end withdrawal sends the entries for the modes an ended event set.
-DISABLE_CALLS: tuple[tuple[str, dict[str, Any]], ...] = (
-    ("update_qv", {"qv_mode_enable": 0}),
-    ("update_pv", {"pv_mode_enable": 0}),
-    ("update_qp", {"qp_mode_enable": 0}),
-    ("update_p_lim", {"p_lim_mode_enable": 0}),
-    ("update_p_lim_inj", {"p_lim_mode_enable": 0}),
-    ("update_p_lim_abs", {"p_lim_mode_enable": 0}),
-    ("update_pf", {"pf_mode_enable": 0}),
-    ("update_const_q", {"const_q_mode_enable": 0}),
-    ("update_const_pf", {"inj": {"mode": 0}, "abs": {"mode": 0}}),
-    ("update_fixed_w", {"WSetEna": 0}),
-    ("update_ov", {"ov_mode_enable": 0}),
-    ("update_uv", {"uv_mode_enable": 0}),
-    ("update_ov_mc", {"ov_mode_enable": 0}),
-    ("update_uv_mc", {"uv_mode_enable": 0}),
-    ("update_of", {"of_mode_enable": 0}),
-    ("update_uf", {"uf_mode_enable": 0}),
-    ("update_freq_watt", {"fw_mode_enable": 0}),
-    ("update_connect", {"connected": True}),
-    ("update_max_lim_pct_va_absorb", {"mode_enable": 0}),
-    ("update_max_lim_pct_va_inject", {"mode_enable": 0}),
-    ("update_max_lim_pct_var_absorb", {"mode_enable": 0}),
-    ("update_max_lim_pct_var_inject", {"mode_enable": 0}),
-    ("update_max_lim_pct_w_absorb", {"mode_enable": 0}),
-    ("update_max_lim_var_absorb", {"mode_enable": 0}),
-    ("update_max_lim_var_inject", {"mode_enable": 0}),
-    ("update_target_v", {"mode_enable": 0}),
-    ("update_target_var", {"mode_enable": 0}),
-    ("update_target_w", {"mode_enable": 0}),
-    ("update_delta_w", {"delta_w_mode_enable": 0}),
-    ("update_delta_var", {"delta_var_mode_enable": 0}),
-    ("update_fixed_v", {"fixed_v_mode_enable": 0}),
-    ("update_grid_connect_permit", {"permit": True}),
-    ("update_island_permit", {"permit": False}),
-    ("update_exp_lim", {"exp_lim_mode_enable": 0}),
-    ("update_imp_lim", {"imp_lim_mode_enable": 0}),
-    ("update_gen_lim", {"gen_lim_mode_enable": 0}),
-    ("update_load_lim", {"load_lim_mode_enable": 0}),
+#: The call that withdraws each control element: the ``update_*`` method and
+#: ``{"enabled": False}``. A clear sends every entry; the event-end withdrawal
+#: sends the entries for the elements an ended event set.
+DISABLE_CALLS: tuple[tuple[str, dict[str, Any]], ...] = tuple(
+    (element.method, dict(DISABLED)) for element in CONTROL_ELEMENTS + DOE_ELEMENTS
 )
-
-_DISABLE_BY_METHOD: dict[str, dict[str, Any]] = dict(DISABLE_CALLS)
 
 #: Device roles that take no controls.
 _METER_ROLES = frozenset({"site_meter", "der_meter"})
 
-#: The disable call for each mode the event processor tracks: DERControlBase
-#: field names and the CSIP-AUS limit element names. Connect, energize and
-#: the permits are left out: ending an event that disconnected a device is
-#: not an order to reconnect it, and the default control says what to do.
+#: Elements an event end does not withdraw. Ending an event that disconnected
+#: a device is not an order to reconnect it, and the default control says what
+#: to do.
+_KEPT_AT_EVENT_END = frozenset(
+    {"opModConnect", "opModEnergize", "opModGridConnectPermit", "opModIslandPermit"}
+)
+
+#: The withdrawal call for each mode the event processor tracks: DERControlBase
+#: field names and the CSIP-AUS limit element names.
 FIELD_DISABLE_CALLS: dict[str, tuple[str, dict[str, Any]]] = {
-    field: (method, _DISABLE_BY_METHOD[method])
-    for field, method in {
-        "op_mod_volt_var": "update_qv",
-        "op_mod_volt_watt": "update_pv",
-        "op_mod_watt_var": "update_qp",
-        "op_mod_max_lim_w": "update_p_lim",
-        "op_mod_max_lim_winject": "update_p_lim_inj",
-        "op_mod_max_lim_wabsorb": "update_p_lim_abs",
-        "op_mod_freq_droop": "update_pf",
-        "op_mod_fixed_var": "update_const_q",
-        "op_mod_fixed_pfinject_w": "update_const_pf",
-        "op_mod_fixed_pfabsorb_w": "update_const_pf",
-        "op_mod_fixed_w": "update_fixed_w",
-        "op_mod_hvrtmust_trip": "update_ov",
-        "op_mod_lvrtmust_trip": "update_uv",
-        "op_mod_hvrtmomentary_cessation": "update_ov_mc",
-        "op_mod_lvrtmomentary_cessation": "update_uv_mc",
-        "op_mod_hfrtmust_trip": "update_of",
-        "op_mod_lfrtmust_trip": "update_uf",
-        "op_mod_freq_watt": "update_freq_watt",
-        "op_mod_target_var": "update_target_var",
-        "op_mod_target_w": "update_target_w",
-        "op_mod_delta_var": "update_delta_var",
-        "op_mod_delta_w": "update_delta_w",
-        "op_mod_fixed_v": "update_fixed_v",
-        "opModExpLimW": "update_exp_lim",
-        "opModImpLimW": "update_imp_lim",
-        "opModGenLimW": "update_gen_lim",
-        "opModLoadLimW": "update_load_lim",
-    }.items()
+    mode: (element.method, dict(DISABLED))
+    for mode, element in ELEMENT_BY_MODE.items()
+    if element.element not in _KEPT_AT_EVENT_END
 }
+
+
+def unused_update_methods(connector_class: type) -> list[str]:
+    """Return the ``update_*`` methods a connector class defines that the client never calls.
+
+    The client calls one ``update_<element>`` method per control element
+    (``METHOD_BY_ELEMENT``). A class written for an earlier contract may still
+    define methods named for its own control vocabulary; they are never called.
+    """
+    called = set(METHOD_BY_ELEMENT.values())
+    known = called | {name for name in dir(BaseConnector) if name.startswith("update_")}
+    return sorted(
+        name
+        for name in dir(connector_class)
+        if name.startswith("update_")
+        and name not in known
+        and callable(getattr(connector_class, name, None))
+    )
 
 
 class ConnectorDispatcher:
@@ -180,6 +143,7 @@ class ConnectorDispatcher:
         # it reaches the lookup below, so without this the same warning is
         # logged once per control for as long as the device stays listed.
         self._missing_connector_reported: set[str] = set()
+        self._checked_connector_classes: set[type] = set()
 
     @property
     def telemetry(self) -> DeviceTelemetryEmitter | None:
@@ -316,7 +280,9 @@ class ConnectorDispatcher:
                 # and report again if it ever loses the connector.
                 self._missing_connector_reported.discard(lfdi)
                 resolve(dedup_key)
-            return await proxy.aresolve()  # type: ignore[no-any-return]
+            connector: BaseConnector = await proxy.aresolve()
+            self._warn_unused_update_methods(connector)
+            return connector
 
         if lfdi in self._missing_connector_reported:
             logger.debug("No connector found for LFDI %s (already reported)", lfdi)
@@ -330,6 +296,23 @@ class ConnectorDispatcher:
             details={"lfdi": lfdi},
         )
         return None
+
+    def _warn_unused_update_methods(self, connector: BaseConnector) -> None:
+        """Warn once per connector class about ``update_*`` methods the client never calls."""
+        connector_class = type(connector)
+        if connector_class in self._checked_connector_classes:
+            return
+        self._checked_connector_classes.add(connector_class)
+        unused = unused_update_methods(connector_class)
+        if unused:
+            logger.warning(
+                "Connector %s defines %s, which the client no longer calls. Controls reach "
+                "a connector through one update_<element> method per control element, "
+                "for example update_op_mod_max_lim_w; until the connector defines those, "
+                "the controls for the elements it does not define are not applied.",
+                connector_class.__name__,
+                ", ".join(unused),
+            )
 
     async def apply_control(
         self,
@@ -405,12 +388,6 @@ class ConnectorDispatcher:
             connector.connector_name,
             len(translations),
         )
-
-        # Pass ramp_tms through to each mode's params when set
-        ramp_tms = derc.dercontrol_base.ramp_tms
-        if ramp_tms is not None:
-            for _method, p in translations:
-                p["ramp_tms"] = ramp_tms
 
         refused: list[str] = []
         for method_name, params in translations:
@@ -863,7 +840,7 @@ class ConnectorDispatcher:
         """Surface a write refused because its origin does not command the device.
 
         Reported rather than raised: a 2030.5 server posting events to a device
-        that SunSpec commands is a configuration statement being honored, not a
+        another interface commands is a configuration statement being honored, not a
         fault, and raising would turn every such event into an error the event
         engine has to interpret. Silence is the wrong answer too -- an operator
         seeing a posted control never arrive needs this row to know why.
@@ -885,7 +862,7 @@ class ConnectorDispatcher:
     ) -> tuple[Callable[[dict[str, Any]], Any] | None, str | None]:
         """``(bound method, reason)``. ``reason`` is None when implemented.
 
-        ``BaseConnector`` declares 40 ``update_*`` modes as concrete methods that
+        ``BaseConnector`` declares every ``update_*`` method as a concrete method that
         return ``None``, so ``getattr`` finds one whether or not the connector
         implements it. Reading that as support makes a connector look like it
         accepted a command it never carried out: the dispatch succeeds, the
@@ -896,10 +873,9 @@ class ConnectorDispatcher:
         one of them is anybody's mistake:
 
         ``BY_DESIGN``
-            The connector inherits the base no-op. ``ConnectorSunSpec`` does this
-            for 29 of the 40 modes and says so in its docstring -- the base
-            defaults exist precisely to cover modes SunSpec has no register for.
-            Expected, and not something an operator can act on.
+            The connector inherits the base no-op, as a connector does for every
+            mode its device has no way to carry out -- the base defaults exist
+            for exactly that. Expected, and not something an operator can act on.
 
         ``OFFER_MISSING``
             No implementation resolves at all. For a plugin-backed connector,
@@ -1055,8 +1031,6 @@ class ConnectorDispatcher:
     ) -> None:
         if connector is None:
             return
-        # One disable per method: two fields can share a method (the two fixed
-        # power factor fields both reach ``update_const_pf``).
         calls: dict[str, dict[str, Any]] = {}
         for mode in sorted(modes):
             entry = FIELD_DISABLE_CALLS.get(mode)

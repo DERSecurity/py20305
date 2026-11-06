@@ -1,23 +1,22 @@
-"""Tests for the control audit trail.
+"""Tests for the control audit trail and the device write records.
 
-Three layers. The configuration tests pin what an operator can switch on. The
-record tests drive the processor, the dispatcher and the client end to end and
-read back what reached the transport, because the point of the trail is that
-the pieces join: a lifecycle record and the writes it caused must carry the same
-identifiers. The isolation tests prove a failing trail cannot stop a control.
+The record tests drive the processor, the dispatcher and the client end to end
+and read back what reached the observers, because the point of the trail is
+that the pieces join: a lifecycle record and the writes it caused must carry
+the same identifiers. The isolation tests prove a failing observer cannot stop
+a control.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
-from pydantic import ValidationError
 
+from py20305.audit import AuditEmitter, AuditSequence, mrid_hex
 from py20305.client.csip_client import CsipClient
 from py20305.client.state import DerProgramState, DiscoveredState, EndDeviceState
 from py20305.commands import CommandOrigin
@@ -29,16 +28,6 @@ from py20305.events.comms_loss import CommsLossState
 from py20305.events.processor import EventProcessor
 from py20305.events.response import ResponseCode
 from py20305.events.state_machine import EventState
-from py20305.forwarders.audit import AuditEmitter, AuditSequence, mrid_hex
-from py20305.forwarders.base import EventFrame
-from py20305.forwarders.config import (
-    AuditConfig,
-    DeviceTelemetryConfig,
-    ForwarderConfig,
-    MQTTForwarderConfig,
-)
-from py20305.forwarders.manager import ForwarderManager
-from py20305.forwarders.mqtt_forwarder import MQTTForwarder
 from py20305.models.sep.sep import (
     DateTimeInterval,
     DefaultDercontrol,
@@ -53,6 +42,7 @@ from py20305.models.sep.sep import (
     Sfditype,
     TimeType,
 )
+from py20305.observers import AuditRecord, DeviceOperation, DeviceRecord
 
 LFDI_1 = b"\xaa" * 20
 LFDI_2 = b"\xbb" * 20
@@ -61,35 +51,42 @@ AUDIT_TOPIC = "out/der-events"
 
 
 class RecordingForwarder:
-    """Stands in for the forwarder manager, keeping what was queued."""
-
-    name = "recording"
+    """The audit and device observers of a test, keeping every record in order."""
 
     def __init__(self) -> None:
-        self.events: list[EventFrame] = []
+        self.events: list[AuditRecord | DeviceRecord] = []
 
-    def queue_event(self, event: EventFrame) -> None:
-        self.events.append(event)
+    def audit(self, record: AuditRecord) -> None:
+        self.events.append(record)
 
-    def get_statistics(self) -> dict[str, Any]:
-        return {}
+    def device(self, record: DeviceRecord) -> None:
+        self.events.append(record)
 
     def audit_records(self, kind: str | None = None) -> list[dict[str, Any]]:
-        out = [e.payload for e in self.events if e.topic_suffix == AUDIT_TOPIC]
+        out = [dict(e.data) for e in self.events if isinstance(e, AuditRecord)]
         return [r for r in out if kind is None or r["kind"] == kind]
 
     def writes(self) -> list[dict[str, Any]]:
-        """Each write's indexed fields and decoded body, in publication order."""
+        """Each write's cause fields and body, in the order they were reported."""
         out = []
         for event in self.events:
-            if event.topic_suffix == AUDIT_TOPIC or event.kind != "device-telemetry":
+            if not isinstance(event, DeviceRecord) or event.operation != DeviceOperation.WRITE:
                 continue
-            if event.payload["direction"] != "downstream":
-                continue
+            fields = {
+                "origin": event.origin,
+                "applied_mrid": event.applied_mrid,
+                "cause_mrid": event.cause_mrid,
+                "outcome": str(event.outcome),
+            }
             out.append(
                 {
-                    **event.payload["protocol_data"]["extra"],
-                    "body": json.loads(event.payload["payload"]["data"]),
+                    **{k: v for k, v in fields.items() if v is not None},
+                    "body": {
+                        "control": event.resource,
+                        "params": dict(event.values),
+                        "error": event.error,
+                        "error_type": event.error_type,
+                    },
                 }
             )
         return out
@@ -178,7 +175,9 @@ class Site:
         for lfdi in [edev.lfdi for edev in state.end_devices.values()] + (local or []):
             connector = PrintDemoConnector()
             if lfdi in (failing or set()):
-                connector.update_p_lim = AsyncMock(side_effect=RuntimeError("register locked"))  # type: ignore[method-assign]
+                connector.update_op_mod_max_lim_w = AsyncMock(
+                    side_effect=RuntimeError("register locked")
+                )  # type: ignore[method-assign]
             self.connectors[lfdi.hex()] = connector
         hrefs = {href: edev.lfdi.hex() for href, edev in state.end_devices.items()}
 
@@ -188,20 +187,12 @@ class Site:
             if lfdi in self.connectors
             else None
         )
-        audit_config = AuditConfig(enabled=audit)
-        self.telemetry = DeviceTelemetryEmitter(
-            self.forwarder,  # type: ignore[arg-type]
-            DeviceTelemetryConfig(enabled=device_telemetry),
-            client_id="site-a",
-            audit=audit_config,
-            sequence=self.sequence,
-        )
+        self.telemetry = DeviceTelemetryEmitter(self.forwarder.device)
         self.dispatcher = ConnectorDispatcher(
             registry, hrefs.get, command_gate=gate, telemetry=self.telemetry
         )
         self.audit = AuditEmitter(
-            self.forwarder,  # type: ignore[arg-type]
-            audit_config,
+            self.forwarder.audit if audit else None,
             client_id="site-a",
             sequence=self.sequence,
         )
@@ -227,90 +218,6 @@ class Site:
 HEX_1 = mrid_hex(b"\x01" * 16)
 HEX_2 = mrid_hex(b"\x02" * 16)
 HEX_DDERC = mrid_hex(DDERC_MRID)
-
-
-# -- Configuration -----------------------------------------------------------
-
-
-class TestAuditConfig:
-    def test_off_by_default(self):
-        assert ForwarderConfig().audit.enabled is False
-        assert ForwarderConfig().audit.topic_suffix == AUDIT_TOPIC
-
-    def test_a_custom_topic_under_out_is_accepted(self):
-        assert AuditConfig(topic_suffix="/out/audit/").topic_suffix == "out/audit"
-
-    @pytest.mark.parametrize("suffix", ["audit", "in/der-events", "out/", "out/+/events", "out/#"])
-    def test_a_topic_outside_out_or_with_a_wildcard_is_rejected(self, suffix):
-        with pytest.raises(ValidationError):
-            AuditConfig(topic_suffix=suffix)
-
-    def test_the_measured_state_topic_is_rejected(self):
-        with pytest.raises(ValidationError, match="topic of their own"):
-            ForwarderConfig(audit={"topic_suffix": "out/telemetry"})
-
-    @pytest.mark.parametrize(
-        "other",
-        [
-            {},
-            {"device_telemetry": {"topic_suffix": "out/devices"}},
-            {"connection_telemetry": {"topic_suffix": "out/devices"}},
-        ],
-        ids=["protocol-messages", "device-telemetry", "connection-telemetry"],
-    )
-    def test_a_topic_shared_with_another_stream_is_rejected(self, other):
-        suffix = "out/2030-5-raw" if not other else "out/devices"
-        with pytest.raises(ValidationError, match="topic of their own"):
-            ForwarderConfig(audit={"topic_suffix": suffix}, **other)
-
-
-# -- Which switch publishes what ------------------------------------------------
-
-
-class TestWhatEachSwitchPublishes:
-    @pytest.mark.parametrize(
-        ("audit", "device_telemetry", "reads", "writes", "events"),
-        [
-            (False, False, 0, 0, 0),
-            (False, True, 1, 1, 0),
-            (True, False, 0, 1, 1),
-            (True, True, 1, 1, 1),
-        ],
-    )
-    def test_the_table(self, audit, device_telemetry, reads, writes, events):
-        forwarder = RecordingForwarder()
-        audit_config = AuditConfig(enabled=audit)
-        telemetry = DeviceTelemetryEmitter(
-            forwarder,  # type: ignore[arg-type]
-            DeviceTelemetryConfig(enabled=device_telemetry),
-            audit=audit_config,
-        )
-        emitter = AuditEmitter(forwarder, audit_config)  # type: ignore[arg-type]
-
-        telemetry.record_read("dev1", {"W": 100})
-        telemetry.record_write("dev1", "p_lim", {"value": 1}, origin="local_api")
-        emitter.comms_loss(
-            transition="entered", elapsed_seconds=900, threshold=900, simulated=False, at=0.0
-        )
-
-        directions = [
-            e.payload.get("direction") for e in forwarder.events if e.topic_suffix != AUDIT_TOPIC
-        ]
-        assert directions.count("upstream") == reads
-        assert directions.count("downstream") == writes, "each write is published at most once"
-        assert len(forwarder.audit_records()) == events
-
-    def test_the_sequence_rides_on_writes_only_with_the_audit_switch(self):
-        forwarder = RecordingForwarder()
-        telemetry = DeviceTelemetryEmitter(
-            forwarder,  # type: ignore[arg-type]
-            DeviceTelemetryConfig(enabled=True),
-        )
-        telemetry.record_write("dev1", "p_lim", {"value": 1}, origin="local_api")
-
-        extra = forwarder.writes()[0]
-        assert extra["origin"] == "local_api", "the cause fields ride on every published write"
-        assert "seq" not in extra and "boot_id" not in extra
 
 
 # -- What each write says caused it ----------------------------------------------
@@ -447,7 +354,7 @@ class TestWritesNameTheirCause:
         site = Site(_state([]))
 
         await site.dispatcher.apply_operation(
-            LFDI_1.hex(), "p_lim", {"value": 50}, origin="local_api"
+            LFDI_1.hex(), "op_mod_max_lim_w", {"value": 50}, origin="local_api"
         )
 
         (write,) = site.forwarder.writes()
@@ -558,7 +465,7 @@ class TestWritesNameTheirCause:
         """An href is a case-sensitive URI; lowering it would stop it joining
         back to the server's own href."""
         forwarder = RecordingForwarder()
-        emitter = AuditEmitter(forwarder, AuditConfig(enabled=True))  # type: ignore[arg-type]
+        emitter = AuditEmitter(forwarder.audit)
 
         emitter.event_transition(
             event_mrid=bytes([1]) * 16,
@@ -822,15 +729,15 @@ class TestLifecycleRecords:
         await site.processor.shutdown()
 
     @pytest.mark.asyncio
-    async def test_with_audit_off_nothing_is_published_and_control_is_unchanged(self):
+    async def test_with_no_audit_observer_no_lifecycle_record_is_made(self):
         now = int(time.time())
         derc = _derc(0x01, start=now - 10)
         site = Site(_state([derc]), audit=False)
 
         await site.processor.process_controls("/derp/1")
 
-        assert site.forwarder.events == []
-        assert "update_p_lim" in site.connectors[LFDI_1.hex()].last_control
+        assert site.forwarder.audit_records() == []
+        assert "update_op_mod_max_lim_w" in site.connectors[LFDI_1.hex()].last_control
         assert site.http.post.await_count == 2
         await site.processor.shutdown()
 
@@ -915,7 +822,7 @@ class TestLifecycleRecords:
         async def slow(params):
             await asyncio.sleep(0.2)
 
-        site.connectors[LFDI_1.hex()].update_p_lim = slow  # type: ignore[method-assign]
+        site.connectors[LFDI_1.hex()].update_op_mod_max_lim_w = slow  # type: ignore[method-assign]
         with patch.object(processor_mod, "ACTIVATION_DISPATCH_DEADLINE", 0.05):
             await site.processor.process_controls("/derp/1")
             active = site.forwarder.audit_records("der_event")[-1]
@@ -943,7 +850,7 @@ class TestLifecycleRecords:
 
         assert site.processor._store.get(derc.m_rid.value).state == EventState.ACTIVE
         assert site.http.post.await_count == 2, "ACK and ACTIVE still posted"
-        assert "update_p_lim" in site.connectors[LFDI_1.hex()].last_control
+        assert "update_op_mod_max_lim_w" in site.connectors[LFDI_1.hex()].last_control
         await site.processor.shutdown()
 
     @pytest.mark.asyncio
@@ -1002,8 +909,8 @@ class TestCommsLossRecords:
     def _client(self) -> tuple[CsipClient, RecordingForwarder]:
         client = CsipClient("https://example.com", comms_loss_seconds=900)
         forwarder = RecordingForwarder()
-        client.audit.attach_forwarder(forwarder)  # type: ignore[arg-type]
-        client.audit.configure(AuditConfig(enabled=True), client_id="site-a")
+        client.audit.attach_observer(forwarder.audit)
+        client.audit.set_client_id("site-a")
         return client, forwarder
 
     @pytest.mark.asyncio
@@ -1102,9 +1009,7 @@ class TestCommsLossRecords:
         client = CsipClient(
             "https://example.com", dispatcher=site.dispatcher, comms_loss_seconds=900
         )
-        client.audit.attach_forwarder(site.forwarder)  # type: ignore[arg-type]
-        client.audit.configure(AuditConfig(enabled=True))
-        site.telemetry.configure(DeviceTelemetryConfig(), sequence=client.audit.sequence)
+        client.audit.attach_observer(site.forwarder.audit)
         client._state.der_programs.update(state.der_programs)
         client._state.end_devices.update(state.end_devices)
         for program, devices in state.device_mapping.program_to_devices.items():
@@ -1129,18 +1034,16 @@ class TestCommsLossRecords:
         ):
             await client._recover_from_comms_loss()
 
-        def label(event: EventFrame) -> str:
-            payload = event.payload
-            if payload.get("kind") == "comms_loss":
-                return payload["transition"]
-            if payload.get("kind") == "der_event":
-                return f"{payload['event_mrid'][:2]}:{payload['to_state']}"
-            return "write:" + payload["protocol_data"]["extra"]["origin"]
+        def label(event: AuditRecord | DeviceRecord) -> str:
+            if isinstance(event, DeviceRecord):
+                return f"write:{event.origin}"
+            if event.kind == "comms_loss":
+                return str(event.data["transition"])
+            return f"{str(event.data['event_mrid'])[:2]}:{event.data['to_state']}"
 
-        def seq(event: EventFrame) -> int:
-            return event.payload.get("seq") or event.payload["protocol_data"]["extra"]["seq"]
-
-        order = [label(e) for e in sorted(site.forwarder.events, key=seq)]
+        # The observers receive every record as it is made, so arrival order
+        # is the order things happened.
+        order = [label(e) for e in site.forwarder.events]
         # The re-poll may also write the default again; that is the re-poll's
         # own business and must simply fall inside the recovery.
         repoll_writes = [n for n, item in enumerate(order) if item == "write:dderc_reapply"]
@@ -1157,7 +1060,8 @@ class TestCommsLossRecords:
             "03:skipped",
             "cleared",
         ], " | ".join(order)
-        assert sorted(seq(e) for e in site.forwarder.events) == list(range(1, len(order) + 1))
+        audit_seq = [r["seq"] for r in site.forwarder.audit_records()]
+        assert audit_seq == list(range(1, len(audit_seq) + 1))
         await processor.shutdown()
 
 
@@ -1166,7 +1070,7 @@ class TestCommsLossRecords:
 
 class TestSequence:
     @pytest.mark.asyncio
-    async def test_one_counter_across_writes_and_events(self):
+    async def test_the_lifecycle_records_are_numbered_without_a_gap(self):
         now = int(time.time())
         derc = _derc(0x01, start=now + 100)
         site = Site(_state([derc], dderc=_dderc()))
@@ -1176,12 +1080,9 @@ class TestSequence:
         await site.processor._on_activation(record)
         await site.processor._on_completion(record)
 
-        stamped = [
-            (e.payload.get("seq") or e.payload["protocol_data"]["extra"]["seq"])
-            for e in site.forwarder.events
-        ]
-        assert stamped == list(range(1, len(stamped) + 1)), "no gap, no repeat, both streams"
-        assert len(site.forwarder.writes()) >= 2 and len(site.forwarder.audit_records()) >= 3
+        stamped = [r["seq"] for r in site.forwarder.audit_records()]
+        assert stamped == list(range(1, len(stamped) + 1)), "no gap, no repeat"
+        assert len(site.forwarder.writes()) >= 2 and len(stamped) >= 3
         await site.processor.shutdown()
 
     def test_a_new_process_gets_a_new_boot_id(self):
@@ -1193,8 +1094,7 @@ class TestSequence:
         forwarder = RecordingForwarder()
         clients = [CsipClient("https://example.com") for _ in range(2)]
         for client in clients:
-            client.audit.attach_forwarder(forwarder)  # type: ignore[arg-type]
-            client.audit.configure(AuditConfig(enabled=True))
+            client.audit.attach_observer(forwarder.audit)
 
         for _ in range(3):
             for client in clients:
@@ -1207,97 +1107,13 @@ class TestSequence:
             streams.setdefault(record["boot_id"], []).append(record["seq"])
         assert sorted(streams.values()) == [[1, 2, 3], [1, 2, 3]]
 
-    def test_a_clients_writes_share_its_counter_when_handed_it(self):
-        forwarder = RecordingForwarder()
-        client = CsipClient("https://example.com")
-        client.audit.attach_forwarder(forwarder)  # type: ignore[arg-type]
-        client.audit.configure(AuditConfig(enabled=True))
-        telemetry = DeviceTelemetryEmitter(
-            forwarder,  # type: ignore[arg-type]
-            DeviceTelemetryConfig(),
-            audit=AuditConfig(enabled=True),
+    def test_with_no_observer_and_no_history_nothing_is_built(self):
+        emitter = AuditEmitter()
+        assert not emitter.enabled
+        emitter.comms_loss(
+            transition="entered", elapsed_seconds=1, threshold=1, simulated=False, at=0.0
         )
-        telemetry.configure(DeviceTelemetryConfig(), sequence=client.audit.sequence)
-
-        telemetry.record_write("dev1", "p_lim", {"value": 1}, origin="local_api")
-        client.audit.comms_loss(
-            transition="entered", threshold=1, simulated=False, at=0.0, elapsed_seconds=1
-        )
-
-        write = forwarder.writes()[0]
-        (event,) = forwarder.audit_records()
-        assert write["boot_id"] == event["boot_id"] == client.audit.sequence.boot_id
-        assert (write["seq"], event["seq"]) == (1, 2)
-
-    def test_a_stopped_transport_drops_and_counts_and_leaves_a_gap(self):
-        manager = ForwarderManager()
-        recording = RecordingForwarder()
-        manager.add_forwarder(recording)  # type: ignore[arg-type]
-        emitter = AuditEmitter(manager, AuditConfig(enabled=True), sequence=AuditSequence())
-
-        def entered() -> None:
-            emitter.comms_loss(
-                transition="entered", elapsed_seconds=1, threshold=1, simulated=False, at=0.0
-            )
-
-        entered()  # not running: dropped
-        manager._running = True
-        entered()
-
-        assert manager.get_statistics()["events_dropped_not_running"] == 1
-        assert [r["seq"] for r in recording.audit_records()] == [2]
-
-    @pytest.mark.asyncio
-    async def test_a_forwarder_whose_broker_was_down_counts_what_it_missed(self):
-        """The manager runs while a forwarder it holds failed to start. What
-        that forwarder would have silently dropped is counted against it."""
-
-        class Unreachable(RecordingForwarder):
-            name = "unreachable"
-            fail = True
-
-            async def start(self) -> None:
-                if self.fail:
-                    raise ConnectionRefusedError("broker down")
-
-            async def stop(self) -> None:
-                pass
-
-        down = Unreachable()
-        manager = ForwarderManager()
-        manager.add_forwarder(down)  # type: ignore[arg-type]
-        await manager.start()
-        emitter = AuditEmitter(manager, AuditConfig(enabled=True), sequence=AuditSequence())
-
-        def entered() -> None:
-            emitter.comms_loss(
-                transition="entered", elapsed_seconds=1, threshold=1, simulated=False, at=0.0
-            )
-
-        entered()
-        down.fail = False
-        await manager.retry_failed()
-        entered()
-
-        stats = manager.get_statistics()
-        assert stats["events_dropped_by_forwarder"] == {"unreachable": 1}
-        assert [r["seq"] for r in down.audit_records()] == [2]
-
-    def test_a_full_queue_drops_and_counts_and_leaves_a_gap(self):
-        forwarder = MQTTForwarder(MQTTForwarderConfig(endpoint="broker", port=1883), queue_size=2)
-        forwarder._running = True
-        emitter = AuditEmitter(forwarder, AuditConfig(enabled=True), sequence=AuditSequence())  # type: ignore[arg-type]
-
-        for _ in range(3):
-            emitter.comms_loss(
-                transition="entered", elapsed_seconds=1, threshold=1, simulated=False, at=0.0
-            )
-
-        kept = []
-        while not forwarder._capture_queue.empty():
-            kept.append(forwarder._capture_queue.get_nowait().payload["seq"])
-        assert kept == [2, 3], "the oldest went, and the gap at 1 shows it"
-        assert forwarder.get_statistics()["messages_dropped"] == 1
+        assert emitter.emit_failures == {}
 
 
 # -- A failing trail cannot stop a control --------------------------------------
@@ -1305,22 +1121,24 @@ class TestSequence:
 
 class TestIsolation:
     @pytest.mark.asyncio
-    async def test_a_failing_transport_does_not_stop_dispatch_or_responses(self):
+    async def test_a_failing_observer_does_not_stop_dispatch_or_responses(self):
         now = int(time.time())
         derc = _derc(0x01, start=now - 10)
         site = Site(_state([derc]))
-        site.forwarder.queue_event = Mock(side_effect=RuntimeError("broker gone"))  # type: ignore[method-assign]
+        site.audit.attach_observer(Mock(side_effect=RuntimeError("observer bug")))
+        site.telemetry.attach_observer(Mock(side_effect=RuntimeError("observer bug")))
 
         await site.processor.process_controls("/derp/1")
 
         assert site.processor._store.get(derc.m_rid.value).state == EventState.ACTIVE
-        assert "update_p_lim" in site.connectors[LFDI_1.hex()].last_control
+        assert "update_op_mod_max_lim_w" in site.connectors[LFDI_1.hex()].last_control
         assert site.http.post.await_count == 2, "ACK and ACTIVE still posted"
-        assert site.audit.emit_failures["der_event"] >= 1
+        assert site.audit.observer_failures >= 1
+        assert site.telemetry.observer_failures >= 1
         await site.processor.shutdown()
 
     @pytest.mark.asyncio
-    async def test_a_failing_observer_does_not_stop_processing(self):
+    async def test_a_failing_audit_emitter_does_not_stop_processing(self):
         now = int(time.time())
         derc = _derc(0x01, start=now - 10)
         site = Site(_state([derc]))
@@ -1338,10 +1156,7 @@ class TestIsolation:
     @pytest.mark.asyncio
     async def test_a_failing_comms_loss_record_does_not_stop_entry(self):
         client = CsipClient("https://example.com", comms_loss_seconds=900)
-        broken = Mock()
-        broken.queue_event.side_effect = RuntimeError("broker gone")
-        client.audit.attach_forwarder(broken)
-        client.audit.configure(AuditConfig(enabled=True))
+        client.audit.attach_observer(Mock(side_effect=RuntimeError("observer bug")))
         with patch.object(
             client._event_processor, "enter_comms_loss", new_callable=AsyncMock, return_value=[]
         ) as enter:
