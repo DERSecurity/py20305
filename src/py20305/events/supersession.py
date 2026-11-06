@@ -86,59 +86,80 @@ def compute_supersession(
 
     Returns:
         List of SupersessionResult for each superseded pair.
+
+    Only events whose programs reach a common device can supersede one
+    another, so only those pairs are compared, in the order of *events*: the
+    results, and their order, are those of comparing every pair. Each event's
+    compared modes are worked out once.
     """
+    by_device: dict[str, list[int]] = {}
+    for index, event in enumerate(events):
+        for device in program_to_devices.get(event.program_href, ()):
+            by_device.setdefault(device, []).append(index)
+    pairs: set[tuple[int, int]] = set()
+    for indices in by_device.values():
+        for position, i in enumerate(indices):
+            pairs.update((i, j) for j in indices[position + 1 :])
+
+    modes: dict[int, frozenset[str]] = {}
+
+    def modes_of(index: int) -> frozenset[str]:
+        if index not in modes:
+            modes[index] = compared_mode_keys(events[index].derc.dercontrol_base)
+        return modes[index]
+
     results: list[SupersessionResult] = []
     checked: set[tuple[bytes, bytes]] = set()
 
-    for i, a in enumerate(events):
-        for b in events[i + 1 :]:
-            pair_key = (min(a.mrid, b.mrid), max(a.mrid, b.mrid))
-            if pair_key in checked:
-                continue
-            checked.add(pair_key)
+    for i, j in sorted(pairs):
+        a, b = events[i], events[j]
+        pair_key = (min(a.mrid, b.mrid), max(a.mrid, b.mrid))
+        if pair_key in checked:
+            continue
+        checked.add(pair_key)
 
-            if not _time_overlaps(a, b):
-                continue
+        if not _time_overlaps(a, b):
+            continue
 
-            # Per-mode supersession: intersecting modes supersede independently.
-            # Exact match (including both-empty) or non-empty overlap triggers supersession.
-            params_a = compared_mode_keys(a.derc.dercontrol_base)
-            params_b = compared_mode_keys(b.derc.dercontrol_base)
-            overlap = params_a & params_b
-            if params_a != params_b and not overlap:
-                continue
+        # Per-mode supersession: intersecting modes supersede independently.
+        # Exact match (including both-empty) or non-empty overlap triggers supersession.
+        params_a = modes_of(i)
+        params_b = modes_of(j)
+        overlap = params_a & params_b
+        if params_a != params_b and not overlap:
+            continue
 
-            # Determine winner: lower primacy number wins;
-            # same primacy: newer creationTime wins (IEEE 10.2.2.3 rule e)
-            if a.primacy < b.primacy:
+        # Determine winner: lower primacy number wins;
+        # same primacy: newer creationTime wins (IEEE 10.2.2.3 rule e)
+        if a.primacy < b.primacy:
+            winner, loser = a, b
+        elif b.primacy < a.primacy:
+            winner, loser = b, a
+        else:
+            # Use creation_time (preferred per IEEE), fall back to
+            # server_status_time for events that lack creationTime.
+            a_time = a.creation_time or a.server_status_time
+            b_time = b.creation_time or b.server_status_time
+            if a_time >= b_time:
                 winner, loser = a, b
-            elif b.primacy < a.primacy:
-                winner, loser = b, a
             else:
-                # Use creation_time (preferred per IEEE), fall back to
-                # server_status_time for events that lack creationTime.
-                a_time = a.creation_time or a.server_status_time
-                b_time = b.creation_time or b.server_status_time
-                if a_time >= b_time:
-                    winner, loser = a, b
-                else:
-                    winner, loser = b, a
+                winner, loser = b, a
 
-            # Compute affected devices: intersection of both programs' device sets
-            devs_winner = program_to_devices.get(winner.program_href, set())
-            devs_loser = program_to_devices.get(loser.program_href, set())
-            affected = frozenset(devs_winner & devs_loser)
+        # Compute affected devices: intersection of both programs' device sets
+        devs_winner = program_to_devices.get(winner.program_href, set())
+        devs_loser = program_to_devices.get(loser.program_href, set())
+        affected = frozenset(devs_winner & devs_loser)
 
-            if affected:
-                results.append(
-                    SupersessionResult(
-                        superseded_mrid=loser.mrid,
-                        superseding_mrid=winner.mrid,
-                        affected_devices=affected,
-                        superseded_program_href=loser.program_href,
-                        superseding_program_href=winner.program_href,
-                        affected_modes=overlap,
-                    )
+        if affected:
+            results.append(
+                SupersessionResult(
+                    superseded_mrid=loser.mrid,
+                    superseding_mrid=winner.mrid,
+                    affected_devices=affected,
+                    superseded_program_href=loser.program_href,
+                    superseding_program_href=winner.program_href,
+                    affected_modes=overlap,
                 )
+            )
 
     return results
