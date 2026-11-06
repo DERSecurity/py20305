@@ -7,6 +7,7 @@ import pytest
 from py20305.connectors.base import BaseConnector
 from py20305.connectors.modes import ALL_ELEMENTS
 from py20305.connectors.print_demo import PrintDemoConnector
+from py20305.server_profile import Edition, ServerProfile
 
 
 class TestPrintDemoConnector:
@@ -65,7 +66,10 @@ class TestPrintDemoConnector:
 
         new = fromstring(to_xml(build_der_status(status)))
         old = fromstring(
-            to_xml(build_der_status(status, server_2018_compat=True), server_2018_compat=True)
+            to_xml(
+                build_der_status(status, profile=ServerProfile(base=Edition.E2018)),
+                profile=ServerProfile(base=Edition.E2018),
+            )
         )
 
         assert new.find(ns + "connectStatus") is not None

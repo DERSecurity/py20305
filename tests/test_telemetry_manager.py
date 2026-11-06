@@ -14,6 +14,7 @@ from py20305.connectors.base import BaseConnector, ConnectorConnectionError, Rea
 from py20305.connectors.reading import reading_identity
 from py20305.models.sep import MirrorUsagePointList
 from py20305.readings import DirectConnectorSource, Quality
+from py20305.server_profile import Edition, ServerProfile
 from py20305.telemetry.manager import DeviceTelemetryState, TelemetryManager
 from py20305.telemetry.mup import mup_mrid
 from tests.legacy_readings import KEYS, readings_from
@@ -29,6 +30,7 @@ MUP_LIST_HREF = "/mup"
 def mock_client():
     """Mock Sep2Client."""
     client = AsyncMock()
+    client.profile = ServerProfile(base=Edition.E2023)
     client.post = AsyncMock(return_value="/mup/device1")
     client.post_bytes = AsyncMock(return_value="/mup/device1")
     client.put_bytes = AsyncMock(return_value=204)
@@ -604,7 +606,7 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_2018_schema_400_carries_compat_hint(self, monkeypatch, manager, mock_client):
         """A 400 from a 2030.5-2018 server should append a "try
-        server_2018_compat=true" suffix to the operator-facing message
+        server.schema.base: 2018" suffix to the operator-facing message
         so the operator can act on it from the UI."""
         from py20305 import diagnostics
         from py20305.diagnostics import DiagnosticsStore
@@ -612,7 +614,7 @@ class TestErrorHandling:
         fresh = DiagnosticsStore()
         monkeypatch.setattr(diagnostics, "_store", fresh)
 
-        mock_client.server_2018_compat = False
+        mock_client.profile = ServerProfile(base=Edition.E2023)
         mock_client.post_bytes.side_effect = Sep2ProtocolError(
             "POST /mup returned 400: 'schemaVer' attribute is not declared.",
             400,
@@ -623,14 +625,14 @@ class TestErrorHandling:
         warnings = fresh.snapshot()["warnings"]
         mup_warnings = [w for w in warnings if w["details"].get("op") == "mup_post"]
         assert len(mup_warnings) == 1
-        assert "server_2018_compat=true" in mup_warnings[0]["message"]
+        assert "server.schema.base: 2018" in mup_warnings[0]["message"]
 
         await manager.shutdown()
 
     @pytest.mark.asyncio
     async def test_non_2018_400_omits_compat_hint(self, monkeypatch, manager, mock_client):
         """A generic 4xx that doesn't match the 2018 signature must NOT
-        suggest server_2018_compat -- false positives would send the
+        suggest a 2018 base -- false positives would send the
         operator chasing the wrong fix."""
         from py20305 import diagnostics
         from py20305.diagnostics import DiagnosticsStore
@@ -638,7 +640,7 @@ class TestErrorHandling:
         fresh = DiagnosticsStore()
         monkeypatch.setattr(diagnostics, "_store", fresh)
 
-        mock_client.server_2018_compat = False
+        mock_client.profile = ServerProfile(base=Edition.E2023)
         mock_client.post_bytes.side_effect = Sep2ProtocolError(
             "POST /mup returned 400: payload too large", 400
         )
@@ -648,7 +650,7 @@ class TestErrorHandling:
         warnings = fresh.snapshot()["warnings"]
         mup_warnings = [w for w in warnings if w["details"].get("op") == "mup_post"]
         assert len(mup_warnings) == 1
-        assert "server_2018_compat" not in mup_warnings[0]["message"]
+        assert "server.schema.base" not in mup_warnings[0]["message"]
 
         await manager.shutdown()
 
@@ -1071,7 +1073,7 @@ class TestLogEventBurst:
     @pytest.mark.asyncio
     async def test_posts_five_events(self, manager, mock_client):
         """Burst posts 5 events and increments counter by 5."""
-        mock_client.server_2018_compat = False
+        mock_client.profile = ServerProfile(base=Edition.E2023)
         manager.start_metering(SAMPLE_LFDI, post_rate=300, log_event_list_href="/edev/1/lel")
 
         posted = await manager.post_log_event_burst(SAMPLE_LFDI, alarm_status=1, interval=0)
@@ -1084,7 +1086,7 @@ class TestLogEventBurst:
     @pytest.mark.asyncio
     async def test_burst_increments_counter_across_calls(self, manager, mock_client):
         """Counter persists across multiple burst calls."""
-        mock_client.server_2018_compat = False
+        mock_client.profile = ServerProfile(base=Edition.E2023)
         manager.start_metering(SAMPLE_LFDI, post_rate=300, log_event_list_href="/edev/1/lel")
 
         await manager.post_log_event_burst(SAMPLE_LFDI, interval=0)
@@ -1098,7 +1100,7 @@ class TestLogEventBurst:
         """Events are spaced by the interval parameter."""
         import asyncio
 
-        mock_client.server_2018_compat = False
+        mock_client.profile = ServerProfile(base=Edition.E2023)
         # Insert device state directly to avoid metering scheduler interference
         manager._devices[SAMPLE_LFDI.lower()] = DeviceTelemetryState(
             lfdi=SAMPLE_LFDI.lower(), post_rate=300, log_event_list_href="/edev/1/lel"
@@ -1121,7 +1123,7 @@ class TestLogEventBurst:
     @pytest.mark.asyncio
     async def test_burst_stops_on_post_failure(self, manager, mock_client):
         """Burst stops after first failed POST and returns partial count."""
-        mock_client.server_2018_compat = False
+        mock_client.profile = ServerProfile(base=Edition.E2023)
         manager.start_metering(SAMPLE_LFDI, post_rate=300, log_event_list_href="/edev/1/lel")
 
         call_count = 0
@@ -1281,6 +1283,7 @@ class TestConnectorReadings:
 class TestTimebaseAdoption:
     def test_manager_adopts_real_client_timebase(self):
         client = AsyncMock()
+        client.profile = ServerProfile(base=Edition.E2023)
         client.timebase = ServerTimebase()
         mgr = TelemetryManager(client, MUP_LIST_HREF, lambda lfdi: MagicMock())
         assert mgr._timebase is client.timebase
@@ -1538,6 +1541,8 @@ class TestRunsWithoutAStore:
         )
 
         client = AsyncMock()
+
+        client.profile = ServerProfile(base=Edition.E2023)
         client.get_bytes = AsyncMock(return_value=b"")
         client.post_bytes = AsyncMock(return_value="/mup/1")
         client.put_bytes = AsyncMock()

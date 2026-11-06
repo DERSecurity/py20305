@@ -313,3 +313,45 @@ __all__ = [
     "translate_controls",
     "translate_default_controls",
 ]
+
+
+def modes_supported2(connector: object) -> int:
+    """Return the DERControlType2 bits for the controls ``connector`` can apply.
+
+    A connector that defines ``supported_modes2()`` and returns an integer
+    states the bitmap itself: for a connector that implements a control method
+    but cannot honor it on this device. Otherwise a control counts as supported
+    when the connector implements its ``update_<element>`` method. The base
+    class declares every one as a no-op, so inheriting it is not support.
+    """
+    stated = getattr(connector, "supported_modes2", None)
+    if callable(stated):
+        try:
+            value = stated()
+        except Exception:
+            logger.warning("supported_modes2() raised; deriving from the control methods")
+        else:
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value & 0x3FF
+    return implemented_modes2(connector)
+
+
+def implemented_modes2(connector: object) -> int:
+    """Return the DERControlType2 bits of the ``update_<element>`` methods ``connector`` has.
+
+    The base class declares every method as a no-op, so inheriting it is not
+    support. A connector's own ``supported_modes2()`` can start from this and
+    clear the bits its device cannot apply.
+    """
+    from py20305.connectors.base import BaseConnector
+    from py20305.events.modes_bitmask import MODES2_BIT_OF_ELEMENT
+
+    bits = 0
+    for element, bit in MODES2_BIT_OF_ELEMENT.items():
+        method = f"update_{snake_case(element)}"
+        own = getattr(type(connector), method, None)
+        if own is not None and own is getattr(BaseConnector, method, None):
+            continue
+        if getattr(connector, method, None) is not None:
+            bits |= 1 << bit
+    return bits

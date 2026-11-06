@@ -609,6 +609,20 @@ class SunSpecModbusConnector:
         if model.W_SF.value is None:
             raise ConnectorConnectionError("Model 702 scanned but W_SF is not yet populated")
 
+    def charge_limit_supported(self) -> bool:
+        """Return whether the device can take an absorb-direction active-power limit.
+
+        That is model 702 WChaRteMax, implemented and with a non-zero
+        WChaRteMaxRtg (see ``_rate_setting_is_supported``). Model 704 has no
+        absorb-direction limit to fall back on. Answered from the values the
+        last read of model 702 left, so no request is sent to the device.
+        """
+        instances = self._target.models.get(702)
+        if not instances:
+            return False
+        model = instances[0]
+        return _rate_setting_is_supported(model, "abs", model.WChaRteMax)
+
     def _model_ids(self) -> list[int]:
         """Return the SunSpec model IDs the scan found, in ascending order.
 

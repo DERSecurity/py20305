@@ -87,9 +87,9 @@ The TXT record carries a `level` key, and §5.7 ties its value to an edition:
 therefore tells you which schema it implements, and `--discover` prints it.
 
 The client applies that answer itself: a discovered `-S1` sets
-`server_2018_compat` when the configuration has not set it. Setting it
-explicitly, either way, wins -- an operator who answered the question is not
-overruled by a record on the network.
+`server.schema.base` to `2018` (and `-S2` to `2023`) when the configuration
+leaves it at `auto`. Setting it explicitly, either way, wins -- an operator who
+answered the question is not overruled by a record on the network.
 
 ### Where DeviceCapability lives
 

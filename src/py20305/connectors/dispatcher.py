@@ -263,6 +263,32 @@ class ConnectorDispatcher:
 
         return await self._resolve_connector_by_lfdi(lfdi)
 
+    async def supported_modes2(self, lfdi: str) -> int | None:
+        """Return the DERControlType2 bits the device with ``lfdi`` can apply.
+
+        None when the device has no connector, or its connector has not been
+        constructed yet. Nothing is reported for a missing connector, since a
+        response may be posted for a device the client does not drive.
+
+        This runs on the response path, so it never constructs a connector:
+        construction can connect to and scan the device with retries, and the
+        acknowledgment and the activation timer wait on the response.
+        """
+        from py20305.connectors.modes import modes_supported2
+        from py20305.connectors.registry import LazyConnectorProxy
+
+        proxy = self._registry.get_connector(lfdi)
+        if proxy is None:
+            return None
+        connector = proxy.constructed() if isinstance(proxy, LazyConnectorProxy) else None
+        if connector is None:
+            return None
+        try:
+            return modes_supported2(connector)
+        except Exception:
+            logger.debug("Could not read the supported modes for %s", lfdi[:8], exc_info=True)
+            return None
+
     async def _resolve_connector_by_lfdi(self, lfdi: str) -> BaseConnector | None:
         """Resolve a device LFDI directly to a connector instance.
 

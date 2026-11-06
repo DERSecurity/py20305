@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import functools
-import re
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -17,6 +16,7 @@ from xsdata_pydantic.bindings import XmlContext, XmlParser, XmlSerializer
 # CSIP-AUS 1.3 tariff subclasses: a Notification's Resource is resolved by
 # xsi:type, and only a registered subclass admits the 1.3 RateComponentLink.
 from py20305.models.csipaus import csipaus_ext, tariff  # noqa: F401
+from py20305.server_profile import ServerProfile
 
 APPLICATION_SEP_XML = "application/sep+xml"
 
@@ -46,18 +46,13 @@ _context = XmlContext()
 _serializer = XmlSerializer(context=_context)
 _parser = XmlParser(context=_context)
 
-# Attributes to strip for IEEE 2030.5-2018 server compatibility.
-# schemaVer: not defined in the 2018 edition.
-# subscribable: not present on MirrorUsagePoint in 2018.
-_2018_COMPAT_RE = re.compile(r' (?:schemaVer|subscribable)="[^"]*"')
-
 
 def to_xml(
     model: object,
     *,
     include_csipaus: bool = False,
     csipaus_namespace: str = NS_CSIPAUS,
-    server_2018_compat: bool = False,
+    profile: ServerProfile | None = None,
 ) -> bytes:
     """Serialize a Pydantic model to IEEE 2030.5 XML bytes.
 
@@ -69,10 +64,15 @@ def to_xml(
             in, the one the server declares. CSIP-AUS 1.3 moved them from
             ``https://csipaus.org/ns`` to ``https://csipaus.org/ns/v1.3``, and a
             server reads only its own. Applies when ``include_csipaus`` is True.
-        server_2018_compat: If True, strip attributes from the root element
-            that are not present in the IEEE 2030.5-2018 schema (schemaVer,
-            subscribable on MirrorUsagePoint).
+        profile: The server's schema profile. The model is limited to what the
+            profile permits before it is serialized: for a 2018 base, the
+            elements and attributes 2023 added to a type (``schemaVer``,
+            ``subscribable`` on MirrorUsagePoint, ``connectStatus``, ...) are
+            left off unless an enabled feature covers them. None sends the model
+            as built.
     """
+    if profile is not None:
+        model = profile.restrict(model)
     ns_map: dict[str | None, str] = {None: NS_SEP}
     if include_csipaus:
         ns_map["csipaus"] = NS_CSIPAUS
@@ -86,16 +86,6 @@ def to_xml(
         xml_str = xml_str.replace(
             f'xmlns:csipaus="{NS_CSIPAUS}"', f'xmlns:csipaus="{csipaus_namespace}"', 1
         )
-    if server_2018_compat:
-        # Strip 2023-only attributes from the root element only.
-        # Skip past the XML declaration (ends with "?>") to find the
-        # root element, then substitute within the opening tag.
-        decl_end = xml_str.index("?>") + 2
-        rest = xml_str[decl_end:]
-        # Find end of root opening tag (either "/>" or ">")
-        close = rest.index(">")
-        root_tag = _2018_COMPAT_RE.sub("", rest[:close])
-        xml_str = xml_str[:decl_end] + root_tag + rest[close:]
     return xml_str.encode("utf-8")
 
 

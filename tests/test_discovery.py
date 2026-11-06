@@ -58,6 +58,7 @@ from py20305.models.sep.sep import (
     TimeOffsetType,
     TimeType,
 )
+from py20305.server_profile import Edition, ServerProfile
 from py20305.xml.serialization import NS_CSIPAUS
 
 
@@ -198,18 +199,21 @@ class _MockClient:
         self,
         responses: dict[str, Any],
         raw_bodies: dict[str, bytes] | None = None,
-        server_2018_compat: bool = False,
+        profile: ServerProfile | None = None,
     ) -> None:
         self._responses = responses
         self._raw_bodies = raw_bodies or {}
         self.timebase = ServerTimebase()
-        self.server_2018_compat = server_2018_compat
+        self.profile = profile or ServerProfile(base=Edition.E2023)
         # Every request as (method, path), path with its query string.
         self.calls: list[tuple[str, str]] = []
         self.discovered_devices: dict[str, str] = {}
 
     def update_discovered_devices(self, prefix_map: dict[str, str]) -> None:
         self.discovered_devices = dict(prefix_map)
+
+    def observe_device_capability(self, body: bytes) -> ServerProfile:
+        return self.profile
 
     async def get(self, path: str, model_type: type) -> Any:
         self.calls.append(("get", path))
@@ -1051,6 +1055,41 @@ async def test_discovery_records_the_csipaus_namespace_the_server_declares(decla
     await discover(client, DiscoveredState())  # type: ignore[arg-type]
 
     assert client.csipaus_namespace == expected
+
+
+@pytest.mark.parametrize(
+    ("raw_dcap", "configured", "expected"),
+    [
+        pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns"/>',
+            frozenset({"csip-aus-1.3"}),
+            True,
+            id="listed-on-a-plain-server",
+        ),
+        pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns"/>',
+            frozenset(),
+            False,
+            id="empty-list-on-a-csipaus-server",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_configured_extensions_set_the_http_clients_csip_aus_flag(
+    raw_dcap, configured, expected
+):
+    """The serializer reads the HTTP client's flag, so a configured list must set it."""
+    client = _MockClient(
+        {"/dcap": _make_dcap(edev_href=None), "/tm": _make_time()},
+        raw_bodies={"/dcap": raw_dcap},
+        profile=ServerProfile(base=Edition.E2023, extensions=configured),
+    )
+    client.csip_aus_mode = not expected
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert client.csip_aus_mode is expected
+    assert state.csip_aus_mode is expected
 
 
 @pytest.mark.asyncio
@@ -2181,7 +2220,7 @@ async def test_multi_der_gaps_filled_from_later_entries_in_2018_compat():
     """A 2018 server may spread child links across DER entries; honor that.
 
     Previous revisions of IEEE 2030.5 allowed several DER objects, so under
-    ``server_2018_compat`` a link the first entry omits is taken from a later
+    a 2018 base a link the first entry omits is taken from a later
     one rather than dropped.
     """
     client = _MockClient(
@@ -2198,7 +2237,7 @@ async def test_multi_der_gaps_filled_from_later_entries_in_2018_compat():
                 ),
             ),
         },
-        server_2018_compat=True,
+        profile=ServerProfile(base=Edition.E2018),
     )
 
     state = DiscoveredState()

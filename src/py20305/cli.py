@@ -298,7 +298,7 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
         dispatcher=ConnectorDispatcher(registry, lfdi_resolver=resolve_lfdi),
         dcap_path=config.server.dcap_path,
         registration_pins=config.registration_pins or None,
-        server_2018_compat=config.server.server_2018_compat,
+        profile=config.server.profile(),
         use_server_time=config.server.use_server_time,
         fsa_stale_seconds=config.server.fsa_stale_seconds,
         heartbeat_seconds=config.subscription.backstop_poll_seconds,
@@ -323,7 +323,7 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
         manager = SubscriptionManager(
             client=client.http,
             notification_uri=notification_server.build_notification_uri(external_host),
-            server_2018_compat=config.server.server_2018_compat,
+            missing_location_fallback=config.server.profile().missing_location_fallback,
             renewal_method=config.subscription.renewal_method,
             # A renewal answered 401/404 means the server has forgotten us;
             # rediscovery re-subscribes against its current state. Wrapped to
@@ -703,11 +703,14 @@ async def _run_client(
             "dcap_path": server.dcap_path,
         }
         # §5.7 ties the advertised extensibility level to an edition, so a
-        # server saying -S1 has answered the question `server_2018_compat`
-        # asks. An operator who set it has answered it themselves, and their
-        # answer wins.
-        if "server_2018_compat" not in config.server.model_fields_set:
-            discovered["server_2018_compat"] = server.is_2018
+        # server saying -S1 has answered the question `server.schema.base`
+        # asks. An operator who set the base has answered it themselves, and
+        # their answer wins.
+        schema = config.server.schema_profile
+        if schema.base == "auto" and config.server.server_2018_compat is None:
+            discovered["schema_profile"] = schema.model_copy(
+                update={"base": "2018" if server.is_2018 else "2023"}
+            )
         config = config.model_copy(
             update={"server": config.server.model_copy(update=discovered)}
         )

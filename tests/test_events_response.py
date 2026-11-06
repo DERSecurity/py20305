@@ -33,6 +33,7 @@ from py20305.models.sep.sep import (
     MRidtype,
     TimeType,
 )
+from py20305.server_profile import Edition, ServerProfile
 
 
 def _make_derc(
@@ -245,6 +246,7 @@ class TestPostDerResponseRespectsResponseRequired:
     @pytest.mark.asyncio
     async def test_zero_skips_post(self):
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         derc = _make_derc(reply_to="/rsps", response_required=b"\x00")
         await post_der_response(http, derc, ResponseCode.ACTIVE, b"\xaa" * 20, ResponseTracker())
@@ -253,6 +255,7 @@ class TestPostDerResponseRespectsResponseRequired:
     @pytest.mark.asyncio
     async def test_received_bit_posts_ack_skips_active(self):
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         derc = _make_derc(reply_to="/rsps", response_required=b"\x01")
         tracker = ResponseTracker()
@@ -263,6 +266,7 @@ class TestPostDerResponseRespectsResponseRequired:
     @pytest.mark.asyncio
     async def test_specific_bit_posts_active_skips_ack(self):
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         derc = _make_derc(reply_to="/rsps", response_required=b"\x02")
         tracker = ResponseTracker()
@@ -273,6 +277,7 @@ class TestPostDerResponseRespectsResponseRequired:
     @pytest.mark.asyncio
     async def test_seven_posts_all(self):
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         derc = _make_derc(reply_to="/rsps", response_required=b"\x07")
         tracker = ResponseTracker()
@@ -285,6 +290,7 @@ class TestPostDerResponse:
     @pytest.mark.asyncio
     async def test_skips_when_no_reply_to(self):
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         derc = _make_derc()  # no reply_to
         tracker = ResponseTracker()
@@ -297,6 +303,7 @@ class TestPostDerResponse:
     @pytest.mark.asyncio
     async def test_posts_to_reply_to(self):
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
@@ -310,6 +317,7 @@ class TestPostDerResponse:
     @pytest.mark.asyncio
     async def test_duplicate_suppressed(self):
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
@@ -322,6 +330,7 @@ class TestPostDerResponse:
     @pytest.mark.asyncio
     async def test_different_codes_not_suppressed(self):
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
@@ -334,8 +343,9 @@ class TestPostDerResponse:
     @pytest.mark.asyncio
     async def test_modes_responded_set(self):
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         derc = _make_derc(reply_to="/rsps")
         # Set a mode to verify modesResponded is populated
         from py20305.models.sep.sep import DercontrolBase
@@ -354,6 +364,7 @@ class TestPostDerResponse:
     @pytest.mark.asyncio
     async def test_post_failure_logged(self):
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=RuntimeError("connection failed"))
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
@@ -367,6 +378,7 @@ class TestPostDerResponse:
     async def test_different_lfdis_post_separately(self):
         """Same (mrid, code) with different LFDIs produces separate posts."""
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
@@ -420,20 +432,26 @@ class TestRevisionTranslation:
 
     def test_not_supported_becomes_not_applicable_under_2018(self):
         assert (
-            translate_code_for_revision(ResponseCode.NOT_SUPPORTED, server_2018_compat=True)
+            translate_code_for_revision(
+                ResponseCode.NOT_SUPPORTED, profile=ServerProfile(base=Edition.E2018)
+            )
             == ResponseCode.NOT_APPLICABLE
         )
 
     def test_not_applicable_passes_through_under_2018(self):
         """The two codes collapse onto one wire value; nothing preserves the reason."""
         assert (
-            translate_code_for_revision(ResponseCode.NOT_APPLICABLE, server_2018_compat=True)
+            translate_code_for_revision(
+                ResponseCode.NOT_APPLICABLE, profile=ServerProfile(base=Edition.E2018)
+            )
             == ResponseCode.NOT_APPLICABLE
         )
 
     def test_no_translation_without_the_flag(self):
         assert (
-            translate_code_for_revision(ResponseCode.NOT_SUPPORTED, server_2018_compat=False)
+            translate_code_for_revision(
+                ResponseCode.NOT_SUPPORTED, profile=ServerProfile(base=Edition.E2023)
+            )
             == ResponseCode.NOT_SUPPORTED
         )
 
@@ -442,7 +460,9 @@ class TestRevisionTranslation:
         the 251 -> 252 collapse. A 2018 head-end can still tell invalid event
         data apart from a capability limit."""
         assert (
-            translate_code_for_revision(ResponseCode.INVALID, server_2018_compat=True)
+            translate_code_for_revision(
+                ResponseCode.INVALID, profile=ServerProfile(base=Edition.E2018)
+            )
             == ResponseCode.INVALID
         )
 
@@ -459,15 +479,16 @@ class TestRevisionTranslation:
         ],
     )
     def test_lifecycle_codes_untouched_under_2018(self, code: ResponseCode):
-        assert translate_code_for_revision(code, server_2018_compat=True) == code
+        assert translate_code_for_revision(code, profile=ServerProfile(base=Edition.E2018)) == code
 
     @pytest.mark.asyncio
     async def test_post_translates_on_the_wire(self):
         """The translation reaches the posted resource, not just the helper."""
         derc = _make_derc(reply_to="/rsps/1")
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
-        http.server_2018_compat = True
+        http.profile = ServerProfile(base=Edition.E2018)
         tracker = ResponseTracker()
 
         await post_der_response(
@@ -482,8 +503,9 @@ class TestRevisionTranslation:
         """Both codes share a wire value under 2018, so the server must see it once."""
         derc = _make_derc(reply_to="/rsps/1")
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
-        http.server_2018_compat = True
+        http.profile = ServerProfile(base=Edition.E2018)
         tracker = ResponseTracker()
         lfdi = b"\xaa" * 20
 
@@ -510,8 +532,9 @@ class TestPluginOptOut:
     async def test_posted_as_status_4_when_the_end_user_bit_is_set(self):
         derc = _make_derc(reply_to="/rsps/1", response_required=b"\x07")
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
 
         await post_der_response(
             http, derc, ResponseCode.OPT_OUT, b"\xaa" * 20, ResponseTracker(), now_ts=1000
@@ -524,8 +547,9 @@ class TestPluginOptOut:
         """D4: a suppressed opt-out would leave the head-end with silence."""
         derc = _make_derc(reply_to="/rsps/1", response_required=b"\x03")
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
 
         await post_der_response(
             http, derc, ResponseCode.OPT_OUT, b"\xaa" * 20, ResponseTracker(), now_ts=1000
@@ -539,8 +563,9 @@ class TestPluginOptOut:
         """The D4 downgrade target passes through the D8 translation."""
         derc = _make_derc(reply_to="/rsps/1", response_required=b"\x03")
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
-        http.server_2018_compat = True
+        http.profile = ServerProfile(base=Edition.E2018)
 
         await post_der_response(
             http, derc, ResponseCode.OPT_OUT, b"\xaa" * 20, ResponseTracker(), now_ts=1000
@@ -553,8 +578,9 @@ class TestPluginOptOut:
         """2018 reserves 251, but status 4 is unchanged between revisions."""
         derc = _make_derc(reply_to="/rsps/1", response_required=b"\x07")
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
-        http.server_2018_compat = True
+        http.profile = ServerProfile(base=Edition.E2018)
 
         await post_der_response(
             http, derc, ResponseCode.OPT_OUT, b"\xaa" * 20, ResponseTracker(), now_ts=1000
@@ -567,8 +593,9 @@ class TestPluginOptOut:
         """Nothing is requested at all, so the downgrade has nothing to ride."""
         derc = _make_derc(reply_to="/rsps/1", response_required=b"\x00")
         http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(return_value=None)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
 
         await post_der_response(
             http, derc, ResponseCode.OPT_OUT, b"\xaa" * 20, ResponseTracker(), now_ts=1000
@@ -595,8 +622,10 @@ class TestConcurrentPostsCollapse:
             posted.append(body.status)
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
@@ -615,8 +644,10 @@ class TestConcurrentPostsCollapse:
                 raise Sep2ConnectionError("broker of bad news")
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
@@ -646,8 +677,10 @@ class TestCancellationDoesNotLeakAClaim:
             await asyncio.Event().wait()  # never returns; the caller cancels us
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
@@ -675,8 +708,10 @@ class TestCancellationDoesNotLeakAClaim:
             posted.append(body.status)
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=hang)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
@@ -717,8 +752,10 @@ class TestTheLoserCoversAFailedWinner:
             landed.append(body.status)
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
@@ -745,8 +782,10 @@ class TestTheLoserCoversAFailedWinner:
             posted.append(body.status)
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
@@ -767,8 +806,10 @@ class TestAClaimSurvivesNothing:
             posted.append(body.status)
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
@@ -810,8 +851,10 @@ class TestTheHandoffUnderCancellation:
             landed.append(body.status)
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=hang)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
@@ -846,8 +889,10 @@ class TestTheHandoffUnderCancellation:
             landed.append(body.status)
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=slow)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 
@@ -891,8 +936,10 @@ class TestOnlyOneWaiterTakesOver:
             landed.append(body.status)
 
         http = AsyncMock()
+
+        http.profile = ServerProfile(base=Edition.E2023)
         http.post = AsyncMock(side_effect=post)
-        http.server_2018_compat = False
+        http.profile = ServerProfile(base=Edition.E2023)
         derc = _make_derc(reply_to="/rsps")
         tracker = ResponseTracker()
 

@@ -41,6 +41,7 @@ from py20305.events.dispatch import ControlDispatcher, NullDispatcher
 from py20305.events.processor import EventProcessor
 from py20305.events.tariff import TariffProcessor
 from py20305.observers import Observers
+from py20305.server_profile import ServerProfile, profile_for_constructor
 from py20305.subscription.manager import (
     StoredNotification,
     SubscriptionManager,
@@ -154,7 +155,7 @@ class CsipClient:
         notification_server: NotificationServer | None = None,
         on_structural_change: Callable[[], Awaitable[None]] | None = None,
         on_device_removed: Callable[[str], Awaitable[None]] | None = None,
-        server_2018_compat: bool = False,
+        profile: ServerProfile | None = None,
         always_send_alarm_status: bool = False,
         request_headers: dict[str, str] | None = None,
         dcap_path: str = "/dcap",
@@ -173,6 +174,7 @@ class CsipClient:
         time_drift_warn_seconds: int = 30,
         fsa_stale_seconds: float | None = None,
         pricing_enabled: bool = False,
+        server_2018_compat: bool | None = None,
     ) -> None:
         #: Application-level server timebase :
         #: time-of-day-sensitive operations follow the head-end's Time resource;
@@ -187,7 +189,7 @@ class CsipClient:
             base_url,
             tls=tls,
             retry=retry,
-            server_2018_compat=server_2018_compat,
+            profile=profile_for_constructor(profile, server_2018_compat),
             always_send_alarm_status=always_send_alarm_status,
             request_headers=request_headers,
             timebase=self._timebase,
@@ -360,9 +362,7 @@ class CsipClient:
             notification_server.on_notification = self._handle_notification
             notification_server.observers = self._http.observers
 
-    def set_on_structural_change(
-        self, callback: Callable[[], Awaitable[None]] | None
-    ) -> None:
+    def set_on_structural_change(self, callback: Callable[[], Awaitable[None]] | None) -> None:
         """Set the structural-change callback after construction.
 
         The same construction-order problem as ``attach_subscriptions``, one

@@ -40,8 +40,9 @@ pass to a monitoring system.
 ## Standards
 
 - **IEEE 2030.5-2018 and 2030.5-2023.** Both schemas ship with the package;
-  the generated bindings track 2023, and a `server_2018_compat` flag adjusts
-  behavior for servers still on 2018.
+  the generated bindings track 2023, and a server schema profile
+  (`server.schema`) sends a 2018 server only what 2018 defines, plus any
+  function it borrows from 2023.
 - **CSIP-AUS.** The Australian Common Smart Inverter Profile, including DOE
   (dynamic operating envelope) limits. The client writes its CSIP-AUS
   extensions in the namespace the server declares, so it works with servers on

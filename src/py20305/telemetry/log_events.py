@@ -10,6 +10,8 @@ import logging
 import time
 from typing import Any
 
+from py20305.server_profile import ServerProfile
+
 logger = logging.getLogger(__name__)
 
 # IEEE 2030.5 PEN for standard log events
@@ -118,7 +120,7 @@ def create_log_event_xml(
     pen: int = IEEE_2030_5_PEN,
     details: str | None = None,
     *,
-    server_2018_compat: bool = False,
+    profile: ServerProfile | None = None,
     created_time: int | None = None,
 ) -> bytes:
     """Build a LogEvent XML body for POST to LogEventListLink.
@@ -141,7 +143,8 @@ def create_log_event_xml(
     # createdDateTime: caller passes server-timebase time; local-clock default.
     now = created_time if created_time is not None else int(time.time())
 
-    schema_attr = "" if server_2018_compat else ' schemaVer="2.2"'
+    version = profile.schema_ver if profile is not None else "2.2"
+    schema_attr = f' schemaVer="{version}"' if version else ""
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<LogEvent xmlns="{NS_SEP}"{schema_attr}>',

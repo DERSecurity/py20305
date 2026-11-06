@@ -42,6 +42,7 @@ from py20305.models.sep.sep import (
     StorageModeStatusType,
     TimeType,
 )
+from py20305.server_profile import ServerProfile
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ ALARM_STATUS_BITS = (1 << 11) - 1
 def build_der_status(
     status_data: dict[str, Any],
     *,
-    server_2018_compat: bool = False,
+    profile: ServerProfile | None = None,
     always_send_alarm_status: bool = False,
     default_time: int | None = None,
 ) -> Derstatus:
@@ -87,9 +88,10 @@ def build_der_status(
             - stateOfChargeStatus: {dateTime, value} (optional)
             - storageModeStatus: {dateTime, value} (optional)
             - storConnectStatus: {dateTime, value} (optional)
-        server_2018_compat: When True, emit genConnectStatus/storConnectStatus
-            (ConnectStatusType) instead of connectStatus (ConnectStatusType2)
-            for IEEE 2030.5-2018 server compatibility.
+        profile: The server's schema profile. A 2018 base sends
+            genConnectStatus/storConnectStatus (ConnectStatusType) and not
+            connectStatus (ConnectStatusType2); a 2023 base the reverse. None
+            builds for 2023.
         always_send_alarm_status: When True, include alarmStatus even when no
             alarms are active (all-zero bitmap) instead of omitting it. For
             servers that treat an absent alarmStatus as "no change" rather than
@@ -146,7 +148,7 @@ def build_der_status(
         ),
     }
 
-    if server_2018_compat:
+    if profile is not None and profile.is_2018:
         # IEEE 2030.5-2018: only genConnectStatus/storConnectStatus exist, and
         # they are sent as the connector supplied them. connectStatus
         # (ConnectStatusType2) is never sent.

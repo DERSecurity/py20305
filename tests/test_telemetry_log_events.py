@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from py20305.server_profile import Edition, ServerProfile
 from py20305.telemetry.log_events import (
     DER_ALARM_NAMES,
     FUNCTION_SET_DER,
@@ -90,8 +91,8 @@ class TestCreateLogEventXml:
         result = create_log_event_xml(log_event_code=0)
         assert result.startswith(b'<?xml version="1.0" encoding="UTF-8"?>')
 
-    def test_server_2018_compat(self) -> None:
-        xml = create_log_event_xml(log_event_code=0, server_2018_compat=True)
+    def test_a_2018_profile_omits_schema_ver(self) -> None:
+        xml = create_log_event_xml(log_event_code=0, profile=ServerProfile(base=Edition.E2018))
         text = xml.decode("utf-8")
         assert "schemaVer" not in text
         assert "<LogEvent" in text

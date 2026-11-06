@@ -423,3 +423,58 @@ async def test_the_connector_remembers_the_wiring_between_reads() -> None:
 
     assert (29, 224) in _phases(first)
     assert (29, 224) in _phases(second)
+
+
+class _Point:
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
+class _Model702:
+    def __init__(self, cha_rte_max: Any, rating: Any) -> None:
+        self.WChaRteMax = _Point(cha_rte_max)
+        self.WChaRteMaxRtg = _Point(rating)
+
+
+class _Target:
+    def __init__(self, models: dict[int, list[Any]]) -> None:
+        self.models = models
+
+
+@pytest.mark.parametrize(
+    ("models", "expected"),
+    [
+        pytest.param({702: [_Model702(5000, 5000)]}, True, id="implemented-and-rated"),
+        pytest.param({702: [_Model702(None, 5000)]}, False, id="unimplemented"),
+        pytest.param({702: [_Model702(0, 0)]}, False, id="zero-rating"),
+        pytest.param({}, False, id="no-model-702"),
+    ],
+)
+def test_the_core_reports_charge_limit_support_from_model_702(
+    models: dict[int, list[Any]], expected: bool
+) -> None:
+    from py20305.connectors.sunspec._modbus import SunSpecModbusConnector
+
+    core = object.__new__(SunSpecModbusConnector)
+    core._target = _Target(models)
+
+    assert core.charge_limit_supported() is expected
+
+
+@pytest.mark.parametrize("supported", [True, False])
+def test_the_absorb_limit_bit_follows_the_devices_charge_rate_limit(supported: bool) -> None:
+    from py20305.connectors.modes import implemented_modes2, modes_supported2
+
+    class _Core:
+        def charge_limit_supported(self) -> bool:
+            return supported
+
+    connector = object.__new__(SunSpecConnector)
+    connector._core = _Core()
+    implemented = implemented_modes2(connector)
+    assert implemented & (1 << 7), "the connector implements opModMaxLimWAbsorb"
+
+    bits = modes_supported2(connector)
+
+    assert bool(bits & (1 << 7)) is supported
+    assert bits & ~(1 << 7) == implemented & ~(1 << 7), "the other bits are unchanged"

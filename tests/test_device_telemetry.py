@@ -23,6 +23,7 @@ from py20305.connectors.device_telemetry import (
 from py20305.connectors.dispatcher import ConnectorDispatcher
 from py20305.observers import DeviceRecord
 from py20305.readings import DirectConnectorSource
+from py20305.server_profile import Edition, ServerProfile
 from tests.legacy_readings import KEYS, readings_from
 
 
@@ -679,6 +680,8 @@ class TestRunnerStopsMetering:
         from py20305 import cli as cli_module
 
         client = MagicMock()
+
+        client.profile = ServerProfile(base=Edition.E2023)
         client.http.forwarder = None
         client.connect = AsyncMock()
         client.run = AsyncMock(side_effect=lambda: asyncio.sleep(0))

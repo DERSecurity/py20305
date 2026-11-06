@@ -11,9 +11,11 @@ from typing import Any
 
 from py20305.models.csipaus.csipaus_ext import DoeModesEnabled
 from py20305.models.sep.sep import (
+    DercontrolType2,
     Dersettings,
     TimeType,
 )
+from py20305.server_profile import ServerProfile
 from py20305.telemetry.der_capability import control_type_from
 from py20305.telemetry.scale_factor import (
     to_active_power,
@@ -30,12 +32,17 @@ from py20305.telemetry.scale_factor import (
 # report which DOE modes are enabled.
 _DEFAULT_DOE_MODES_ENABLED = 0x03
 
+#: DERControlType2 defines bits 0 to 9; the rest are reserved.
+_ALL_MODES2 = 0x3FF
+
 
 def build_der_settings(
     configuration: dict[str, Any],
     updated_time: int | None = None,
     *,
     csip_aus_mode: bool = False,
+    modes_supported2: int | None = None,
+    profile: ServerProfile | None = None,
 ) -> Dersettings:
     """Build a ``Dersettings`` model from connector configuration data.
 
@@ -46,6 +53,11 @@ def build_der_settings(
         csip_aus_mode: When True, attach the CSIP-AUS ``doeModesEnabled``
             extension (required by CSIP-AUS servers); plain 2030.5 servers omit
             it.
+        modes_supported2: The DERControlType2 bits the connector supports.
+            ``modesEnabled2`` is limited to them, since a mode the device cannot
+            apply is not enabled on it.
+        profile: The server's schema profile. It limits ``modesEnabled2`` to the
+            bits the profile permits.
 
     Returns:
         Pydantic model ready for ``to_xml()`` serialization.
@@ -61,6 +73,21 @@ def build_der_settings(
 
     # modesEnabled: optional bitmap
     modes_enabled = control_type_from("modesEnabled", configuration.get("modesEnabled"))
+
+    # modesEnabled2: the additional modes (2023) the connector reports enabled.
+    # Only the connector can say which are enabled, so nothing is sent without
+    # its value; it is limited to what the device supports and the server
+    # profile permits. A reported 0 is sent when some mode is available, so the
+    # server learns that modes it saw enabled are now disabled. It is left out
+    # only when no additional mode is available.
+    modes_enabled2 = None
+    enabled2 = configuration.get("modesEnabled2")
+    if isinstance(enabled2, int) and not isinstance(enabled2, bool):
+        available = _ALL_MODES2 if modes_supported2 is None else modes_supported2 & _ALL_MODES2
+        if profile is not None:
+            available = profile.mask_modes2(available)
+        if available:
+            modes_enabled2 = DercontrolType2(value=(enabled2 & available).to_bytes(4, "big"))
 
     # setGradW: required UInt16, plain integer (not a scale factor type)
     grad_w = configuration.get("setGradW", 0)
@@ -88,6 +115,7 @@ def build_der_settings(
 
     return Dersettings(
         modes_enabled=modes_enabled,
+        modes_enabled2=modes_enabled2,
         other_element=other_element,
         set_grad_w=set_grad_w,
         set_max_ah=to_amp_hour(configuration.get("setMaxAh")),

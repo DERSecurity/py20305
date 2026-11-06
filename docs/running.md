@@ -51,6 +51,57 @@ error: invalid configuration in client.yaml:
   devices.0.sunspec.lfdi: Value error, lfdi must be 40 hex characters (length is 8, must be 40)
 ```
 
+## The server's schema
+
+IEEE 2030.5-2018 and 2030.5-2023 share one namespace, so a message cannot be
+sorted into an edition by namespace. The `server.schema` block tells the client
+what the server speaks:
+
+```yaml
+server:
+  schema:
+    base: auto            # auto, 2018 or 2023
+    features: []          # functions borrowed from the other edition
+    extensions: auto      # auto, or a list: csip-aus-1.2, csip-aus-1.3
+```
+
+- **`base`** is the edition the server implements. `auto` reads the
+  DeviceCapability: a `schemaVer` of 2.2 or higher means 2023, and anything
+  else, including no `schemaVer`, means 2018. The 2023 schema makes the
+  attribute optional, so a missing one is weak evidence; the client logs the
+  decision and its evidence at INFO, and `base` overrides it. A discovered
+  server's advertised level (DNS-SD `-S1`, `-S2`) sets `auto` first.
+- **`features`** are functions a server adopts from another edition, for
+  example a 2018 server that takes the 2023 import and export limits. They are
+  never detected: list them or they are off. `import_export_limits` is
+  `opModMaxLimWAbsorb` and `opModMaxLimWInject` with DERControlType2 bits 7 and
+  8 in DERCapability `modesSupported2`, DERSettings `modesEnabled2` and
+  DERControlResponse `modesResponded2`. A feature permits those bits; the
+  connector decides which it sets. A connector advertises an additional mode
+  only when it implements the matching `update_<element>` method (for example
+  `update_op_mod_max_lim_w_inject`), or states its own bitmap in
+  `supported_modes2()` when it implements a method it cannot honor on the
+  device.
+- **`extensions`** are schemas in other namespaces. `auto` detects CSIP-AUS from
+  the namespaces the server declares.
+
+Inbound, the client accepts any element either edition defines and logs, at
+INFO, each element the server sends that its base does not define and which
+feature covers it. Outbound, it sends a 2023 element to a 2018 server only when
+an enabled feature covers it: DERStatus carries `genConnectStatus` and
+`storConnectStatus` and not `connectStatus`, no payload carries `schemaVer`,
+DERControlResponse carries no `modesResponded`, and a rejection goes out as
+status 252 where 2023 uses 251 (Table 27 against Table 31).
+
+`server.missing_location_fallback: true` accepts a subscription the server
+created without a Location header, under a synthetic URI. Both editions require
+the header on a created resource, so this is a workaround for a non-conforming
+server, off by default.
+
+`server.server_2018_compat` is deprecated. `true` means `schema.base: 2018` plus
+`missing_location_fallback: true`; `false` means `schema.base: 2023`. It logs a
+warning that names the replacement.
+
 ## What it does on start
 
 1. Loads and validates the configuration, then configures logging.

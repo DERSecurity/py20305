@@ -7,7 +7,7 @@ This module maps DercontrolBase field names to their corresponding bit positions
 from __future__ import annotations
 
 from py20305.models.csipaus.elements import DOE_LIMIT_NAMES, doe_limits
-from py20305.models.sep.sep import DercontrolBase, DercontrolType
+from py20305.models.sep.sep import DercontrolBase, DercontrolType, DercontrolType2
 
 # Mapping from DercontrolBase field names to DERControlType bit positions.
 # Per IEEE 2030.5-2023 Section 10.10, Table 27.
@@ -43,6 +43,53 @@ _FIELD_TO_BIT: dict[str, int] = {
     "op_mod_grid_connect_permit": 30,
     "op_mod_island_permit": 31,
 }
+
+
+#: DERControlType2 bit positions (IEEE 2030.5-2023, DERControlType2), by
+#: DERControlBase field name.
+_FIELD_TO_BIT2: dict[str, int] = {
+    "op_mod_max_lim_pct_vaabsorb": 0,
+    "op_mod_max_lim_pct_vainject": 1,
+    "op_mod_max_lim_pct_var_absorb": 2,
+    "op_mod_max_lim_pct_var_inject": 3,
+    "op_mod_max_lim_pct_wabsorb": 4,
+    "op_mod_max_lim_var_absorb": 5,
+    "op_mod_max_lim_var_inject": 6,
+    "op_mod_max_lim_wabsorb": 7,
+    "op_mod_max_lim_winject": 8,
+    "op_mod_target_v": 9,
+}
+
+#: DERControlType2 bit of each IEEE 2030.5 control element, by element name.
+MODES2_BIT_OF_ELEMENT: dict[str, int] = {
+    "opModMaxLimPctVAAbsorb": 0,
+    "opModMaxLimPctVAInject": 1,
+    "opModMaxLimPctVarAbsorb": 2,
+    "opModMaxLimPctVarInject": 3,
+    "opModMaxLimPctWAbsorb": 4,
+    "opModMaxLimVarAbsorb": 5,
+    "opModMaxLimVarInject": 6,
+    "opModMaxLimWAbsorb": 7,
+    "opModMaxLimWInject": 8,
+    "opModTargetV": 9,
+}
+
+
+def build_modes_responded2(base: DercontrolBase, allowed: int) -> DercontrolType2 | None:
+    """Build a DERControlType2 bitmask from the additional modes ``base`` sets.
+
+    Only bits in ``allowed`` are included: the ones the device supports and the
+    server profile permits. None when no additional mode applies, so the
+    element is left out.
+    """
+    bitmask = 0
+    for field_name, bit_pos in _FIELD_TO_BIT2.items():
+        if getattr(base, field_name, None) is not None:
+            bitmask |= 1 << bit_pos
+    bitmask &= allowed
+    if not bitmask:
+        return None
+    return DercontrolType2(value=bitmask.to_bytes(4, byteorder="big"))
 
 
 def build_modes_responded(base: DercontrolBase) -> DercontrolType:

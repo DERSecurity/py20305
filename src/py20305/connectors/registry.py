@@ -115,6 +115,13 @@ class LazyConnectorProxy:
         object.__setattr__(self, "_instance", instance)
         return instance
 
+    def constructed(self) -> Any | None:
+        """Return the connector if it has been constructed, else ``None``.
+
+        Never constructs it, so a caller that must not wait on a device can ask.
+        """
+        return self._instance
+
     def _get_aresolve_lock(self) -> asyncio.Lock:
         """Return an ``asyncio.Lock`` bound to the running loop.
 

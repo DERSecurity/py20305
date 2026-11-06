@@ -14,6 +14,8 @@ in its own application already has configuration of its own and should build
 from __future__ import annotations
 
 import json
+import logging
+import warnings
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
@@ -30,6 +32,9 @@ from pydantic import (
 from py20305.client.dnssd.wire import DEFAULT_SERVICE, validate_service, validate_subtype
 from py20305.connectors.config import DeviceConfig
 from py20305.history.config import HistoryConfig
+from py20305.server_profile import Edition, ServerProfile
+
+logger = logging.getLogger(__name__)
 
 #: Suffixes understood by :func:`load_config`.
 _YAML_SUFFIXES = {".yaml", ".yml"}
@@ -54,8 +59,74 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ServerSchemaConfig(_Strict):
+    """Which IEEE 2030.5 schemas the server speaks, and so what the client may send it.
+
+    Inbound, the client reads any element either edition defines. Outbound, it
+    sends only what the base edition defines, plus the elements of the listed
+    ``features`` and ``extensions``.
+    """
+
+    base: Literal["auto", "2018", "2023"] = Field(
+        default="auto",
+        description=(
+            "The edition the server implements. `auto` reads the DeviceCapability: "
+            'schemaVer "2.2" or higher means 2023, and anything else, including no '
+            "schemaVer, means 2018. The decision and its evidence are logged."
+        ),
+    )
+    features: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Functions the server borrows from another edition, for example "
+            "`import_export_limits` on a 2018 server that takes the 2023 import and "
+            "export limits. Never detected; listed here or off."
+        ),
+    )
+    extensions: Literal["auto"] | list[str] = Field(
+        default="auto",
+        description=(
+            "Schemas in other namespaces: `csip-aus-1.2`, `csip-aus-1.3`. `auto` detects "
+            "them from the namespaces the server declares."
+        ),
+    )
+
+    @field_validator("base", mode="before")
+    @classmethod
+    def _edition_as_text(cls, v: object) -> object:
+        """Accept ``base: 2018`` and ``base: 2023``, which YAML reads as integers."""
+        if isinstance(v, int) and not isinstance(v, bool) and v in (2018, 2023):
+            return str(v)
+        return v
+
+    @field_validator("features")
+    @classmethod
+    def _known_features(cls, v: list[str]) -> list[str]:
+        from py20305.server_profile import FEATURES
+
+        unknown = sorted(set(v) - set(FEATURES))
+        if unknown:
+            known = ", ".join(sorted(FEATURES))
+            raise ValueError(f"unknown feature {', '.join(unknown)}; known: {known}")
+        return v
+
+    @field_validator("extensions")
+    @classmethod
+    def _known_extensions(cls, v: str | list[str]) -> str | list[str]:
+        from py20305.server_profile import EXTENSIONS
+
+        if isinstance(v, list):
+            unknown = sorted(set(v) - set(EXTENSIONS))
+            if unknown:
+                known = ", ".join(sorted(EXTENSIONS))
+                raise ValueError(f"unknown extension {', '.join(unknown)}; known: {known}")
+        return v
+
+
 class ServerConfig(_Strict):
     """The IEEE 2030.5 server this client talks to."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     url: str | None = Field(
         default=None,
@@ -74,9 +145,25 @@ class ServerConfig(_Strict):
         default=True,
         description="Poll once immediately after connecting rather than waiting for the schedule.",
     )
-    server_2018_compat: bool = Field(
+    schema_profile: ServerSchemaConfig = Field(
+        default_factory=ServerSchemaConfig,
+        alias="schema",
+        description="Which IEEE 2030.5 schemas the server speaks (`server.schema`).",
+    )
+    missing_location_fallback: bool = Field(
         default=False,
-        description="Adjust behavior for servers implementing IEEE 2030.5-2018 rather than 2023.",
+        description=(
+            "Accept a subscription the server created without a Location header, under a "
+            "synthetic URI. Both editions require the header on 201 Created, so this is a "
+            "workaround for a non-conforming server."
+        ),
+    )
+    server_2018_compat: bool | None = Field(
+        default=None,
+        description=(
+            "Deprecated. `true` is `schema.base: 2018` plus "
+            "`missing_location_fallback: true`; use those."
+        ),
     )
     use_server_time: bool = Field(
         default=True,
@@ -95,6 +182,42 @@ class ServerConfig(_Strict):
             "deployment wants; set it only to override that."
         ),
     )
+
+    @model_validator(mode="after")
+    def _warn_about_the_deprecated_flag(self) -> ServerConfig:
+        if self.server_2018_compat is not None:
+            message = (
+                "server.server_2018_compat is deprecated; use server.schema.base: 2018 and, "
+                "for a server that omits the Location header on a created subscription, "
+                "server.missing_location_fallback: true"
+            )
+            warnings.warn(message, DeprecationWarning, stacklevel=2)
+            logger.warning(message)
+        return self
+
+    def profile(self) -> ServerProfile:
+        """Return the schema profile this configuration describes.
+
+        The deprecated ``server_2018_compat: true`` stands for base 2018 plus the
+        missing-Location fallback; ``false`` for base 2023. An explicit
+        ``schema.base`` wins over it.
+        """
+        schema = self.schema_profile
+        base = None if schema.base == "auto" else Edition(int(schema.base))
+        fallback = self.missing_location_fallback
+        evidence = "configured" if base is not None else ""
+        if self.server_2018_compat is not None:
+            if base is None:
+                base = Edition.E2018 if self.server_2018_compat else Edition.E2023
+                evidence = "server_2018_compat"
+            fallback = fallback or self.server_2018_compat
+        return ServerProfile(
+            base=base,
+            features=frozenset(schema.features),
+            extensions=None if schema.extensions == "auto" else frozenset(schema.extensions),
+            missing_location_fallback=fallback,
+            evidence=evidence,
+        )
 
     @field_validator("url")
     @classmethod

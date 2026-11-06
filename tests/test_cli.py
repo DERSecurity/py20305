@@ -851,21 +851,21 @@ class TestDiscoveryWiring:
         assert config.server.url == "https://192.168.1.40:8443"
         assert config.server.dcap_path == "/smartenergy/dcap"
 
-    async def test_a_discovered_2018_server_sets_compat_when_unset(
+    async def test_a_discovered_2018_server_sets_the_schema_base_when_auto(
         self, tmp_path: Path
     ) -> None:
         """§5.7 makes the advertised level the server's own answer to that question."""
         config = await self._run_discovery(tmp_path, level="-S1")
-        assert config.server.server_2018_compat is True
+        assert config.server.schema_profile.base == "2018"
 
-    async def test_a_configured_compat_flag_wins_over_the_advertised_level(
+    async def test_a_configured_schema_base_wins_over_the_advertised_level(
         self, tmp_path: Path
     ) -> None:
         """The operator answered it; a record on the network does not overrule them."""
         config = await self._run_discovery(
-            tmp_path, level="-S1", server={"server_2018_compat": False}
+            tmp_path, level="-S1", server={"schema": {"base": "2023"}}
         )
-        assert config.server.server_2018_compat is False
+        assert config.server.schema_profile.base == "2023"
 
     @staticmethod
     async def _run_discovery(

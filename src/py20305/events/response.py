@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from py20305.events.modes_bitmask import build_modes_responded
+from py20305.events.modes_bitmask import build_modes_responded, build_modes_responded2
 
 if TYPE_CHECKING:
     from py20305.client.http import Sep2Client
@@ -31,6 +31,7 @@ from py20305.models.sep.sep import (
     TimeTariffInterval1,
     TimeType,
 )
+from py20305.server_profile import ServerProfile
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,8 @@ class ResponseCode(enum.IntEnum):
 
     The values follow IEEE 2030.5-2023 Table 31. IEEE 2030.5-2018 Table 27
     assigns the same values to 1 to 14 and 252 to 254, and reserves 15
-    (``RESUMED``) and 251 (``NOT_SUPPORTED``); see ``_CODE_2018_OVERRIDES``.
+    (``RESUMED``) and 251 (``NOT_SUPPORTED``); see
+    :meth:`~py20305.server_profile.ServerProfile.wire_response_code`.
     """
 
     ACKNOWLEDGED = 1
@@ -176,18 +178,16 @@ def response_code_for_dispatch_error(exc: BaseException) -> ResponseCode:
 #: the meanings to the standard's text: IEEE 2030.5-2018 Table 27 ("15 to 251
 #: Reserved", 252 "Rejected: control parameter not applicable") and
 #: IEEE 2030.5-2023 Table 31 (251 "Not Supported", 252 "Not Applicable").
-_CODE_2018_OVERRIDES = {ResponseCode.NOT_SUPPORTED: ResponseCode.NOT_APPLICABLE}
+def translate_code_for_revision(code: ResponseCode, *, profile: ServerProfile) -> ResponseCode:
+    """Map *code* onto the response status table of the server's edition.
 
-
-def translate_code_for_revision(code: ResponseCode, *, server_2018_compat: bool) -> ResponseCode:
-    """Map *code* onto the IEEE 2030.5 revision the server speaks."""
-    if not server_2018_compat:
-        return code
-    return _CODE_2018_OVERRIDES.get(code, code)
+    The table is the profile's (:meth:`ServerProfile.wire_response_code`).
+    """
+    return ResponseCode(profile.wire_response_code(code.value))
 
 
 def _resolve_wire_code(
-    derc: Dercontrol1, code: ResponseCode, *, server_2018_compat: bool, mrid: bytes
+    derc: Dercontrol1, code: ResponseCode, *, profile: ServerProfile, mrid: bytes
 ) -> ResponseCode:
     """Resolve the status code that actually goes on the wire.
 
@@ -213,9 +213,9 @@ def _resolve_wire_code(
             mrid.hex()[:8],
         )
         code = ResponseCode.NOT_SUPPORTED
-    wire = translate_code_for_revision(code, server_2018_compat=server_2018_compat)
+    wire = translate_code_for_revision(code, profile=profile)
     if wire is not code:
-        logger.debug("2018 compat: %s -> %s for mrid=%s", code.name, wire.name, mrid.hex()[:8])
+        logger.debug("2018 table: %s -> %s for mrid=%s", code.name, wire.name, mrid.hex()[:8])
     return wire
 
 
@@ -236,9 +236,7 @@ class ResponseTracker:
         #: Told about each response once its POST has returned or failed, as
         #: ``(mrid, code, lfdi, at, error)``, with ``error`` None on success.
         #: The operations history listens here; None when nothing does.
-        self.observer: (
-            Callable[[bytes, ResponseCode, bytes, int, str | None], None] | None
-        ) = None
+        self.observer: Callable[[bytes, ResponseCode, bytes, int, str | None], None] | None = None
 
     def notify(
         self, mrid: bytes, code: ResponseCode, lfdi: bytes, at: int, error: str | None = None
@@ -342,6 +340,7 @@ async def post_der_response(
     tracker: ResponseTracker,
     *,
     now_ts: int | None = None,
+    supported_modes2: int | None = None,
 ) -> None:
     """Post a DERControlResponse to the server.
 
@@ -352,12 +351,17 @@ async def post_der_response(
     ``now_ts`` sets ``createdDateTime`` (and the tracker stamp); the event
     processor passes server-timebase time so the server sees its own clock.
     Defaults to the local clock.
+
+    ``supported_modes2`` is the DERControlType2 bitmap of the controls the device
+    supports. ``modesResponded2`` reports only the additional modes the control
+    sets that the device supports, so a device never claims a mode it cannot
+    apply; None means unknown, and none is reported.
     """
     mrid = derc.m_rid.value
     # Resolve before gating and dedup so both act on the value that actually
     # goes on the wire: under 2018 two codes collapse onto one, and the server
     # must not receive it twice.
-    code = _resolve_wire_code(derc, code, server_2018_compat=http.server_2018_compat, mrid=mrid)
+    code = _resolve_wire_code(derc, code, profile=http.profile, mrid=mrid)
     if not response_required_allows(derc.response_required, code):
         logger.debug(
             "responseRequired=%s does not request %s; skipping response mrid=%s",
@@ -386,14 +390,25 @@ async def post_der_response(
     sent = False
     try:
         now_ts = now_ts if now_ts is not None else int(time.time())
-        # modesResponded was added in IEEE 2030.5-2023; omit for 2018 servers.
-        modes = None if http.server_2018_compat else build_modes_responded(derc.dercontrol_base)
+        # modesResponded was added in IEEE 2030.5-2023; the profile says whether this
+        # server takes it. modesResponded2 carries only the additional modes the
+        # control sets that the device supports and the profile permits.
+        profile = http.profile
+        modes = (
+            build_modes_responded(derc.dercontrol_base) if profile.sends_modes_responded else None
+        )
+        modes2 = (
+            build_modes_responded2(derc.dercontrol_base, profile.mask_modes2(supported_modes2 or 0))
+            if profile.sends_modes_responded2
+            else None
+        )
         response = DercontrolResponse(
             end_device_lfdi=lfdi,
             status=code.value,
             subject=MRidtype(value=mrid),
             created_date_time=TimeType(value=now_ts),
             modes_responded=modes,
+            modes_responded2=modes2,
         )
         await http.post(path, response)
         tracker.mark_sent(mrid, code, lfdi, now_ts)

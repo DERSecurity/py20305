@@ -636,7 +636,7 @@ class TelemetryManager:
             device_lfdi=state.posted_under,
             declared=declared,
         )
-        body = to_xml(mup, server_2018_compat=self._client.server_2018_compat)
+        body = to_xml(mup, profile=self._client.profile)
 
         try:
             location = await self._client.post_bytes(self._mup_list_href_source(), body)
@@ -701,7 +701,7 @@ class TelemetryManager:
             from py20305.client.errors import compat_hint_suffix
             from py20305.diagnostics import report
 
-            hint = compat_hint_suffix(e, self._client.server_2018_compat)
+            hint = compat_hint_suffix(e, self._client.profile)
             report(
                 "warnings",
                 (
@@ -1007,7 +1007,7 @@ class TelemetryManager:
             # (CSIP G27: data a DER cannot provide SHALL not be sent).
             logger.debug("No readings for %s this cycle, skipping POST", state.lfdi[:8])
             return
-        body = to_xml(reading_list, server_2018_compat=self._client.server_2018_compat)
+        body = to_xml(reading_list, profile=self._client.profile)
 
         try:
             await self._client.post_bytes(state.mup_href, body)
@@ -1072,7 +1072,7 @@ class TelemetryManager:
                 from py20305.client.errors import compat_hint_suffix
                 from py20305.diagnostics import report
 
-                hint = compat_hint_suffix(e, self._client.server_2018_compat)
+                hint = compat_hint_suffix(e, self._client.profile)
                 report(
                     "warnings",
                     f"Failed to POST readings for {state.lfdi[:8]}: {e}{hint}",
@@ -1236,7 +1236,7 @@ class TelemetryManager:
             log_event_code,
             log_event_id=state.log_event_id_counter,
             details=details,
-            server_2018_compat=self._client.server_2018_compat,
+            profile=self._client.profile,
             created_time=int(self._timebase.now()),
         )
         await self._client.post_bytes(state.log_event_list_href, xml)
@@ -1348,7 +1348,7 @@ class TelemetryManager:
             model = build_der_availability(data, default_time=int(self._timebase.now()))
             await self._client.put_bytes(
                 state.der_availability_href,
-                to_xml(model, server_2018_compat=self._client.server_2018_compat),
+                to_xml(model, profile=self._client.profile),
             )
             logger.debug("DERAvailability PUT for %s", state.lfdi[:8])
         except (Sep2ConnectionError, ConnectorError, OSError) as e:

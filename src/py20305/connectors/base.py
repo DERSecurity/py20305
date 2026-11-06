@@ -121,6 +121,19 @@ class BaseConnector:
         """
         return []
 
+    def supported_modes2(self) -> int | None:
+        """Optional: the DERControlType2 bits this device can apply.
+
+        DERCapability ``modesSupported2`` and DERControlResponse
+        ``modesResponded2`` report these, limited to what the server profile
+        permits. Return ``None`` (the default) to derive them from the controls
+        the connector implements: ``update_op_mod_max_lim_w_absorb`` sets bit 7,
+        ``update_op_mod_max_lim_w_inject`` bit 8, and so on. Return an integer
+        for a connector that implements a control method it cannot honor on this
+        device, so the device never advertises a mode it cannot apply.
+        """
+        return None
+
     def declared_readings(self) -> frozenset[ReadingIdentity] | None:
         """Optional: the readings this device provides, fixed for its life.
 
