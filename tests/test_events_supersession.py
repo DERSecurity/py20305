@@ -415,17 +415,57 @@ class TestSupersessionGroupedByDevice:
             record.mrid = n.to_bytes(16, "big")
             events.append(record)
         devices = {f"/derp/{p}": {f"/edev/{p}"} for p in range(1000)}
-        calls = []
-        keys = supersession.compared_mode_keys
-
-        def counted(base):
-            calls.append(1)
-            return keys(base)
-
-        monkeypatch.setattr(supersession, "compared_mode_keys", counted)
+        visited = _count_calls(monkeypatch, supersession, "_time_overlaps")
 
         results = compute_supersession(events, devices)
 
-        # Each program's two events overlap with the same modes: one pair each.
+        # Each program's two events overlap with the same modes: one pair each,
+        # and no pair of events from two programs is looked at.
         assert len(results) == 1000
-        assert len(calls) <= len(events)
+        assert len(visited) == 1000
+
+    def test_each_events_modes_are_worked_out_once(self, monkeypatch):
+        from py20305.events import supersession
+
+        events = []
+        for n in range(3):
+            record = _make_record(0, primacy=n, fixed_var=True)
+            record.mrid = n.to_bytes(16, "big")
+            events.append(record)
+        modes = _count_calls(monkeypatch, supersession, "compared_mode_keys")
+
+        results = compute_supersession(events, {"/derp/1": {"/edev/1"}})
+
+        # Three pairs, each needing both events' modes: three events, three calls.
+        assert len(results) == 3
+        assert len(modes) == 3
+
+    def test_a_program_reaching_many_devices_compares_each_pair_once(self, monkeypatch):
+        from py20305.events import supersession
+
+        events = []
+        for n in range(240):
+            record = _make_record(0, start=1000 + n, fixed_var=True)
+            record.mrid = n.to_bytes(16, "big")
+            events.append(record)
+        devices = {"/derp/1": {f"/edev/{d}" for d in range(200)}}
+        visited = _count_calls(monkeypatch, supersession, "_time_overlaps")
+
+        results = compute_supersession(events, devices)
+
+        assert len(results) == 240 * 239 // 2
+        assert len(visited) == 240 * 239 // 2
+        assert all(len(result.affected_devices) == 200 for result in results)
+
+
+def _count_calls(monkeypatch, module, name: str) -> list[tuple]:
+    """Replace ``module.name`` with a wrapper recording each call's arguments."""
+    calls: list[tuple] = []
+    original = getattr(module, name)
+
+    def counted(*args):
+        calls.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(module, name, counted)
+    return calls
