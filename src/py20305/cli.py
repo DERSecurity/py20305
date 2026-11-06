@@ -45,6 +45,7 @@ from py20305.config import ClientConfig, ConfigError, load_config
 from py20305.connectors.dispatcher import ConnectorDispatcher
 from py20305.connectors.registry import ConnectorConfigRegistry
 from py20305.security import compute_cert_fingerprint, compute_lfdi, compute_sfdi
+from py20305.telemetry.checkpoint import load_checkpoint, save_checkpoint
 from py20305.version_info import get_package_version, get_version_string
 
 if TYPE_CHECKING:
@@ -125,6 +126,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Override the configured log level.",
+    )
+    parser.add_argument(
+        "--telemetry-state-file",
+        type=Path,
+        help=(
+            "Keep the readings registered with the server in this file, so a restart "
+            "repeats them. Overrides telemetry.state_file."
+        ),
     )
     parser.add_argument(
         "--discover",
@@ -810,6 +819,9 @@ async def _run_client(
         return EXIT_OK
     finally:
         if telemetry is not None:
+            if config.telemetry.state_file is not None:
+                # Before the shutdown, which drops the devices' registrations.
+                save_telemetry_state(telemetry, config.telemetry.state_file)
             # `shutdown`, not `stop_metering` per device: that one drops the
             # device's state and leaves the scheduler's tasks running until
             # something calls cancel_all, which nothing else here does.
@@ -849,6 +861,17 @@ def _connector_resolver(dispatcher: ConnectorDispatcher) -> Callable[[str], Any]
         return proxy.aresolve()
 
     return resolve
+
+
+def save_telemetry_state(coordinator: TelemetryCoordinator, path: Path) -> None:
+    """Write the readings registered with the server to ``path``; log, never raise."""
+    checkpoint = coordinator.to_checkpoint()
+    if checkpoint is None:
+        return
+    try:
+        save_checkpoint(path, checkpoint)
+    except OSError as exc:
+        logger.warning("Cannot write the telemetry state file %s: %s", path, exc)
 
 
 def _attach_api_telemetry(
@@ -922,6 +945,14 @@ def _start_telemetry(
         site_interval_history=history.site_intervals if history is not None else None,
         der_resource_put_policy=config.telemetry.der_resource_put_policy,
     )
+    state_file = config.telemetry.state_file
+    if state_file is not None:
+        stored = load_checkpoint(state_file)
+        if stored is not None:
+            coordinator.restore_from_checkpoint(stored)
+        coordinator.set_on_registration_change(
+            lambda: save_telemetry_state(coordinator, state_file)
+        )
     coordinator.setup()
     coordinator.start_device_telemetry()
     _attach_api_telemetry(api_service, coordinator)
@@ -1080,6 +1111,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_CONFIG_ERROR
 
+    if args.telemetry_state_file:
+        config = config.model_copy(
+            update={
+                "telemetry": config.telemetry.model_copy(
+                    update={"state_file": args.telemetry_state_file.resolve()}
+                )
+            }
+        )
+
     if args.log_level:
         config = config.model_copy(
             update={"logging": config.logging.model_copy(update={"level": args.log_level})}
@@ -1117,6 +1157,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  client LFDI : {lfdi}")
         print(f"  client SFDI : {compute_sfdi(lfdi)}")
         print(f"  devices     : {len(config.devices)}")
+        state_file = config.telemetry.state_file
+        print(f"  telemetry state : {state_file if state_file is not None else 'off'}")
         finding = f"on, {config.discovery.transport}" if config.discovery.enabled else "off"
         print(f"  discovery   : {finding}")
         print(f"  announcing  : {config.advertise.transport}")
