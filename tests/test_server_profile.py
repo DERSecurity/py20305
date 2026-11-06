@@ -26,9 +26,9 @@ from py20305.models.sep import (
     Subscription,
     TimeType,
 )
-from py20305.models.sep.sep import Dercontrol1
+from py20305.models.sep.sep import Dercontrol1, DeviceCapability
 from py20305.models.sep.sep import DercontrolBase as ControlBase
-from py20305.schema_editions import SCHEMA_DIR, borrowed_items, new_item
+from py20305.schema_editions import SCHEMA_DIR, borrowed_items, new_item, root_attributes
 from py20305.server_profile import (
     EXTENSIONS,
     FEATURES,
@@ -635,9 +635,20 @@ class TestProfileQuestions:
         assert P2018.allows_multi_der and not P2023.allows_multi_der
         assert P2018.schema_ver is None and P2023.schema_ver == "2.2"
 
-    def test_an_unresolved_profile_acts_as_2023(self) -> None:
-        assert ServerProfile().edition is Edition.E2023
+    def test_an_unresolved_profile_acts_as_2018(self) -> None:
+        assert ServerProfile().edition is Edition.E2018
+        assert ServerProfile().schema_ver is None
         assert not ServerProfile().resolved
+
+    def test_an_unresolved_profile_sends_the_payloads_auto_sends_without_evidence(
+        self,
+    ) -> None:
+        no_evidence = ServerProfile().resolve_from_device_capability(
+            f"<DeviceCapability {NS}/>".encode()
+        )
+
+        assert no_evidence.base is Edition.E2018
+        assert _payloads(ServerProfile()) == _payloads(no_evidence)
 
     def test_the_feature_registry_names_what_each_feature_borrows(self) -> None:
         feature = FEATURES["import_export_limits"]
@@ -665,6 +676,24 @@ def test_a_dercontrol_base_still_parses_the_borrowed_limits() -> None:
     parsed = from_xml(xml, DercontrolBase)
 
     assert parsed.op_mod_max_lim_wabsorb is not None
+
+
+class TestRootAttributes:
+    """The 2023 schema declares schemaVer on each global element, not on a type."""
+
+    def test_the_2023_schema_declares_only_schema_ver_on_its_global_elements(self) -> None:
+        assert root_attributes(2023) == {"schemaVer"}
+
+    def test_the_2018_schema_declares_no_attributes_on_its_global_elements(self) -> None:
+        assert root_attributes(2018) == frozenset()
+
+    def test_the_type_lookup_does_not_report_schema_ver(self) -> None:
+        assert new_item("DeviceCapability", "@schemaVer") is None
+
+    def test_a_2018_base_leaves_schema_ver_off_a_device_capability(self) -> None:
+        xml = to_xml(DeviceCapability(href="/dcap", schema_ver="2.2"), profile=P2018)
+
+        assert b"schemaVer" not in xml
 
 
 class TestConstructorAlias:

@@ -30,7 +30,7 @@ from lxml import etree
 from pydantic import BaseModel
 from xsdata_pydantic.bindings import XmlContext
 
-from py20305.schema_editions import Item, borrowed_items, new_item
+from py20305.schema_editions import Item, borrowed_items, new_item, root_attributes
 
 logger = logging.getLogger(__name__)
 
@@ -98,12 +98,18 @@ _SCHEMA_VER = re.compile(r"^\s*(\d+)\.(\d+)\s*$")
 _CONTEXT = XmlContext()
 
 
+def _root_attributes_2023() -> frozenset[str]:
+    """Return the global-element attributes that 2023 declares and 2018 does not."""
+    return root_attributes(2023) - root_attributes(2018)
+
+
 def base_from_schema_ver(schema_ver: str | None) -> Edition:
     """Return the edition a DeviceCapability ``schemaVer`` stands for.
 
-    2.2 or higher is 2023. Anything else, including no attribute, is 2018: the
-    2023 text assumes an absent schemaVer means 2.1, and its schema makes the
-    attribute optional, so absence is weak evidence and does not select 2023.
+    2.2 or higher is 2023. Anything else, including no attribute, is 2018. The
+    2023 schema declares the attribute ``use="optional" default="2.1"``, so an
+    absent schemaVer reads as 2.1, and absence is weak evidence that does not
+    select 2023.
     """
     match = _SCHEMA_VER.match(schema_ver or "")
     if match and (int(match.group(1)), int(match.group(2))) >= (2, 2):
@@ -154,8 +160,13 @@ class ServerProfile:
 
     @property
     def edition(self) -> Edition:
-        """The edition to act on: the base, or 2023 until the server has been seen."""
-        return self.base if self.base is not None else Edition.E2023
+        """The edition to act on: the base, or 2018 until the server has been seen.
+
+        2018 is what ``auto`` decides without evidence, so a body sent before
+        discovery has the same shape as one sent after it to a server that
+        declares no ``schemaVer``.
+        """
+        return self.base if self.base is not None else Edition.E2018
 
     @property
     def is_2018(self) -> bool:
@@ -249,7 +260,8 @@ class ServerProfile:
         """Return ``model`` without the elements and attributes the profile does not permit.
 
         Omission is on the model, so the serializer never sees them. A required
-        field stays. The ``schemaVer`` attribute is left off for 2018.
+        field stays. The attributes 2023 declares on its global elements
+        (``schemaVer``) are left off for 2018.
         """
         if not self.is_2018:
             return model
@@ -270,7 +282,7 @@ class ServerProfile:
             if value is None or var.is_wildcard or var.is_attributes:
                 continue
             key = f"@{var.local_name}" if var.is_attribute else var.local_name
-            if var.is_attribute and var.local_name == "schemaVer":
+            if var.is_attribute and var.local_name in _root_attributes_2023():
                 update[var.name] = None
             elif not var.required and not self.permits(type_id, key):
                 update[var.name] = [] if isinstance(value, list) else None
@@ -297,14 +309,20 @@ class ServerProfile:
         """Return the items in ``xml`` that are outside the base edition and not enabled.
 
         Empty for a 2023 base. For 2018: an element or attribute 2023 added to
-        its type that no enabled feature covers, and a ``schemaVer`` attribute.
+        its type that no enabled feature covers, and an attribute 2023 declares
+        on its global elements, such as ``schemaVer``.
         """
         if not self.is_2018:
             return []
         found = [item for item in borrowed_items(xml) if not self.permits_item(item)]
-        root = declared_schema_ver(xml)
-        if root is not None:
-            found.append(Item("(root)", "@schemaVer"))
+        root = etree.fromstring(
+            xml, parser=etree.XMLParser(resolve_entities=False, no_network=True)
+        )
+        found.extend(
+            Item("(root)", f"@{name}")
+            for name in sorted(root.attrib)
+            if name in _root_attributes_2023()
+        )
         return found
 
     # -- Inbound ------------------------------------------------------------------

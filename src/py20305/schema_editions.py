@@ -14,6 +14,14 @@ type a payload has.
 
 :func:`borrowed_items` walks an XML payload against the 2023 schema and returns
 each (declaring type, element or ``@attribute``) in it that the 2018 type lacks.
+
+The 2023 schema also declares attributes on the global elements, not only on
+types: each global element wraps its complexType in an inline extension that
+adds ``schemaVer``. Those inline types are registered as ``<Name>``, which a
+lookup by type name never reaches, so :func:`new_item` does not report them.
+:func:`root_attributes` returns them, and the server profile handles them on
+the payload root. Today the 2023 set is ``{"schemaVer"}`` and the 2018 set is
+empty.
 """
 
 from __future__ import annotations
@@ -151,6 +159,17 @@ def new_item(type_id: str, key: str) -> Item | None:
     elements, attributes = _schema(2018).effective(declarer)
     present = key[1:] in attributes if key.startswith("@") else key in elements
     return None if present else Item(declarer, key)
+
+
+@cache
+def root_attributes(edition: int) -> frozenset[str]:
+    """Return the attributes ``edition`` declares on its global elements, not on a type."""
+    schema = _schema(edition)
+    names: set[str] = set()
+    for name, type_id in schema.roots.items():
+        if type_id == f"<{name}>":
+            names |= schema.types[type_id].attributes
+    return frozenset(names)
 
 
 def borrowed_items(xml: bytes) -> list[Item]:
