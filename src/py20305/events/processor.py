@@ -2143,7 +2143,14 @@ class EventProcessor:
                 )
 
     async def _supported_modes2(self, lfdi: bytes) -> int | None:
-        """Return the DERControlType2 bits the device with ``lfdi`` can apply, if known."""
+        """Return the DERControlType2 bits the device with ``lfdi`` can apply, if known.
+
+        None when the server profile does not take ``modesResponded2``, since the
+        response does not carry it.
+        """
+        profile = getattr(self._http, "profile", None)
+        if profile is not None and not profile.sends_modes_responded2:
+            return None
         supported = getattr(self._dispatcher, "supported_modes2", None)
         if supported is None:
             return None

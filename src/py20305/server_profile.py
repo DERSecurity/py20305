@@ -262,6 +262,8 @@ class ServerProfile:
             return node
         cls = type(node)
         type_id = getattr(getattr(cls, "Meta", None), "name", None) or cls.__name__
+        if type_id == "DERControlType2":
+            return self._restrict_modes2(node)
         update: dict[str, Any] = {}
         for var in _CONTEXT.build(cls).get_all_vars():
             value = getattr(node, var.name, None)
@@ -277,6 +279,19 @@ class ServerProfile:
                 if restricted is not value:
                     update[var.name] = restricted
         return node.model_copy(update=update) if update else node
+
+    def _restrict_modes2(self, node: Any) -> Any:
+        """Return a DERControlType2 bitmap without the bits the profile does not permit.
+
+        The builders mask the bitmaps they are given a profile for. This also
+        covers a model built without one, such as one passed to ``post()``.
+        """
+        raw = node.value or b""
+        bits = int.from_bytes(raw, "big")
+        masked = self.mask_modes2(bits)
+        if masked == bits:
+            return node
+        return node.model_copy(update={"value": masked.to_bytes(len(raw) or 4, "big")})
 
     def audit(self, xml: bytes) -> list[Item]:
         """Return the items in ``xml`` that are outside the base edition and not enabled.

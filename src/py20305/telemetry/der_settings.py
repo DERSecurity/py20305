@@ -32,6 +32,9 @@ from py20305.telemetry.scale_factor import (
 # report which DOE modes are enabled.
 _DEFAULT_DOE_MODES_ENABLED = 0x03
 
+#: DERControlType2 defines bits 0 to 9; the rest are reserved.
+_ALL_MODES2 = 0x3FF
+
 
 def build_der_settings(
     configuration: dict[str, Any],
@@ -74,16 +77,17 @@ def build_der_settings(
     # modesEnabled2: the additional modes (2023) the connector reports enabled.
     # Only the connector can say which are enabled, so nothing is sent without
     # its value; it is limited to what the device supports and the server
-    # profile permits.
+    # profile permits. A reported 0 is sent when some mode is available, so the
+    # server learns that modes it saw enabled are now disabled. It is left out
+    # only when no additional mode is available.
     modes_enabled2 = None
     enabled2 = configuration.get("modesEnabled2")
     if isinstance(enabled2, int) and not isinstance(enabled2, bool):
-        if modes_supported2 is not None:
-            enabled2 &= modes_supported2
+        available = _ALL_MODES2 if modes_supported2 is None else modes_supported2 & _ALL_MODES2
         if profile is not None:
-            enabled2 = profile.mask_modes2(enabled2)
-        if enabled2 > 0:
-            modes_enabled2 = DercontrolType2(value=enabled2.to_bytes(4, "big"))
+            available = profile.mask_modes2(available)
+        if available:
+            modes_enabled2 = DercontrolType2(value=(enabled2 & available).to_bytes(4, "big"))
 
     # setGradW: required UInt16, plain integer (not a scale factor type)
     grad_w = configuration.get("setGradW", 0)

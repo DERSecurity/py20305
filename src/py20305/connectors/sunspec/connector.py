@@ -22,10 +22,11 @@ import copy
 from typing import Any
 
 from py20305.connectors.base import BaseConnector, ConnectorPayload
-from py20305.connectors.modes import ALL_ELEMENTS
+from py20305.connectors.modes import ALL_ELEMENTS, implemented_modes2
 from py20305.connectors.reading import Reading
 from py20305.connectors.sunspec import _ieee2030_5 as convert
 from py20305.connectors.sunspec._modbus import SunSpecModbusConnector
+from py20305.events.modes_bitmask import MODES2_BIT_OF_ELEMENT
 from py20305.telemetry.mup import ReadingProfile
 
 __all__ = ["SunSpecConnector"]
@@ -102,6 +103,19 @@ class SunSpecConnector(BaseConnector):
 
     async def fetch_status(self) -> dict[str, Any]:
         return convert.status(await self._core.fetch_status())
+
+    def supported_modes2(self) -> int | None:
+        """Return the DERControlType2 bits this device can apply.
+
+        The connector implements opModMaxLimWAbsorb for every device, but a
+        device with no charge-rate limit applies nothing for it, so bit 7 is
+        left out for that device. The other bits follow the controls the
+        connector implements.
+        """
+        bits = implemented_modes2(self)
+        if not self._core.charge_limit_supported():
+            bits &= ~(1 << MODES2_BIT_OF_ELEMENT["opModMaxLimWAbsorb"])
+        return bits
 
     def _controls_lock(self) -> asyncio.Lock:
         """Return the lock that serializes control writes, bound to the running loop."""

@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from py20305.config import ClientConfig, ConfigError, load_config
+from py20305.server_profile import Edition
 
 MINIMAL = {
     "server": {"url": "https://server.example.com:8443"},
@@ -53,6 +54,26 @@ class TestLoading:
             encoding="utf-8",
         )
         assert load_config(path).server.url == "https://server.example.com:8443"
+
+    @pytest.mark.parametrize("edition", ["2018", "2023"])
+    def test_an_unquoted_yaml_schema_base_is_read_as_the_edition(
+        self, tmp_path: Path, edition: str
+    ) -> None:
+        pytest.importorskip("yaml")
+        path = tmp_path / "client.yaml"
+        path.write_text(
+            "server:\n"
+            "  url: https://server.example.com:8443\n"
+            "  schema:\n"
+            f"    base: {edition}\n"
+            "tls:\n"
+            "  client_cert: certs/client.pem\n"
+            "  client_key: certs/client.key\n"
+            "  ca_cert: certs/ca.pem\n",
+            encoding="utf-8",
+        )
+
+        assert load_config(path).server.profile().base is Edition(int(edition))
 
     def test_missing_file_names_the_path(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError, match="not found"):

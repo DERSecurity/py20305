@@ -733,3 +733,129 @@ class TestConstructorAlias:
             )
 
         assert manager._missing_location_fallback is False
+
+
+class TestRestrictMasksTheBitmaps:
+    """A prebuilt model is held to the profile's DERControlType2 bits too."""
+
+    def test_a_capability_built_without_the_profile_loses_the_bits_it_does_not_permit(
+        self,
+    ) -> None:
+        bits = (1 << 4) | INJECT_ABSORB
+        capability = build_der_capability({"rtgMaxW": 5000}, modes_supported2=bits)
+        assert capability.modes_supported2.value == bits.to_bytes(4, "big")
+
+        restricted = P2018_LIMITS.restrict(capability)
+
+        assert restricted.modes_supported2.value == INJECT_ABSORB.to_bytes(4, "big")
+
+    def test_the_serialized_capability_carries_only_the_permitted_bits(self) -> None:
+        bits = (1 << 4) | INJECT_ABSORB
+        capability = build_der_capability({"rtgMaxW": 5000}, modes_supported2=bits)
+
+        xml = to_xml(capability, profile=P2018_LIMITS)
+
+        assert b"<modesSupported2>00000180</modesSupported2>" in xml
+
+    def test_a_2023_base_keeps_every_bit(self) -> None:
+        bits = (1 << 4) | INJECT_ABSORB
+        capability = build_der_capability({"rtgMaxW": 5000}, modes_supported2=bits)
+
+        assert P2023.restrict(capability).modes_supported2.value == bits.to_bytes(4, "big")
+
+
+class TestModesEnabled2Zero:
+    def test_a_reported_zero_is_sent_when_a_mode_is_available(self) -> None:
+        settings = build_der_settings(
+            {"setMaxW": 5000, "modesEnabled2": 0},
+            modes_supported2=INJECT_ABSORB,
+            profile=P2018_LIMITS,
+        )
+
+        assert settings.modes_enabled2.value == (0).to_bytes(4, "big")
+
+    def test_a_reported_zero_is_left_out_when_no_mode_is_available(self) -> None:
+        settings = build_der_settings(
+            {"setMaxW": 5000, "modesEnabled2": 0},
+            modes_supported2=0,
+            profile=P2018_LIMITS,
+        )
+
+        assert settings.modes_enabled2 is None
+
+    def test_a_reported_zero_is_left_out_when_the_profile_permits_no_mode(self) -> None:
+        settings = build_der_settings(
+            {"setMaxW": 5000, "modesEnabled2": 0},
+            modes_supported2=INJECT_ABSORB,
+            profile=P2018,
+        )
+
+        assert settings.modes_enabled2 is None
+
+
+class TestSupportedModesOnTheResponsePath:
+    """Reading the supported modes for a response never constructs a connector."""
+
+    class _Registry:
+        def __init__(self, proxy: Any) -> None:
+            self.proxy = proxy
+
+        def get_connector(self, lfdi: str) -> Any:
+            return self.proxy
+
+    class _Both(BaseConnector):
+        async def update_op_mod_max_lim_w_absorb(self, params: dict[str, Any]) -> None:
+            return None
+
+        async def update_op_mod_max_lim_w_inject(self, params: dict[str, Any]) -> None:
+            return None
+
+    def _dispatcher(self, proxy: Any) -> Any:
+        from py20305.connectors.dispatcher import ConnectorDispatcher
+
+        return ConnectorDispatcher(
+            registry=self._Registry(proxy),  # type: ignore[arg-type]
+            lfdi_resolver=lambda href: None,
+        )
+
+    async def test_an_unconstructed_connector_is_not_constructed(self) -> None:
+        from py20305.connectors.registry import LazyConnectorProxy
+
+        built: list[str] = []
+
+        def factory() -> BaseConnector:
+            built.append("built")
+            return self._Both()
+
+        proxy = LazyConnectorProxy("device", factory)
+
+        assert await self._dispatcher(proxy).supported_modes2(LFDI) is None
+        assert built == []
+
+    async def test_a_constructed_connector_reports_its_modes(self) -> None:
+        from py20305.connectors.registry import LazyConnectorProxy
+
+        proxy = LazyConnectorProxy("device", self._Both)
+        proxy.resolve()
+
+        assert await self._dispatcher(proxy).supported_modes2(LFDI) == INJECT_ABSORB
+
+    async def test_the_lookup_is_skipped_when_the_profile_omits_modes_responded2(self) -> None:
+        from py20305.events.processor import EventProcessor
+
+        asked: list[str] = []
+
+        class _Dispatcher:
+            async def supported_modes2(self, lfdi: str) -> int:
+                asked.append(lfdi)
+                return INJECT_ABSORB
+
+        processor = object.__new__(EventProcessor)
+        processor._http = _Http(P2018)
+        processor._dispatcher = _Dispatcher()
+
+        assert await processor._supported_modes2(bytes.fromhex(LFDI)) is None
+        assert asked == []
+
+        processor._http = _Http(P2018_LIMITS)
+        assert await processor._supported_modes2(bytes.fromhex(LFDI)) == INJECT_ABSORB

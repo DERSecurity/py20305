@@ -517,9 +517,12 @@ async def discover(
         logger.info("CSIP-AUS mode detected from server dcap response")
     client.csipaus_namespace = _declared_csipaus_namespace(raw_dcap)
     # Extensions named in the configuration replace what the server declares.
+    # The HTTP client's flag is set too: the serializer and the DER resource
+    # manager read it to decide whether to send the CSIP-AUS elements.
     configured = client.profile.extensions
     if configured is not None:
         state.csip_aus_mode = bool(configured)
+        client.csip_aus_mode = bool(configured)
         if "csip-aus-1.3" in configured:
             client.csipaus_namespace = EXTENSIONS["csip-aus-1.3"]
         elif "csip-aus-1.2" in configured:

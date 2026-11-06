@@ -1057,6 +1057,41 @@ async def test_discovery_records_the_csipaus_namespace_the_server_declares(decla
     assert client.csipaus_namespace == expected
 
 
+@pytest.mark.parametrize(
+    ("raw_dcap", "configured", "expected"),
+    [
+        pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns"/>',
+            frozenset({"csip-aus-1.3"}),
+            True,
+            id="listed-on-a-plain-server",
+        ),
+        pytest.param(
+            b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns"/>',
+            frozenset(),
+            False,
+            id="empty-list-on-a-csipaus-server",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_configured_extensions_set_the_http_clients_csip_aus_flag(
+    raw_dcap, configured, expected
+):
+    """The serializer reads the HTTP client's flag, so a configured list must set it."""
+    client = _MockClient(
+        {"/dcap": _make_dcap(edev_href=None), "/tm": _make_time()},
+        raw_bodies={"/dcap": raw_dcap},
+        profile=ServerProfile(base=Edition.E2023, extensions=configured),
+    )
+    client.csip_aus_mode = not expected
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert client.csip_aus_mode is expected
+    assert state.csip_aus_mode is expected
+
+
 @pytest.mark.asyncio
 async def test_discovery_prefers_the_csipaus_prefix_when_several_csipaus_namespaces_are_declared():
     raw_dcap = (

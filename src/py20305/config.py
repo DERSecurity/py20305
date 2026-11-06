@@ -91,6 +91,14 @@ class ServerSchemaConfig(_Strict):
         ),
     )
 
+    @field_validator("base", mode="before")
+    @classmethod
+    def _edition_as_text(cls, v: object) -> object:
+        """Accept ``base: 2018`` and ``base: 2023``, which YAML reads as integers."""
+        if isinstance(v, int) and not isinstance(v, bool) and v in (2018, 2023):
+            return str(v)
+        return v
+
     @field_validator("features")
     @classmethod
     def _known_features(cls, v: list[str]) -> list[str]:
