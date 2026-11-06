@@ -391,3 +391,32 @@ class TestAnOriginIsALabel:
         )
 
         assert record.origin == "plant_controller"
+
+
+class TestDisabledElement:
+    """An element marked disabled="true" withdraws the mode a superseded event set."""
+
+    @staticmethod
+    def _control(mrid: int, fixed_w: SignedPerCentControlType) -> Dercontrol1:
+        control = _fixed_w_control()
+        return control.model_copy(
+            update={
+                "m_rid": MRidtype(value=bytes([mrid]) * 16),
+                "dercontrol_base": DercontrolBase(op_mod_fixed_w=fixed_w),
+            }
+        )
+
+    async def test_a_later_event_with_the_element_disabled_withdraws_the_earlier_setpoint(
+        self,
+    ) -> None:
+        connector = _Implements()
+        dispatcher = _dispatcher(connector)
+
+        await dispatcher.apply_control(
+            "/edev/1", self._control(1, SignedPerCentControlType(value=2500)), []
+        )
+        await dispatcher.apply_control(
+            "/edev/1", self._control(2, SignedPerCentControlType(value=2500, disabled=True)), []
+        )
+
+        assert connector.seen == [{"enabled": True, "value": 2500}, {"enabled": False}]

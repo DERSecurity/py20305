@@ -252,9 +252,23 @@ class TestTranslateControls:
     def test_an_empty_control_sets_nothing(self) -> None:
         assert translate_controls(DercontrolBase(), []) == []
 
-    def test_a_disabled_element_is_skipped(self) -> None:
+    def test_a_disabled_element_withdraws_the_mode(self) -> None:
         base = DercontrolBase(op_mod_volt_var=_link(disabled=True))
-        assert translate_controls(base, [_make_curve()]) == []
+        assert translate_controls(base, [_make_curve()]) == [
+            ("update_op_mod_volt_var", {"enabled": False})
+        ]
+
+    def test_a_value_element_marked_disabled_withdraws_the_mode(self) -> None:
+        base = DercontrolBase(
+            op_mod_fixed_w=SignedPerCentControlType(value=2500, disabled=True), ramp_tms=100
+        )
+        assert translate_controls(base, []) == [("update_op_mod_fixed_w", {"enabled": False})]
+
+    def test_an_element_marked_disabled_false_is_applied(self) -> None:
+        base = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500, disabled=False))
+        assert translate_controls(base, []) == [
+            ("update_op_mod_fixed_w", {"enabled": True, "value": 2500})
+        ]
 
     def test_ramp_tms_is_added_to_every_applied_element(self) -> None:
         base = DercontrolBase(

@@ -98,32 +98,36 @@ tls:
   #   - ECDHE-RSA-AES256-GCM-SHA384
 
 devices:
+  # A SunSpec Modbus device over TCP.
+  - type: sunspec
+    lfdi: "0000000000000000000000000000000000000000"
+    host: 192.168.1.50
+    port: 502
+    unit_id: 1
+
   # Needs no hardware: logs the controls it would have applied. Useful for
   # bringing up a server connection before an inverter is wired in.
-  - type: print_demo
-    lfdi: "0000000000000000000000000000000000000000"
-
-  # A device driven by your own connector: a BaseConnector subclass, imported
-  # by path and constructed with init_kwargs.
-  # - type: custom
+  # - type: print_demo
   #   lfdi: "1111111111111111111111111111111111111111"
-  #   class_path: myproject.connectors.MyInverter
-  #   init_kwargs:
-  #     host: 192.168.1.50
 
-  # A meter takes no controls and gets no DER resources. role: site_meter is
-  # the meter at the premises point of delivery (roleFlags 0x03, import
-  # positive); der_meter is a meter on one DER's circuit (roleFlags 0x49, the
-  # DER's output positive). The lfdi names the meter and seeds its mRIDs; it
-  # needs no certificate. Its connector reports power in that role's frame.
-  # - type: custom
+  # A SunSpec meter (models 201-204, 211-214 or 220). A meter takes no controls
+  # and gets no DER resources. role: site_meter is the meter at the premises
+  # point of delivery (roleFlags 0x03, import positive); der_meter is a meter
+  # on one DER's circuit (roleFlags 0x49, the DER's output positive). The lfdi
+  # names the meter and seeds its mRIDs; it needs no certificate.
+  # - type: sunspec
   #   lfdi: "2222222222222222222222222222222222222222"
-  #   class_path: myproject.connectors.MyMeter
+  #   host: 192.168.1.60
+  #   port: 502
   #   role: site_meter
   #   revenue_quality: false   # true adds isRevenueQuality (0x10) to roleFlags
   #   # site_meter only: site posts under this client's own EndDevice, own
   #   # under the lfdi above.
   #   mirror_under: site
+  #   # Which sign of the meter's W is import. auto learns it from the energy
+  #   # totals and posts no real or reactive power until it has; or set
+  #   # import_positive or export_positive.
+  #   power_sign: auto
 
 logging:
   level: INFO

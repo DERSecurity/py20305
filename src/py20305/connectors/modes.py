@@ -240,8 +240,13 @@ def _element_params(
         return {"enabled": True, "value": {"value": value, "multiplier": multiplier}}
 
     field_value = getattr(base, element.field, None)
-    if field_value is None or _is_disabled(field_value):
+    if field_value is None:
         return None
+    if _is_disabled(field_value):
+        # IEEE 2030.5-2023: a disabled mode "follows the rules and guidelines as
+        # if the DERControl Mode were not disabled". It takes part in event
+        # precedence and withdraws the mode.
+        return dict(DISABLED)
     if element.kind == CURVE:
         curve = _find_curve(field_value.href, curves)
         if curve is None:
@@ -260,9 +265,10 @@ def translate_controls(
 ) -> list[tuple[str, dict[str, Any]]]:
     """Return ``(method, params)`` for every element ``base`` sets.
 
-    An absent element is skipped, and so is one marked ``disabled="true"``. A
-    curve element whose curve the client does not hold is withdrawn
-    (``{"enabled": False}``). ``rampTms``, when set, is added to every call.
+    An absent element is skipped. An element marked ``disabled="true"`` is
+    withdrawn (``{"enabled": False}``), as is a curve element whose curve the
+    client does not hold. ``rampTms``, when set, is added to every call that
+    applies an element.
     """
     results: list[tuple[str, dict[str, Any]]] = []
     for element in CONTROL_ELEMENTS + DOE_ELEMENTS:

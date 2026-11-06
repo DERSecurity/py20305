@@ -11,10 +11,10 @@ from typing import Any
 
 from py20305.models.csipaus.csipaus_ext import DoeModesEnabled
 from py20305.models.sep.sep import (
-    DercontrolType,
     Dersettings,
     TimeType,
 )
+from py20305.telemetry.der_capability import control_type_from
 from py20305.telemetry.scale_factor import (
     to_active_power,
     to_amp_hour,
@@ -60,10 +60,7 @@ def build_der_settings(
         raise ValueError(msg)
 
     # modesEnabled: optional bitmap
-    ctrl_modes = configuration.get("modesEnabled")
-    modes_enabled = None
-    if ctrl_modes is not None and isinstance(ctrl_modes, int):
-        modes_enabled = DercontrolType(value=ctrl_modes.to_bytes(4, "big"))
+    modes_enabled = control_type_from("modesEnabled", configuration.get("modesEnabled"))
 
     # setGradW: required UInt16, plain integer (not a scale factor type)
     grad_w = configuration.get("setGradW", 0)

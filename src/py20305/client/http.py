@@ -317,6 +317,9 @@ class Sep2Client:
         # Populated after discovery so each request can be attributed to
         # the correct device instead of using the client's cert LFDI.
         self._device_lfdi_by_prefix: dict[str, str] = {}
+        # The same, for the EndDevices discovery found. Replaced on each discovery
+        # and kept apart from the map above so an embedder's entries stay.
+        self._device_lfdi_by_discovery: dict[str, str] = {}
         # MirrorUsagePoint location (e.g. "/mup/3") -> the LFDI its deviceLFDI
         # names. Learned from each MirrorUsagePoint POST, since the server
         # chooses the location; kept apart so rediscovery does not clear it.
@@ -371,14 +374,19 @@ class Sep2Client:
         )
 
     def _end_device_href(self, lfdi: str | None) -> str | None:
-        """Return the href registered for ``lfdi`` with :meth:`update_device_lfdi_prefixes`."""
+        """Return the href registered for ``lfdi``, by the embedder or by discovery."""
         if lfdi is None:
             return None
         wanted = lfdi.lower()
-        for prefix, registered in self._device_lfdi_by_prefix.items():
+        for prefix, registered in self._registered_prefixes():
             if registered.lower() == wanted:
                 return prefix
         return None
+
+    def _registered_prefixes(self) -> Iterable[tuple[str, str]]:
+        """Return every ``(prefix, LFDI)`` registered, the embedder's first."""
+        yield from self._device_lfdi_by_prefix.items()
+        yield from self._device_lfdi_by_discovery.items()
 
     def _exchange(
         self,
@@ -447,11 +455,12 @@ class Sep2Client:
         self._traffic_recorder = value
 
     def update_device_lfdi_prefixes(self, prefix_map: dict[str, str]) -> None:
-        """Update URL prefix → device LFDI mapping for message attribution.
+        """Set the URL prefix → device LFDI mapping used for attributing exchanges.
 
-        Called after discovery to map EndDevice and FSA path prefixes to
-        their device LFDIs. This lets the exchange records attribute
-        each request to the correct device.
+        The client registers every EndDevice it discovers by itself, so an
+        embedder calls this only for prefixes discovery does not know, such as
+        a function set served outside the EndDevice. Entries set here replace
+        the earlier ones set here and take precedence over discovered ones.
 
         Args:
             prefix_map: Maps URL prefixes (e.g., "/edev/2", "/FDA-SGA-TFA")
@@ -463,6 +472,15 @@ class Sep2Client:
             len(self._device_lfdi_by_prefix),
         )
 
+    def update_discovered_devices(self, prefix_map: dict[str, str]) -> None:
+        """Replace the EndDevices discovery found: EndDevice href → hex LFDI.
+
+        Discovery calls this after each pass, so a request under a discovered
+        EndDevice href is attributed to that device.
+        """
+        self._device_lfdi_by_discovery = dict(prefix_map)
+        logger.debug("Registered %d discovered devices", len(self._device_lfdi_by_discovery))
+
     def _resolve_device_lfdi(self, uri: str) -> str | None:
         """Resolve a request URI to a device LFDI using prefix matching.
 
@@ -471,7 +489,7 @@ class Sep2Client:
         prefix of the URI was registered for while that device is still
         registered, or None if no match.
         """
-        for prefix, lfdi in self._device_lfdi_by_prefix.items():
+        for prefix, lfdi in self._registered_prefixes():
             if uri.startswith(prefix + "/") or uri == prefix:
                 return lfdi
         for prefix, lfdi in self._device_lfdi_by_mup.items():
@@ -488,7 +506,7 @@ class Sep2Client:
         if not lfdi:
             return None
         wanted = lfdi.lower()
-        for registered in self._device_lfdi_by_prefix.values():
+        for _prefix, registered in self._registered_prefixes():
             if registered.lower() == wanted:
                 return registered
         return None

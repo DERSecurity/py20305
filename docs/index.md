@@ -21,8 +21,8 @@ overlapping programs, randomized start and duration, and the `Response`
 acknowledgments the server expects back.
 
 **Drives the device.** A connector turns a control into whatever the device
-speaks. You supply it, as a subclass or a factory; the package ships a
-no-hardware print connector for bringing up a server connection.
+speaks. SunSpec Modbus ships with the package; anything else is a subclass or a
+factory you supply.
 
 **Reports back.** DERStatus, DERCapability, DERSettings, DERAvailability and
 metered readings, posted as MirrorUsagePoints.
@@ -65,11 +65,10 @@ follow the SunSpec Alliance's certification process:
 ## Part of Project Satori
 
 Satori — “awakening” — is an open-source project led by
-the SunSpec Alliance, DER Security, and industry consortium members. It pairs an IEEE 2030.5 / CSIP client with
+the SunSpec Alliance, DER Security, and industry consortium members. It pairs this IEEE 2030.5 / CSIP client with
 [PySunSpec2](https://github.com/sunspec/pysunspec2), the SunSpec Modbus
 reference library, so a certified Modbus device can join a utility DER
-program without a firmware rewrite. This package is the IEEE 2030.5 half; the
-application that drives the device supplies the connector between the two.
+program without a firmware rewrite.
 
 ## Getting started
 

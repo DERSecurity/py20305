@@ -403,8 +403,6 @@ _AS_REPORTED_SLOTS: dict[ReadingIdentity, tuple[int, str]] = {
 }
 #: The quantities SIGNED_AS_REPORTED posts with the connector's sign.
 _AS_REPORTED_SIGNED_UOMS = frozenset({_UOM_W, _UOM_VAR, _UOM_PF})
-#: Mixed into a SIGNED_AS_REPORTED hashed mRID.
-_AS_REPORTED_SALT = "signed_as_reported"
 
 #: Phase codes of lines 2 and 3.
 _LINE_2_3_PHASES = frozenset({64, 65, 32, 33})
@@ -482,7 +480,10 @@ def _hashed_mrid(
     """Return the mRID of a reading with no 0.16 slot.
 
     Layout: SFDI (12 decimal digits), the marker, 11 hex chars of a SHA-256
-    over the LFDI, the identity and the optional ``salt``, and the PEN.
+    over the LFDI, the identity and the ``salt``, and the PEN. The caller passes
+    the reading profile's name as the salt: each profile derives a different
+    ReadingType from the same reading, and a ReadingType never changes under an
+    mRID.
     """
     lfdi_norm = lfdi.lower()
     sfdi = compute_sfdi(lfdi_norm)
@@ -696,9 +697,7 @@ def _posted_readings(
                     description = f"{description} {_DIRECTION_SUFFIX[flow]}"
                 order = (0, legacy[0], rank)
             else:
-                mrid = _hashed_mrid(
-                    lfdi, variant, salt=_AS_REPORTED_SALT if as_reported else ""
-                ).value
+                mrid = _hashed_mrid(lfdi, variant, salt=profile.value).value
                 description = _description(variant, flow)
                 order = (1, position, rank)
             if mrid in seen:
@@ -964,13 +963,15 @@ def _signed_load_value(posted: _Posted, var_by_line: Mapping[int, int], role: De
     W and var are signed by ``role``. A DER and a DER meter report them
     positive for the DER's output (generation and reactive injection), so both
     are negated. A site meter reports them positive for import, which is
-    already the load convention, so both are kept. PF takes the sign of the var
-    posted on the same line -- negative on reactive injection -- and stays an
-    unsigned magnitude when that var is missing. A direction-specific reading
-    and everything else is a magnitude.
+    already the load convention, so both are kept. A Net (flowDirection 4)
+    W or var reading is signed the same way, in the same frame. PF takes the
+    sign of the var posted on the same line -- negative on reactive injection --
+    and stays an unsigned magnitude when that var is missing. Any other
+    direction-specific reading and everything else is a magnitude.
     """
     scaled = _scale_half_away(posted.reading.value, posted.multiplier)
-    if posted.reading.flow_direction is not None:
+    flow = posted.reading.flow_direction
+    if flow is not None and not (flow == FLOW_NET and posted.uom in _DIRECTED_UOMS):
         return abs(scaled)
     if posted.uom in _DIRECTED_UOMS:
         return scaled if role is DeviceRole.SITE_METER else -scaled

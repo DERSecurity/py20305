@@ -19,7 +19,7 @@ implementation, so the useful question is usually not "should we do this" but
 "what does the standard say" — and that discussion is cheaper before the code
 than after.
 
-**For a connector**, note that no device-protocol connector ships in-tree. A connector
+**For a connector**, note that only SunSpec Modbus ships in-tree. A connector
 for your own device usually belongs in your project, using `CustomDeviceConfig`
 or a `factory_resolver`; see the
 [connector guide](https://dersecurity.github.io/py20305/connectors/).

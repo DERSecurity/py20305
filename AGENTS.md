@@ -26,7 +26,7 @@ repeated here.
 - Python 3.11, 3.12 and 3.13, on Linux, Windows and macOS.
 - The base install is the protocol client: `aiohttp`, `cryptography`, `pydantic` 2,
   `xsdata-pydantic` and `lxml`. Everything else is an extra: `api` (FastAPI and uvicorn),
-  `cli` (PyYAML) and `mqtt` (aiomqtt).
+  `cli` (PyYAML) and `sunspec` (pysunspec2 and pyserial).
 - Build: `setuptools`. Tests: `pytest` with `pytest-asyncio` in auto mode, `pytest-aiohttp`
   and `pytest-timeout`. Lint: `ruff`, line length 100. Types: `mypy` with
   `disallow_untyped_defs`. Documentation: MkDocs 1.x with Material and mkdocstrings.
@@ -141,6 +141,7 @@ In this order:
 5. **The SunSpec CSIP conformance test procedures**, for what a certification test checks
    and how.
 6. **The RFCs the standard builds on**: TLS, HTTP, X.509 certificates, DNS-SD and mDNS.
+7. **The SunSpec Modbus information models**, for the SunSpec connector only.
 
 Other implementations are witnesses, not authorities. The end-to-end suite runs against an
 independently written CSIP-AUS server, the recorded run in `docs/conformance/` shows how
@@ -264,7 +265,7 @@ Related rules:
   certificates are mounted. It runs unprivileged. CI checks both.
 - **It runs on Linux, Windows and macOS.** Use `pathlib`, name the encoding of every text
   file, and do not assume a path separator, a line ending or a signal.
-- **No device-protocol connector ships in the tree.** A connector for one device
+- **Only the SunSpec Modbus connector ships in the tree.** A connector for one device
   belongs in the project that owns the device. See the connector guide.
 - **Follow the pattern that is already there.** Read a neighboring module before adding a
   new shape.
@@ -297,7 +298,7 @@ State the decision in one sentence, then the reason, then what it costs.
 | Subscriptions and the notification listener | `src/py20305/subscription/` |
 | Device connectors | `src/py20305/connectors/` |
 | The management API | `src/py20305/api/` |
-| Traffic forwarding | `src/py20305/forwarders/` |
+| Observers: records of exchanges, device I/O and audit | `src/py20305/observers.py`, `src/py20305/audit.py` |
 | Certificates and identity | `src/py20305/security/` |
 | Generated models and the schemas they come from | `src/py20305/models/`, `src/py20305/schemas/` |
 | The runner and its configuration | `src/py20305/cli.py`, `src/py20305/config.py` |
@@ -358,7 +359,7 @@ pull request.
 
 | When you | Also update |
 |---|---|
-| Add or change a feature | The guide that covers it under `docs/` (`running.md`, `connectors.md`, `discovery.md`, `forwarding.md`, `api.md`, `docker.md`), the README where it describes what the client does, and the docstrings |
+| Add or change a feature | The guide that covers it under `docs/` (`running.md`, `connectors.md`, `discovery.md`, `observers.md`, `api.md`, `docker.md`), the README where it describes what the client does, and the docstrings |
 | Add a guide page | `nav` in `mkdocs.yml`, and links to it from the pages a reader would come from |
 | Add a public module | `docs/reference/`, so its docstrings are published |
 | Add or change a setting | The configuration model in `src/py20305/config.py`, `docs/running.md`, and `examples/client.example.yaml` |

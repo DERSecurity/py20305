@@ -35,7 +35,7 @@ def _print_demo_configuration() -> dict:
         "setMinPFUnderExcited": 0.850,
         "setMaxVA": 10000,
         "setMaxVar": 4400,
-        "setMaxVarNeg": 4400,
+        "setMaxVarNeg": -4400,
         "setMaxChargeRateW": 10000,
         "setMaxChargeRateVA": 10000,
         "setMaxDischargeRateW": 10000,
@@ -68,6 +68,15 @@ class TestBuildDerSettings:
         model = build_der_settings({"setMaxW": 1000, "modesEnabled": 93323888}, updated_time=0)
         assert model.modes_enabled is not None
         assert model.modes_enabled.value == (93323888).to_bytes(4, "big")
+
+    def test_a_modes_value_that_is_not_an_int_is_left_out_with_a_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            model = build_der_settings({"setMaxW": 1000, "modesEnabled": "0x03"})
+
+        assert model.modes_enabled is None
+        assert any("modesEnabled" in r.getMessage() for r in caplog.records)
 
     def test_non_standard_fields_dropped(self) -> None:
         """WMaxOvrExt and WMaxUndExt are not valid DERSettings fields per XSD."""

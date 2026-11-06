@@ -34,6 +34,12 @@ class TestPrintDemoConnector:
         assert result["rtgVNom"] == 480
 
     @pytest.mark.asyncio
+    async def test_the_absorbed_reactive_power_limits_are_negative(self):
+        c = PrintDemoConnector()
+        assert (await c.fetch_nameplate())["rtgMaxVarNeg"] < 0
+        assert (await c.fetch_configuration())["setMaxVarNeg"] < 0
+
+    @pytest.mark.asyncio
     async def test_fetch_configuration_returns_values(self):
         c = PrintDemoConnector()
         result = await c.fetch_configuration()

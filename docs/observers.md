@@ -63,7 +63,7 @@ observers: observers are for an application that embeds the client.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `capture_bodies` | `True` | Put request and response bodies in exchange records. Off, `request_body` and `response_body` are `None`; validation and the resource type still use the bodies. |
+| `capture_bodies` | `True` | Put request and response bodies in exchange records. Off, `request_body` and `response_body` are `None`; validation and the resource type still use the bodies. Captured bodies include identity payloads such as the Registration `pIN`; an application that stores or forwards records should treat them accordingly, or set this to `False`. |
 | `redacted_headers` | `authorization`, `cookie`, `set-cookie` | Header names whose values are replaced by `[redacted]` in exchange records. Compared without regard to case. |
 | `validate` | `True` | Validate each XML body against the schemas and report the result in the exchange record, with an `invalid_body` anomaly for a successful response that fails. |
 | `schema_dir` | `None` | Directory holding the schema files to validate with; the packaged schemas fill in any it lacks. `Sep2Client.set_schema_validator` sets it too. |
@@ -117,11 +117,11 @@ per attempt, with `attempt` counting from 1 within the logical request.
 | `direction` | `client_request`, or `notification` for a POST to the listener. |
 | `method`, `url`, `path` | The request. `path` includes the query. |
 | `request_headers`, `response_headers` | Ordered `(name, value)` pairs, as sent and received, with the redacted ones replaced. For a request that received a response, the headers aiohttp sent, including the ones it adds itself; for one that did not, the client's own headers. |
-| `request_body`, `response_body` | The bytes exactly as sent and received, or `None`. |
+| `request_body`, `response_body` | The request body exactly as sent. The response body after content decoding: the client asks for `gzip` and `deflate` and aiohttp decompresses, so a compressed response is recorded decompressed while `response_headers` still shows `Content-Encoding` and the compressed `Content-Length`. `None` when there is no body. |
 | `status` | The response status, or `None` when no response arrived. |
 | `sent_at`, `received_at` | Epoch seconds, UTC. |
 | `sent_monotonic`, `received_monotonic`, `duration` | `time.monotonic()` values and the seconds between them, or to the failure. |
-| `error_kind`, `error` | Why no response arrived: `connect`, `tls`, `timeout`, `disconnected`, `invalid_url` or `other`, and the failure in a few words. `None` when a response arrived, whatever its status. |
+| `error_kind`, `error` | Why the attempt failed: `connect`, `tls`, `timeout`, `disconnected`, `invalid_url` or `other`, and the failure in a few words. Set when no response arrived, and when a transport failure ends the exchange after the status was received (a body cut short, a connection reset): then `status` is set too, and a `lost` connection event follows. `None` when the exchange completed, whatever the status. |
 | `local`, `remote` | The two ends of the connection the exchange used. |
 | `server_host` | The server's host name as configured. |
 | `tls_version`, `tls_cipher`, `server_cert_sha256` | The negotiated version and cipher suite, and the SHA-256 fingerprint of the certificate the peer presented. For a notification, the certificate the notifying server presented as a client. |
@@ -132,11 +132,13 @@ per attempt, with `attempt` counting from 1 within the logical request.
 
 ### Device attribution
 
-An embedding application that fronts several devices tells the client which
-paths belong to which device with `Sep2Client.update_device_lfdi_prefixes`,
-mapping each device's EndDevice href to its LFDI. An exchange whose path falls
+After discovery and after every rediscovery the client registers each
+EndDevice it found, by its href, with its LFDI. An exchange whose path falls
 under one of those hrefs carries that device's `device_lfdi` and, as
-`end_device_href`, the href it was registered under.
+`end_device_href`, the href it was registered under. An application that needs
+other paths attributed, such as a function set served outside the EndDevice,
+registers them with `Sep2Client.update_device_lfdi_prefixes`, mapping each
+prefix to an LFDI; those entries take precedence and survive rediscovery.
 
 A MirrorUsagePoint is POSTed to the list, which names no device. The client
 attributes that POST to the device its `deviceLFDI` names, when that device is

@@ -157,6 +157,21 @@ def test_ratings_take_their_element_names_and_the_current_rating() -> None:
     }
 
 
+def test_the_absorbed_reactive_power_ratings_are_negative() -> None:
+    """IEEE 2030.5 rtgMaxVarNeg and setMaxVarNeg are negative; SunSpec reports a magnitude."""
+    nameplate = convert.nameplate({"VarMaxAbsRtg": {"value": 4400, "multiplier": 0}})
+    settings = convert.settings({"VarMaxAbs": {"value": 4400, "multiplier": -1}})
+
+    assert nameplate == {"rtgMaxVarNeg": {"value": -4400, "multiplier": 0}}
+    assert settings == {"setMaxVarNeg": {"value": -4400, "multiplier": -1}}
+
+
+def test_an_absorbed_reactive_power_rating_that_is_already_negative_stays_negative() -> None:
+    nameplate = convert.nameplate({"VarMaxAbsRtg": {"value": -4400, "multiplier": 0}})
+
+    assert nameplate == {"rtgMaxVarNeg": {"value": -4400, "multiplier": 0}}
+
+
 def test_settings_take_their_element_names() -> None:
     settings = convert.settings({"WMax": 1, "WMaxOvrExt": 2, "DoeModesEnabled": 4})
 
@@ -180,12 +195,27 @@ def test_a_withdrawn_element_turns_its_function_off() -> None:
     )
 
 
-def test_ramp_time_is_passed_to_the_core() -> None:
-    _, params = convert.Controls().translate(
-        "opModFixedW", {"enabled": True, "value": 2500, "rampTms": 300}
-    )
+def test_ramp_time_is_not_applied_and_is_noted_once(caplog: pytest.LogCaptureFixture) -> None:
+    controls = convert.Controls()
+    with caplog.at_level("INFO", logger=convert.logger.name):
+        _, params = controls.translate(
+            "opModFixedW", {"enabled": True, "value": 2500, "rampTms": 300}
+        )
+        _, again = controls.translate(
+            "opModFixedW", {"enabled": True, "value": 2500, "rampTms": 300}
+        )
+        controls.translate("opModFixedW", {"enabled": True, "value": 2500})
 
-    assert params == {"WSetEna": 1, "WSetMod": 0, "WSet": 25.0, "ramp_tms": 300}
+    assert params == again == {"WSetEna": 1, "WSetMod": 0, "WSet": 25.0}
+    notes = [r for r in caplog.records if "ramp" in r.getMessage()]
+    assert len(notes) == 1 and "300" in notes[0].getMessage()
+
+
+def test_a_control_without_a_ramp_time_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("DEBUG", logger=convert.logger.name):
+        convert.Controls().translate("opModFixedW", {"enabled": True, "value": 2500})
+
+    assert caplog.records == []
 
 
 def test_the_two_fixed_power_factors_share_one_write() -> None:

@@ -6,6 +6,7 @@ suitable for serialization via ``to_xml()`` and PUT to the server.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from py20305.models.csipaus.csipaus_ext import DoeModesSupported
@@ -26,10 +27,34 @@ from py20305.telemetry.scale_factor import (
     to_watt_hour,
 )
 
+logger = logging.getLogger(__name__)
+
+_MAX_CONTROL_TYPE = 2**32
+
 # CSIP-AUS DOE control bitmap default: all four DOE limits -- opModExpLimW (bit
 # 0) | opModImpLimW (bit 1) | opModGenLimW (bit 2) | opModLoadLimW (bit 3) =
 # 0x0F. Used when the connector doesn't report which DOE modes it supports.
 _DEFAULT_DOE_MODES_SUPPORTED = 0x0F
+
+
+def control_type_from(key: str, value: object) -> DercontrolType | None:
+    """Return the DERControlType bitmap for a connector's ``value``, or None.
+
+    The value must be an ``int`` from 0 to 4294967295. None means the connector
+    gave none and returns None quietly. Any other value is logged as a warning
+    and returns None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < _MAX_CONTROL_TYPE:
+        return DercontrolType(value=value.to_bytes(4, "big"))
+    logger.warning(
+        "%s must be an int from 0 to %d (a DERControlType bitmap); %r is left out",
+        key,
+        _MAX_CONTROL_TYPE - 1,
+        value,
+    )
+    return None
 
 
 def build_der_capability(
@@ -58,10 +83,8 @@ def build_der_capability(
         raise ValueError(msg)
 
     # modesSupported: required, default to zero bitmap if absent
-    ctrl_modes = nameplate.get("modesSupported")
-    if ctrl_modes is not None and isinstance(ctrl_modes, int):
-        modes_supported = DercontrolType(value=ctrl_modes.to_bytes(4, "big"))
-    else:
+    modes_supported = control_type_from("modesSupported", nameplate.get("modesSupported"))
+    if modes_supported is None:
         modes_supported = DercontrolType(value=b"\x00\x00\x00\x00")
 
     # Category fields (plain int passthrough)

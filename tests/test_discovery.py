@@ -206,6 +206,10 @@ class _MockClient:
         self.server_2018_compat = server_2018_compat
         # Every request as (method, path), path with its query string.
         self.calls: list[tuple[str, str]] = []
+        self.discovered_devices: dict[str, str] = {}
+
+    def update_discovered_devices(self, prefix_map: dict[str, str]) -> None:
+        self.discovered_devices = dict(prefix_map)
 
     async def get(self, path: str, model_type: type) -> Any:
         self.calls.append(("get", path))
@@ -260,6 +264,7 @@ async def test_full_discovery_chain():
     assert state.der_programs["/derp/1"].primacy == 5
     assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1"]
     assert state.device_mapping.device_to_programs["/edev/1"] == ["/derp/1"]
+    assert client.discovered_devices == {"/edev/1": "01" * 20}
 
 
 @pytest.mark.asyncio

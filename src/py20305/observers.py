@@ -159,8 +159,10 @@ class ExchangeRecord:
             request had no body or body capture is off.
         status: The response status, or None when no response arrived.
         response_headers: The response headers, with the redacted ones replaced.
-        response_body: The response body exactly as received, or None when
-            there was no response, it had no body, or body capture is off.
+        response_body: The response body after content decoding (aiohttp
+            decompresses gzip and deflate), so it can differ from the bytes on
+            the wire when the server compresses. None when there was no
+            response, it had no body, or body capture is off.
         sent_at: When the request was sent, in seconds since the Unix epoch.
         received_at: When the response arrived, in seconds since the Unix
             epoch, or None.
@@ -170,7 +172,9 @@ class ExchangeRecord:
         duration: Seconds from sending the request to receiving the response,
             or to the failure. None when unknown.
         attempt: The attempt number within one logical request, from 1.
-        error_kind: Why no response arrived, or None.
+        error_kind: Why the attempt failed, or None. Set when no response
+            arrived, and when a transport failure such as a truncated body
+            or a reset ended the exchange after the status was received.
         error: The failure, in a few words, or None.
         local: This end of the connection, or None when unknown.
         remote: The other end of the connection, or None when unknown.
@@ -583,6 +587,8 @@ class QueuedObserver(Generic[_Record]):
     """
 
     _STOP = object()
+    #: Seconds between checks for room in a full queue while closing.
+    _CLOSE_POLL = 0.05
 
     def __init__(
         self, target: Callable[[_Record], None], *, maxsize: int = 10_000, name: str = "observer"
@@ -599,9 +605,14 @@ class QueuedObserver(Generic[_Record]):
         self._target = target
         self._queue: queue.Queue[object] = queue.Queue(maxsize=maxsize)
         self._guard = ObserverGuard(name)
+        # Guards ``_closed``, ``dropped`` and the check-and-put in ``__call__``,
+        # so a record offered while the observer closes is queued or counted.
         self._lock = threading.Lock()
         self._closed = False
-        #: How many records were dropped because the queue was full or closed.
+        # Set when close() gave up waiting: the thread then stops after the
+        # record it is delivering and counts the rest as dropped.
+        self._abandon = threading.Event()
+        #: How many records were dropped because the queue was full, closed or abandoned.
         self.dropped = 0
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
@@ -618,38 +629,69 @@ class QueuedObserver(Generic[_Record]):
 
     def __call__(self, record: _Record) -> None:
         """Queue ``record`` for delivery, or drop and count it when the queue is full."""
-        if self._closed:
-            self._count_drop()
-            return
-        try:
-            self._queue.put_nowait(record)
-        except queue.Full:
-            self._count_drop()
+        with self._lock:
+            if self._closed:
+                self.dropped += 1
+                return
+            try:
+                self._queue.put_nowait(record)
+            except queue.Full:
+                self.dropped += 1
 
     def close(self, timeout: float | None = 5.0) -> None:
         """Deliver the queued records, then stop the thread.
 
         Records that arrive after this call are dropped and counted. Waits up
-        to ``timeout`` seconds for the thread; None waits until it finishes.
+        to ``timeout`` seconds in total for the thread; None waits until it
+        finishes. When the wait ends with the thread still busy, for example
+        because the target is stuck, the thread stops after the record it is
+        delivering and counts the records still queued in :attr:`dropped`.
         """
-        if self._closed:
-            return
-        self._closed = True
-        # A blocking put: the stop marker has to reach the thread even when
-        # the queue is full.
-        self._queue.put(self._STOP)
-        self._thread.join(timeout)
-
-    def _count_drop(self) -> None:
         with self._lock:
-            self.dropped += 1
+            if self._closed:
+                return
+            self._closed = True
+        deadline = None if timeout is None else time.monotonic() + timeout
+        if not self._put_stop(deadline):
+            self._abandon.set()
+            return
+        self._thread.join(None if deadline is None else max(0.0, deadline - time.monotonic()))
+        if self._thread.is_alive():
+            self._abandon.set()
+
+    def _put_stop(self, deadline: float | None) -> bool:
+        """Queue the stop marker, waiting for room until ``deadline``; return whether it fit."""
+        while self._thread.is_alive():
+            wait = self._CLOSE_POLL
+            if deadline is not None:
+                wait = min(wait, deadline - time.monotonic())
+                if wait <= 0:
+                    return False
+            try:
+                self._queue.put(self._STOP, timeout=wait)
+            except queue.Full:
+                continue
+            return True
+        return True
 
     def _run(self) -> None:
-        while True:
+        while not self._abandon.is_set():
             record = self._queue.get()
             if record is self._STOP:
                 return
             self._guard.deliver(self._target, record)  # type: ignore[arg-type]
+        self._discard_queued()
+
+    def _discard_queued(self) -> None:
+        """Remove every queued record and count it as dropped."""
+        while True:
+            try:
+                record = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            if record is not self._STOP:
+                with self._lock:
+                    self.dropped += 1
 
 
 __all__ = [

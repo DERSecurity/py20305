@@ -115,8 +115,9 @@ class BaseConnector:
         Real and reactive power are signed in the frame of the device's role
         (see :class:`~py20305.connectors.reading.Reading`); a reading profile
         that posts another convention converts them. A quantity the device does
-        not measure is left out. Give each reading a distinct ReadingType: a
-        second reading with the same one is dropped.
+        not measure is left out. Give each reading a distinct ReadingType,
+        multiplier included: a second reading with the same one is dropped and
+        a warning is logged.
         """
         return []
 
@@ -430,39 +431,39 @@ class BaseConnector:
     # ------------------------------------------------------------------
 
     async def update_set_es_delay(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Apply or withdraw setESDelay."""
+        """Apply setESDelay. IEEE 2030.5 updates the setting; it is never withdrawn."""
         return None
 
     async def update_set_es_high_freq(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Apply or withdraw setESHighFreq."""
+        """Apply setESHighFreq. IEEE 2030.5 updates the setting; it is never withdrawn."""
         return None
 
     async def update_set_es_high_volt(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Apply or withdraw setESHighVolt."""
+        """Apply setESHighVolt. IEEE 2030.5 updates the setting; it is never withdrawn."""
         return None
 
     async def update_set_es_low_freq(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Apply or withdraw setESLowFreq."""
+        """Apply setESLowFreq. IEEE 2030.5 updates the setting; it is never withdrawn."""
         return None
 
     async def update_set_es_low_volt(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Apply or withdraw setESLowVolt."""
+        """Apply setESLowVolt. IEEE 2030.5 updates the setting; it is never withdrawn."""
         return None
 
     async def update_set_es_ramp_tms(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Apply or withdraw setESRampTms."""
+        """Apply setESRampTms. IEEE 2030.5 updates the setting; it is never withdrawn."""
         return None
 
     async def update_set_es_random_delay(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Apply or withdraw setESRandomDelay."""
+        """Apply setESRandomDelay. IEEE 2030.5 updates the setting; it is never withdrawn."""
         return None
 
     async def update_set_grad_w(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Apply or withdraw setGradW."""
+        """Apply setGradW. IEEE 2030.5 updates the setting; it is never withdrawn."""
         return None
 
     async def update_set_soft_grad_w(self, params: dict[str, Any]) -> ConnectorPayload:
-        """Apply or withdraw setSoftGradW."""
+        """Apply setSoftGradW. IEEE 2030.5 updates the setting; it is never withdrawn."""
         return None
 
     # ------------------------------------------------------------------

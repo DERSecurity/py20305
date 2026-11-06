@@ -30,6 +30,7 @@ from py20305.connectors.modes import (
     DISABLED,
     DOE_ELEMENTS,
     ELEMENT_BY_MODE,
+    METHOD_BY_ELEMENT,
     translate_controls,
     translate_default_controls,
 )
@@ -80,6 +81,24 @@ FIELD_DISABLE_CALLS: dict[str, tuple[str, dict[str, Any]]] = {
 }
 
 
+def unused_update_methods(connector_class: type) -> list[str]:
+    """Return the ``update_*`` methods a connector class defines that the client never calls.
+
+    The client calls one ``update_<element>`` method per control element
+    (``METHOD_BY_ELEMENT``). A class written for an earlier contract may still
+    define methods named for its own control vocabulary; they are never called.
+    """
+    called = set(METHOD_BY_ELEMENT.values())
+    known = called | {name for name in dir(BaseConnector) if name.startswith("update_")}
+    return sorted(
+        name
+        for name in dir(connector_class)
+        if name.startswith("update_")
+        and name not in known
+        and callable(getattr(connector_class, name, None))
+    )
+
+
 class ConnectorDispatcher:
     """Implements ControlDispatcher protocol using the connector system.
 
@@ -124,6 +143,7 @@ class ConnectorDispatcher:
         # it reaches the lookup below, so without this the same warning is
         # logged once per control for as long as the device stays listed.
         self._missing_connector_reported: set[str] = set()
+        self._checked_connector_classes: set[type] = set()
 
     @property
     def telemetry(self) -> DeviceTelemetryEmitter | None:
@@ -260,7 +280,9 @@ class ConnectorDispatcher:
                 # and report again if it ever loses the connector.
                 self._missing_connector_reported.discard(lfdi)
                 resolve(dedup_key)
-            return await proxy.aresolve()  # type: ignore[no-any-return]
+            connector: BaseConnector = await proxy.aresolve()
+            self._warn_unused_update_methods(connector)
+            return connector
 
         if lfdi in self._missing_connector_reported:
             logger.debug("No connector found for LFDI %s (already reported)", lfdi)
@@ -274,6 +296,23 @@ class ConnectorDispatcher:
             details={"lfdi": lfdi},
         )
         return None
+
+    def _warn_unused_update_methods(self, connector: BaseConnector) -> None:
+        """Warn once per connector class about ``update_*`` methods the client never calls."""
+        connector_class = type(connector)
+        if connector_class in self._checked_connector_classes:
+            return
+        self._checked_connector_classes.add(connector_class)
+        unused = unused_update_methods(connector_class)
+        if unused:
+            logger.warning(
+                "Connector %s defines %s, which the client no longer calls. Controls reach "
+                "a connector through one update_<element> method per control element, "
+                "for example update_op_mod_max_lim_w; until the connector defines those, "
+                "the controls for the elements it does not define are not applied.",
+                connector_class.__name__,
+                ", ".join(unused),
+            )
 
     async def apply_control(
         self,

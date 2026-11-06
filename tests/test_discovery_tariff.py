@@ -22,6 +22,9 @@ class _MockClient:
     def __init__(self, responses: dict[str, Any]) -> None:
         self._responses = responses
 
+    def update_discovered_devices(self, prefix_map: dict[str, str]) -> None:
+        return None
+
     async def get_list(self, path: str, model_type: type) -> list[Any]:
         key = path.split("?")[0]
         if key not in self._responses:
