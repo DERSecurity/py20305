@@ -1,6 +1,7 @@
 """Pure-function supersession algorithm for DERControl events.
 
-Compares all pairs of active/scheduled events. If two events have
+Compares the pairs of active/scheduled events whose programs reach a common
+device. If two events have
 overlapping time ranges and identical DERControlBase parameters
 (excluding opModConnect/opModEnergize), the lower-primacy event
 supersedes the higher-primacy one. Same primacy: newer creationTime wins
@@ -80,6 +81,12 @@ def compute_supersession(
 ) -> list[SupersessionResult]:
     """Compute all supersession pairs among the given events.
 
+    Only events whose programs reach a common device can supersede one
+    another. Each event is compared with the later events of the programs it
+    shares a device with, in the order of *events*, so each such pair is
+    compared once and the results, and their order, are those of comparing
+    every pair. Each event's compared modes are worked out once.
+
     Args:
         events: List of active/scheduled EventRecords to compare.
         program_to_devices: Mapping from program_href to set of device hrefs
@@ -87,12 +94,6 @@ def compute_supersession(
 
     Returns:
         List of SupersessionResult for each superseded pair.
-
-    Only events whose programs reach a common device can supersede one
-    another. Each event is compared with the later events of the programs it
-    shares a device with, in the order of *events*, so each such pair is
-    compared once and the results, and their order, are those of comparing
-    every pair. Each event's compared modes are worked out once.
     """
     programs_on: dict[str, set[str]] = {}
     for program, devices in program_to_devices.items():
