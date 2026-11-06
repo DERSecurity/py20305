@@ -32,6 +32,11 @@ from py20305.readings import (
     MeasurementSource,
     Quality,
 )
+from py20305.telemetry.checkpoint import (
+    CHECKPOINT_VERSION,
+    reading_from_dict,
+    reading_to_dict,
+)
 from py20305.telemetry.der_availability import build_der_availability
 from py20305.telemetry.log_events import (
     DER_ALARM_NAMES,
@@ -273,6 +278,10 @@ class TelemetryManager:
             connector_resolver, telemetry=device_telemetry
         )
         self._devices: dict[str, DeviceTelemetryState] = {}
+        #: Registrations restored from a checkpoint, by device LFDI, for a device
+        #: that has not been started yet.
+        self._restored: dict[str, dict[bytes, RegisteredReading]] = {}
+        self._on_registration_change: Callable[[], None] | None = None
         self._scheduler = PollScheduler()
         self._intervals = interval_history
         self._site_intervals = site_interval_history
@@ -344,6 +353,8 @@ class TelemetryManager:
             # and the new state defaults to telemetry_blocked=False.
             new_state.telemetry_blocked = existing.telemetry_blocked
             new_state.blocked_reason = existing.blocked_reason
+        if not new_state.registered and lfdi_norm in self._restored:
+            new_state.registered = dict(self._restored[lfdi_norm])
         self._devices[lfdi_norm] = new_state
         # The planner acquires on this cadence; the metering cycle reads what
         # it stored. Declared as post_rate so a default deployment sees the
@@ -629,10 +640,16 @@ class TelemetryManager:
 
         try:
             location = await self._client.post_bytes(self._mup_list_href_source(), body)
+            first_registration = not state.registered
+            registration_changed = plan.keys() != state.registered.keys()
             state.mup_posted = True
             state.registered = plan
             state.registered_declaration = declared
             state.rejected_registration = None
+            if first_registration:
+                self._warn_registered_from_sign(state)
+            if registration_changed:
+                self._registration_changed()
 
             if location:
                 state.mup_href = location
@@ -721,6 +738,145 @@ class TelemetryManager:
                 details={"lfdi": state.lfdi, "op": "mup_post", "error": str(e)},
                 exc_info=True,
             )
+
+    def _warn_registered_from_sign(self, state: DeviceTelemetryState) -> None:
+        """Warn once when the default profile registered from the current sign.
+
+        The flowDirection of a power reading comes from the sign of its value
+        under the default profile. With no saved registration to repeat, a
+        device that registered earlier with another sign now registers with this
+        one, and IEEE 2030.5-2023 section 10.10.3 rule n) forbids the server's
+        ReadingType from changing.
+        """
+        if (
+            self._reading_profile is ReadingProfile.DEFAULT
+            and self._power_direction is PowerDirection.DEFAULT
+            and state.lfdi not in self._restored
+        ):
+            logger.warning(
+                "No saved registration for %s: its ReadingTypes are registered from the "
+                "current sign of each value and may differ from an earlier registration. "
+                "Set telemetry.state_file to keep registrations across restarts.",
+                state.lfdi[:8],
+            )
+
+    def set_on_registration_change(self, callback: Callable[[], None] | None) -> None:
+        """Call ``callback`` after a MUP POST registered a different set of readings.
+
+        Use it to store :meth:`to_checkpoint`. An exception the callback raises
+        is logged and does not stop the metering cycle.
+        """
+        self._on_registration_change = callback
+
+    def _registration_changed(self) -> None:
+        if self._on_registration_change is None:
+            return
+        try:
+            self._on_registration_change()
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("the registration checkpoint callback failed")
+
+    def to_checkpoint(self) -> dict[str, Any]:
+        """Return the registered readings of every device as JSON-safe data.
+
+        Store it and hand it to :meth:`restore_from_checkpoint` after a restart,
+        so the readings register again with the ReadingTypes the server holds.
+        """
+        devices: dict[str, dict[bytes, RegisteredReading]] = {
+            lfdi: dict(registered) for lfdi, registered in self._restored.items()
+        }
+        for lfdi, state in self._devices.items():
+            if state.registered:
+                devices[lfdi] = dict(state.registered)
+        return {
+            "version": CHECKPOINT_VERSION,
+            "reading_profile": self._reading_profile.value,
+            "power_direction": self._power_direction.value,
+            "devices": [
+                {
+                    "lfdi": lfdi,
+                    "mup_mrid": mup_mrid(lfdi).hex(),
+                    "readings": [reading_to_dict(r) for r in registered.values()],
+                }
+                for lfdi, registered in sorted(devices.items())
+                if registered
+            ],
+        }
+
+    def restore_from_checkpoint(self, data: Any) -> int:
+        """Load registrations from :meth:`to_checkpoint` data; return how many devices.
+
+        Anything that cannot be used is ignored with a warning: data of another
+        version or shape, a checkpoint written under another reading profile or
+        power direction, and any device or reading that does not parse. A device
+        already started with registrations of its own keeps them.
+        """
+        if not isinstance(data, dict) or data.get("version") != CHECKPOINT_VERSION:
+            logger.warning(
+                "Ignoring the telemetry checkpoint: it is not version %d data", CHECKPOINT_VERSION
+            )
+            return 0
+        if (
+            data.get("reading_profile") != self._reading_profile.value
+            or data.get("power_direction") != self._power_direction.value
+        ):
+            logger.warning(
+                "Ignoring the telemetry checkpoint: it was written under reading_profile "
+                "%r and power_direction %r, not %r and %r",
+                data.get("reading_profile"),
+                data.get("power_direction"),
+                self._reading_profile.value,
+                self._power_direction.value,
+            )
+            return 0
+        entries = data.get("devices")
+        if not isinstance(entries, list):
+            logger.warning("Ignoring the telemetry checkpoint: devices is not a list")
+            return 0
+        restored = 0
+        for entry in entries:
+            try:
+                lfdi, registered = self._parse_device(entry)
+            except ValueError as exc:
+                logger.warning("Ignoring a device in the telemetry checkpoint: %s", exc)
+                continue
+            self._restored[lfdi] = registered
+            state = self._devices.get(lfdi)
+            if state is not None and not state.registered:
+                state.registered = dict(registered)
+            restored += 1
+        return restored
+
+    @staticmethod
+    def _parse_device(entry: Any) -> tuple[str, dict[bytes, RegisteredReading]]:
+        if not isinstance(entry, dict):
+            raise ValueError("a device entry must be an object")
+        lfdi = entry.get("lfdi")
+        if not isinstance(lfdi, str) or len(lfdi) != 40:
+            raise ValueError("lfdi must be 40 hex characters")
+        try:
+            lfdi = lfdi.lower()
+            expected = mup_mrid(lfdi).hex()
+        except ValueError as exc:
+            raise ValueError("lfdi must be 40 hex characters") from exc
+        if entry.get("mup_mrid") != expected:
+            raise ValueError(f"the MirrorUsagePoint mRID does not belong to {lfdi[:8]}")
+        readings = entry.get("readings")
+        if not isinstance(readings, list):
+            raise ValueError("readings must be a list")
+        registered: dict[bytes, RegisteredReading] = {}
+        for item in readings:
+            try:
+                reading = reading_from_dict(item)
+            except ValueError as exc:
+                logger.warning(
+                    "Ignoring a reading of %s in the telemetry checkpoint: %s", lfdi[:8], exc
+                )
+                continue
+            registered[reading.mrid] = reading
+        if not registered:
+            raise ValueError(f"no usable readings for {lfdi[:8]}")
+        return lfdi, registered
 
     def _registration_grew(self, state: DeviceTelemetryState, readings: list[Reading]) -> bool:
         """Return whether this cycle supplies a reading the posted MUP did not register.

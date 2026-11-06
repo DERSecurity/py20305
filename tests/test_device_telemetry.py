@@ -877,3 +877,142 @@ class TestDeviceRecords:
         assert fw.events[0].values["k"] == 1
         with pytest.raises(TypeError):
             fw.events[0].values["k"] = 3  # type: ignore[index]
+
+
+# -- The runner keeps the registered readings --------------------------------
+
+
+class TestRunnerKeepsRegistrations:
+    """telemetry.state_file keeps the registered readings across restarts."""
+
+    @staticmethod
+    def _client_and_config(tmp_path, state_file):
+        from py20305.cli import build_client
+        from py20305.config import ClientConfig
+
+        cert = _write_client_cert(tmp_path)
+        telemetry: dict = {"post_rate_seconds": 60}
+        if state_file is not None:
+            telemetry["state_file"] = str(state_file)
+        config = ClientConfig.model_validate(
+            {
+                "server": {"url": "https://server.example.com:8443"},
+                "tls": {
+                    "client_cert": str(cert),
+                    "client_key": str(cert),
+                    "ca_cert": str(cert),
+                },
+                "devices": [{"type": "print_demo", "lfdi": LFDI_A}],
+                "telemetry": telemetry,
+            }
+        )
+        client, _ = build_client(config)
+        client.state.mup_list_href = "/mup"
+        return client, config
+
+    @staticmethod
+    def _registered(lfdi: str):
+        from py20305.connectors.reading import Reading
+        from py20305.telemetry.mup import plan_registration
+
+        return plan_registration(lfdi, [Reading(uom=38, value=-500.0)])
+
+    def _stored_checkpoint(self, path):
+        from unittest.mock import MagicMock
+
+        from py20305.telemetry.checkpoint import save_checkpoint
+        from py20305.telemetry.manager import DeviceTelemetryState, TelemetryManager
+
+        manager = TelemetryManager(MagicMock(), "/mup", lambda _lfdi: None)
+        manager._devices[LFDI_A] = DeviceTelemetryState(
+            lfdi=LFDI_A, registered=self._registered(LFDI_A)
+        )
+        save_checkpoint(path, manager.to_checkpoint())
+
+    @pytest.mark.asyncio
+    async def test_the_runner_loads_the_state_file_at_start(self, tmp_path):
+        from py20305.cli import _start_telemetry
+
+        state_file = tmp_path / "telemetry.json"
+        self._stored_checkpoint(state_file)
+        client, config = self._client_and_config(tmp_path, state_file)
+
+        coordinator = _start_telemetry(client, config)
+
+        assert coordinator is not None and coordinator.telemetry is not None
+        started = coordinator.telemetry._devices[LFDI_A]
+        assert set(started.registered) == set(self._registered(LFDI_A))
+        await coordinator.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_runner_saves_after_a_registration_change(self, tmp_path):
+        from py20305.cli import _start_telemetry
+        from py20305.telemetry.checkpoint import load_checkpoint
+
+        state_file = tmp_path / "state" / "telemetry.json"
+        client, config = self._client_and_config(tmp_path, state_file)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None and coordinator.telemetry is not None
+        assert not state_file.exists()
+
+        coordinator.telemetry._devices[LFDI_A].registered = self._registered(LFDI_A)
+        coordinator.telemetry._registration_changed()
+
+        saved = load_checkpoint(state_file)
+        assert [d["lfdi"] for d in saved["devices"]] == [LFDI_A]
+        await coordinator.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_the_runner_saves_at_shutdown_before_the_devices_are_dropped(self, tmp_path):
+        from py20305.cli import _start_telemetry, save_telemetry_state
+        from py20305.telemetry.checkpoint import load_checkpoint
+
+        state_file = tmp_path / "telemetry.json"
+        client, config = self._client_and_config(tmp_path, state_file)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None and coordinator.telemetry is not None
+        coordinator.telemetry._devices[LFDI_A].registered = self._registered(LFDI_A)
+
+        save_telemetry_state(coordinator, state_file)
+        await coordinator.shutdown()
+
+        assert [d["lfdi"] for d in load_checkpoint(state_file)["devices"]] == [LFDI_A]
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_written_when_no_state_file_is_set(self, tmp_path):
+        from py20305.cli import _start_telemetry
+
+        client, config = self._client_and_config(tmp_path, None)
+        coordinator = _start_telemetry(client, config)
+        assert coordinator is not None and coordinator.telemetry is not None
+
+        coordinator.telemetry._devices[LFDI_A].registered = self._registered(LFDI_A)
+        coordinator.telemetry._registration_changed()
+
+        assert config.telemetry.state_file is None
+        assert list(tmp_path.glob("*.json")) == []
+        await coordinator.shutdown()
+
+    def test_the_state_file_setting_resolves_against_the_configuration_file(self, tmp_path):
+        from py20305.config import ClientConfig
+
+        cert = _write_client_cert(tmp_path)
+        config = ClientConfig.model_validate(
+            {
+                "server": {"url": "https://server.example.com:8443"},
+                "tls": {
+                    "client_cert": str(cert),
+                    "client_key": str(cert),
+                    "ca_cert": str(cert),
+                },
+                "telemetry": {"state_file": "state/telemetry.json"},
+            }
+        ).resolve_paths(tmp_path)
+
+        assert config.telemetry.state_file == (tmp_path / "state" / "telemetry.json").resolve()
+
+    def test_the_command_line_flag_names_the_state_file(self):
+        from py20305.cli import parse_args
+
+        args = parse_args(["-c", "client.yaml", "--telemetry-state-file", "kept.json"])
+        assert args.telemetry_state_file == Path("kept.json")

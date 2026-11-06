@@ -546,6 +546,19 @@ class TelemetryConfig(_Strict):
         ),
     )
 
+    state_file: Path | None = Field(
+        default=None,
+        description=(
+            "A file that keeps the readings registered with the server across restarts. "
+            "IEEE 2030.5-2023 10.10.3 rule n) forbids changing a registered ReadingType, "
+            "and under the default reading profile a power reading's flowDirection comes "
+            "from the sign of its value when it is first registered. With a state file the "
+            "client repeats the earlier registration after a restart. Unset, nothing is "
+            "kept and each restart registers from the current sign. A relative path is "
+            "relative to the configuration file."
+        ),
+    )
+
     @model_validator(mode="after")
     def _direction_needs_the_default_profile(self) -> TelemetryConfig:
         if self.power_direction != "default" and self.reading_profile != "default":
@@ -713,6 +726,12 @@ class ClientConfig(_Strict):
                 update={"file": (base / logging_config.file).resolve()}
             )
 
+        telemetry = self.telemetry
+        if telemetry.state_file is not None and not telemetry.state_file.is_absolute():
+            telemetry = telemetry.model_copy(
+                update={"state_file": (base / telemetry.state_file).resolve()}
+            )
+
         # A device speaking Modbus over TLS carries its own certificate paths,
         # and they go straight to an SSL context. Resolving only the server's
         # would make the same relative path mean different things depending on
@@ -723,6 +742,7 @@ class ClientConfig(_Strict):
             update={
                 "tls": tls,
                 "logging": logging_config,
+                "telemetry": telemetry,
                 "devices": devices,
             }
         )

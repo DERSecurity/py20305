@@ -208,6 +208,9 @@ connection:
 #   der_resource_put_policy: periodic   # or on_change (once, then on change)
 #   reading_profile: default   # or signed_load_convention, or signed_as_reported
 #   power_direction: default   # or net, or split (default profile only)
+#   # Keeps the registered readings across restarts, so a reading keeps the
+#   # flowDirection it first registered with. Relative to this file. Off when unset.
+#   state_file: telemetry-state.json
 
 # The operations history: events, device writes, and measured intervals, in one
 # SQLite file. On by default. site_intervals keeps a site meter's readings as a

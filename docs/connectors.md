@@ -202,7 +202,14 @@ cannot collide with the slot layout: the SFDI, a marker, the hash, and the
 Private Enterprise Number. The profile is part of the hash because each profile
 derives a different ReadingType from the same reading.
 
-The client registers each reading the first time it appears. When a later cycle
+The client registers each reading the first time it appears. Under the default
+profile a power reading registers with the flowDirection its sign gives at that
+moment, and the server never lets a ReadingType change. The runner's
+`telemetry.state_file` (see
+[Running](running.md#keeping-registrations-across-restarts)) keeps the
+registrations across restarts; an embedding application stores
+`TelemetryCoordinator.to_checkpoint()` and restores it with
+`restore_from_checkpoint()` before it starts metering. When a later cycle
 supplies a reading the MirrorUsagePoint did not register, the client posts the
 MirrorUsagePoint again with every earlier ReadingType unchanged plus the new
 one, before posting readings for it.

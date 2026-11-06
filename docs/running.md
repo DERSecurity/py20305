@@ -43,7 +43,7 @@ py20305 --config client.yaml --check
 ```
 
 Validates the file, resolves the certificate, and prints the LFDI the utility
-has to register. Connects to nothing. A mistake is reported with the field that
+has to register, and the telemetry state file when one is set. Connects to nothing. A mistake is reported with the field that
 caused it:
 
 ```
@@ -192,6 +192,33 @@ modes never posts a value under a ReadingType registered for another mode. They
 apply to total and per-line W and var. `power_direction` is refused with
 `signed_load_convention` and `signed_as_reported`, which already sign every
 value. Like the profile, it is read at startup.
+
+### Keeping registrations across restarts
+
+IEEE 2030.5 does not let the server's ReadingType for a reading change once it is
+created (2030.5-2023 10.10.3 rule n). Under the `default` profile and
+`power_direction: default`, a reading's flowDirection comes from the sign of its
+value when it is first registered. A client that restarts while a battery charges
+would register the same reading as Reverse instead of Forward.
+
+`telemetry.state_file` names a file that keeps what was registered. The client
+loads it at start and repeats each registration exactly, writes it again after
+every change to the registered readings (through a temporary file and a rename),
+and writes it at shutdown. `--telemetry-state-file` sets the same path from the
+command line, and `--check` shows it. Unset, nothing is kept.
+
+```yaml
+telemetry:
+  state_file: telemetry-state.json
+```
+
+A file written under another `reading_profile` or `power_direction`, of another
+version, or damaged is ignored with a warning, and so is any entry in it that
+does not parse. Without a saved registration for a device, which includes the first
+start after upgrading from 0.16, the readings register from the current sign and
+the client logs one warning per device saying that they may differ from an earlier
+registration. An embedding application stores the same data with
+`TelemetryCoordinator.to_checkpoint()` and `restore_from_checkpoint()`.
 
 Rediscovery re-reads every path. A server that moves its resources, or that
 brings the MirrorUsagePoint function set online only after the client
