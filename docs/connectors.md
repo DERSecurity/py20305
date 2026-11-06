@@ -378,7 +378,7 @@ A connector whose readings are fixed for the device's life can say so with
 identities (a `ReadingIdentity`, or a `Reading` standing for its identity):
 
 ```python
-from py20305.connectors.reading import Reading
+from py20305.connectors.reading import Reading, ReadingIdentity, reading_identity
 
 def declared_readings(self) -> frozenset[ReadingIdentity] | None:
     return frozenset({reading_identity(Reading(value=0.0, uom=38))})  # real power
