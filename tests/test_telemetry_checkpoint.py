@@ -20,6 +20,7 @@ import pytest
 from py20305.connectors.base import BaseConnector
 from py20305.connectors.reading import Reading
 from py20305.models.sep import MirrorUsagePoint
+from py20305.server_profile import Edition, ServerProfile
 from py20305.telemetry.checkpoint import load_checkpoint, save_checkpoint
 from py20305.telemetry.manager import TelemetryManager
 from py20305.telemetry.mup import ReadingProfile
@@ -33,6 +34,7 @@ REVERSE = 19
 
 def _client() -> AsyncMock:
     client = AsyncMock()
+    client.profile = ServerProfile(base=Edition.E2023)
     client.post_bytes = AsyncMock(return_value="/mup/device1")
     client.get_list = AsyncMock(return_value=[])
     client.get = AsyncMock(return_value=SimpleNamespace(post_rate=None))
