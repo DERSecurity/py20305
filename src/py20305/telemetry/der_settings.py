@@ -11,12 +11,12 @@ from typing import Any
 
 from py20305.models.csipaus.csipaus_ext import DoeModesEnabled
 from py20305.models.sep.sep import (
-    DercontrolType,
     DercontrolType2,
     Dersettings,
     TimeType,
 )
 from py20305.server_profile import ServerProfile
+from py20305.telemetry.der_capability import control_type_from
 from py20305.telemetry.scale_factor import (
     to_active_power,
     to_amp_hour,
@@ -69,10 +69,7 @@ def build_der_settings(
         raise ValueError(msg)
 
     # modesEnabled: optional bitmap
-    ctrl_modes = configuration.get("modesEnabled")
-    modes_enabled = None
-    if ctrl_modes is not None and isinstance(ctrl_modes, int):
-        modes_enabled = DercontrolType(value=ctrl_modes.to_bytes(4, "big"))
+    modes_enabled = control_type_from("modesEnabled", configuration.get("modesEnabled"))
 
     # modesEnabled2: the additional modes (2023) the connector reports enabled.
     # Only the connector can say which are enabled, so nothing is sent without

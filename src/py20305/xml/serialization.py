@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from lxml import etree
 from xsdata_pydantic.bindings import XmlContext, XmlParser, XmlSerializer
@@ -163,9 +163,32 @@ _SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas"
 _SAFE_PARSER = etree.XMLParser(resolve_entities=False, no_network=True)
 
 
+class _PackagedSchemaResolver(etree.Resolver):
+    """Resolve an import or include that is missing from a schema's directory.
+
+    A schema directory may hold a schema that imports another by relative
+    ``schemaLocation`` without holding the imported file. The packaged copy of
+    that file is used instead.
+    """
+
+    def resolve(  # type: ignore[override]
+        self, system_url: str, public_id: str, context: Any
+    ) -> Any:
+        """Return the packaged schema named by ``system_url`` when the file is missing."""
+        if system_url is None or "://" in system_url:
+            return None
+        path = Path(system_url)
+        packaged = _SCHEMA_DIR / path.name
+        if not path.exists() and packaged.exists():
+            return self.resolve_filename(str(packaged), context)  # type: ignore[attr-defined]
+        return None
+
+
 @functools.cache
 def _load_schema(schema_path: Path) -> etree.XMLSchema:
-    schema_doc = etree.parse(str(schema_path))
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    parser.resolvers.add(_PackagedSchemaResolver())
+    schema_doc = etree.parse(str(schema_path), parser)
     return etree.XMLSchema(schema_doc)
 
 
@@ -186,6 +209,12 @@ EXTENSION_SCHEMAS: dict[str, tuple[str, str]] = {
         "https://csipaus.org/ns/v1.3-beta/storage",
     ),
 }
+
+
+#: Elements of an extension namespace that are resources of their own, so may be
+#: the root of a body. Every other extension element only extends an IEEE 2030.5
+#: body.
+EXTENSION_RESOURCES = frozenset({"ConnectionPoint"})
 
 
 def _namespace_of(element: etree._Element) -> str | None:
@@ -278,7 +307,9 @@ def _validate_layered(doc: etree._Element, schema_dir: Path | None) -> list[str]
 
     The body less every element outside the IEEE 2030.5 namespace is checked
     against the IEEE 2030.5 schema, and each element set aside is checked on
-    its own against the schema of its namespace (:data:`EXTENSION_SCHEMAS`).
+    its own against the schema of its namespace (:data:`EXTENSION_SCHEMAS`). A
+    body whose root element is outside the IEEE 2030.5 namespace is an error,
+    unless it is an extension resource (:data:`EXTENSION_RESOURCES`).
     Utilities mix elements of the 2018 and 2023 editions with profile
     extensions, so no single schema accepts every valid body. Profile
     requirements, such as an extension a profile makes mandatory or where it
@@ -288,6 +319,11 @@ def _validate_layered(doc: etree._Element, schema_dir: Path | None) -> list[str]
     errors: list[str] = []
     if _namespace_of(doc) == NS_SEP:
         errors += _schema_errors(_load_schema(_base_schema(schema_dir)), doc)
+    elif etree.QName(doc).localname not in EXTENSION_RESOURCES:
+        errors.append(
+            f"{etree.QName(doc).localname}: the root element must be in the IEEE 2030.5 "
+            f"namespace {NS_SEP!r}, not {_namespace_of(doc)!r}"
+        )
     for element in extensions:
         errors += _extension_errors(element, schema_dir)
     return errors
@@ -323,7 +359,7 @@ def validate_xml_result(
     """Validate XML and return ``(is_valid, first_error_or_None)``.
 
     A convenience wrapper around :func:`validate_xml` that returns a
-    ``(bool, str | None)`` tuple suitable for the message-forwarding pipeline.
+    ``(bool, str | None)`` tuple suitable for a record field.
 
     Args:
         xml: XML content as bytes or string.

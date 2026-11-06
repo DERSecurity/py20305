@@ -179,6 +179,45 @@ class TestClientRequests:
         )
         assert any(e.outcome is ConnectionOutcome.FAILED for e in recorder.connections)
 
+    async def test_a_body_cut_short_after_the_status_is_a_lost_connection(self):
+        async def cut_short(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/sep+xml\r\n"
+                b"Content-Length: 500\r\n\r\n<Time>abc"
+            )
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(cut_short, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        recorder = Recorder()
+        try:
+            async with _client(f"http://127.0.0.1:{port}", recorder) as client:
+                with pytest.raises(Exception):  # noqa: B017 - any client error
+                    await client.get("/tm", Time)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert recorder.exchanges
+        for record in recorder.exchanges:
+            assert record.status == 200
+            assert record.error_kind is ErrorKind.DISCONNECTED
+            assert record.error
+        lost = [e for e in recorder.connections if e.outcome is ConnectionOutcome.LOST]
+        assert len(lost) == len(recorder.exchanges)
+
+    async def test_a_protocol_error_with_a_status_has_no_error_kind(self, aiohttp_server):
+        base_url = await _serve(aiohttp_server, _app())
+        recorder = Recorder()
+        async with _client(base_url, recorder) as client:
+            with pytest.raises(Sep2ProtocolError):
+                await client.get("/broken", Time)
+
+        assert all(r.error_kind is None and r.error is None for r in recorder.exchanges)
+        assert all(e.outcome is ConnectionOutcome.CONNECTED for e in recorder.connections)
+
     async def test_body_capture_can_be_turned_off(self, aiohttp_server):
         base_url = await _serve(aiohttp_server, _app())
         recorder = Recorder()

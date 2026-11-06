@@ -71,6 +71,14 @@ and its inject and absorb forms, `opModFixedW`, `opModTargetW`,
 generation and load limits, and `opModConnect` / `opModEnergize` through the
 model 703 enter-service permit. Any other element is unsupported by design.
 
+The connector does not apply ramp times. A control's `rampTms` is accepted and
+ignored: the device ramps at its own rate. The connector logs that once at INFO
+the first time a control sets one.
+
+Under IEEE 2030.5 the absorbed reactive power limits, `rtgMaxVarNeg` and
+`setMaxVarNeg`, are negative. The connector reports the model 702 magnitude
+as a negative number.
+
 ### Meters
 
 A device with `role: site_meter` or `role: der_meter` (see
@@ -158,9 +166,10 @@ IEEE 2030.5 ReadingType and its value in engineering units:
 | `quality_flags` | this sample's qualityFlags; the default is valid |
 
 Leave out a quantity the device does not measure; it is not posted rather than
-posted as zero. Give each reading a distinct ReadingType: a second reading with
-the same one is dropped with a warning, and so is a reading whose fields are
-not valid codes.
+posted as zero. Give each reading a distinct ReadingType, multiplier included: a
+second reading with the same one is dropped with a warning, and so is a reading
+whose fields are not valid codes. Two readings that differ only in multiplier
+are two readings.
 
 Common readings:
 
@@ -188,9 +197,10 @@ Readings that release 0.16 registered keep the mRID it gave them: a fixed table
 maps each of those identities to its 0.16 slot (see `py20305.telemetry.mup`),
 so a server holding a 0.16 registration keeps receiving readings under the
 mRIDs it knows. Every other identity, a phased system voltage among them, gets
-an mRID hashed from the identity, in a layout that cannot collide with the slot
-layout: the SFDI, a marker, the identity hash, and the Private Enterprise
-Number.
+an mRID hashed from the identity and the reading profile, in a layout that
+cannot collide with the slot layout: the SFDI, a marker, the hash, and the
+Private Enterprise Number. The profile is part of the hash because each profile
+derives a different ReadingType from the same reading.
 
 The client registers each reading the first time it appears. When a later cycle
 supplies a reading the MirrorUsagePoint did not register, the client posts the
@@ -247,26 +257,33 @@ reported; an explicit 0 is.
 | `fetch_nameplate` key | Notes |
 |---|---|
 | `rtgMaxW` | required |
-| `rtgMaxVA`, `rtgMaxVar`, `rtgMaxVarNeg`, `rtgMaxA` | `rtgMaxA` is the maximum continuous AC current, amperes RMS |
+| `rtgMaxVA`, `rtgMaxVar`, `rtgMaxVarNeg`, `rtgMaxA` | `rtgMaxA` is the maximum continuous AC current, amperes RMS. `rtgMaxVarNeg` is negative (see below) |
 | `rtgOverExcitedW`, `rtgOverExcitedPF`, `rtgUnderExcitedW`, `rtgUnderExcitedPF` | |
 | `rtgMaxChargeRateW`, `rtgMaxChargeRateVA`, `rtgMaxDischargeRateW`, `rtgMaxDischargeRateVA` | |
 | `rtgMaxWh`, `rtgMaxAh` | |
 | `rtgVNom`, `rtgMaxV`, `rtgMinV` | |
 | `rtgReactiveSusceptance`, `rtgNormalCategory`, `rtgAbnormalCategory` | |
-| `modesSupported` | DERControlType bitmap |
+| `modesSupported` | DERControlType bitmap, as a Python `int` from 0 to 4294967295. Any other type or range is reported as `00000000` and logged as a warning |
 | `doeModesSupported` | CSIP-AUS extension bitmap; defaults to all four limits |
 
 | `fetch_configuration` key | Notes |
 |---|---|
 | `setMaxW` | required |
-| `setMaxVA`, `setMaxVar`, `setMaxVarNeg` | |
+| `setMaxVA`, `setMaxVar`, `setMaxVarNeg` | `setMaxVarNeg` is negative (see below) |
 | `setMinPFOverExcited`, `setMinPFUnderExcited` | |
 | `setMaxChargeRateW`, `setMaxChargeRateVA`, `setMaxDischargeRateW`, `setMaxDischargeRateVA` | |
 | `setMaxWh`, `setMaxAh` | |
 | `setVNom`, `setMaxV`, `setMinV` | |
 | `setGradW` | |
-| `modesEnabled` | DERControlType bitmap |
+| `modesEnabled` | DERControlType bitmap, as a Python `int` from 0 to 4294967295. Any other type or range is left out and logged as a warning |
 | `doeModesEnabled` | CSIP-AUS extension bitmap; defaults to the export and import limits |
+
+The absorbed reactive power limits are negative numbers. IEEE 2030.5-2023 says
+of `setMaxVarNeg`: "If present, SHALL be a negative value >= rtgMaxVarNeg
+(default). If absent, defaults to negative setMaxVar." and of `rtgMaxVarNeg`:
+"If absent, defaults to negative rtgMaxVar." A connector that reads a magnitude
+from its device sends its negation, for example `{"value": -4400, "multiplier": 0}`.
+The client posts the sign it is given.
 
 ### Status and availability
 
@@ -320,7 +337,7 @@ The value uses the IEEE 2030.5 element names:
 
 | Element type | `value` |
 |---|---|
-| Curve (`opModVoltVar`, `opModFreqWatt`, the ride-through curves, ...) | the DERCurve the link references: `curveType`, `xMultiplier`, `yMultiplier`, `yRefType`, `CurveData` (a list of `{xvalue, yvalue}`), and `openLoopTms`, `rampDecTms`, `rampIncTms`, `rampPT1Tms`, `vRef`, `autonomousVRefEnable`, `autonomousVRefTimeConstant` when set |
+| Curve (`opModVoltVar`, `opModFreqWatt`, the ride-through curves, ...) | the DERCurve the link references: `curveType`, `xMultiplier`, `yMultiplier`, `yRefType`, `CurveData` (a list of `{xvalue, yvalue}`, plus `excitation` on each point of an `opModWattPF` curve), and `openLoopTms`, `rampDecTms`, `rampIncTms`, `rampPT1Tms`, `vRef`, `autonomousVRefEnable`, `autonomousVRefTimeConstant` when set |
 | PerCent, SignedPerCent (`opModMaxLimW`, `opModFixedW`, `opModFixedV`, ...) | the integer in hundredths of a percent |
 | Power (`opModMaxLimWInject`, `opModTargetW`, `opModTargetVar`, the CSIP-AUS limits, ...) | `{"value": ..., "multiplier": ...}` |
 | Delta power (`opModDeltaW`, `opModDeltaVar`) | `{"value": ..., "multiplier": ..., "bidirectional": ...}` |
@@ -330,11 +347,19 @@ The value uses the IEEE 2030.5 element names:
 | Boolean (`opModConnect`, `opModEnergize`, the permits) | a bool |
 | DefaultDERControl settings | the integer |
 
+The DefaultDERControl settings are never withdrawn: IEEE 2030.5-2023 says of
+each that, "When present, this value SHALL update the value of the corresponding
+setting" (for example DERSettings::setGradW). Their methods receive
+`enabled: True` and the integer, and never `{"enabled": False}`.
+
 `opModConnect` and `opModEnergize` arrive separately. IEEE 2030.5 combines
 them with a logical AND: the device is connected only when neither is false.
 
 A control that names a curve the client does not hold withdraws that element
-(`{"enabled": False}`). An element a server marks `disabled="true"` is not sent.
+(`{"enabled": False}`). An element a server marks `disabled="true"` withdraws
+the element too: IEEE 2030.5-2023 says a disabled DERControl mode "follows the
+rules and guidelines as if the DERControl Mode were not disabled", so it takes
+part in event precedence like any other and then withdraws the mode.
 When an event ends, the client withdraws each element it set that the
 DefaultDERControl does not carry, except connect, energize and the permits:
 ending an event that disconnected a device is not an order to reconnect it.

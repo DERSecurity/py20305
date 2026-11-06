@@ -28,6 +28,7 @@ definitions.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -279,6 +280,8 @@ def status(raw: Mapping[str, Any]) -> dict[str, Any]:
 # Ratings and settings
 # ---------------------------------------------------------------------------
 
+logger = logging.getLogger(__name__)
+
 _NAMEPLATE_NAMES: dict[str, str] = {
     "WMaxRtg": "rtgMaxW",
     "VAMaxRtg": "rtgMaxVA",
@@ -319,9 +322,30 @@ _SETTING_NAMES: dict[str, str] = {
 }
 
 
+#: Elements IEEE 2030.5 defines as negative values. The SunSpec points carry
+#: the absorbed reactive power as a magnitude.
+_NEGATIVE_ELEMENTS = frozenset({"rtgMaxVarNeg", "setMaxVarNeg"})
+
+
+def _negative(value: Any) -> Any:
+    """Return ``value`` as a negative number, keeping the multiplier of a dict."""
+    if isinstance(value, Mapping):
+        magnitude = value.get("value")
+        if isinstance(magnitude, (int, float)) and not isinstance(magnitude, bool):
+            return {**value, "value": -abs(magnitude)}
+        return dict(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return -abs(value)
+    return value
+
+
 def _renamed(values: Mapping[str, Any], names: Mapping[str, str]) -> dict[str, Any]:
     """Return the values with an element name, renamed; drop the rest."""
-    return {names[key]: value for key, value in values.items() if key in names}
+    return {
+        names[key]: _negative(value) if names[key] in _NEGATIVE_ELEMENTS else value
+        for key, value in values.items()
+        if key in names
+    }
 
 
 def nameplate(values: Mapping[str, Any], model_702: Any = None) -> dict[str, Any]:
@@ -486,12 +510,13 @@ class Controls:
     Stateful where one write carries more than one element: the two fixed
     power factors share one write, and the connect state is
     ``opModConnect`` AND ``opModEnergize``. The write carries the latest
-    value of each part.
+    value of each part. A control's ``rampTms`` is not applied.
     """
 
     def __init__(self) -> None:
         self._pf: dict[str, dict[str, Any]] = {"inj": {"mode": 0}, "abs": {"mode": 0}}
         self._connect: dict[str, bool] = {"opModConnect": True, "opModEnergize": True}
+        self._ramp_noted = False
 
     def translate(self, element: str, params: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
         """Return the core method and parameters for one element's call.
@@ -511,10 +536,14 @@ class Controls:
             return method, {"connected": all(self._connect.values())}
         if not enabled:
             return method, dict(DISABLE[method])
-        core = _core_params(method, value)
-        if params.get("rampTms") is not None:
-            core["ramp_tms"] = params["rampTms"]
-        return method, core
+        if params.get("rampTms") is not None and not self._ramp_noted:
+            self._ramp_noted = True
+            logger.info(
+                "The SunSpec connector does not apply ramp times; rampTms %s is ignored "
+                "and the device uses its own ramp",
+                params["rampTms"],
+            )
+        return method, _core_params(method, value)
 
 
 __all__ = [

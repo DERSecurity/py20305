@@ -33,7 +33,7 @@ def _print_demo_nameplate() -> dict:
         "rtgUnderExcitedPF": 0.800,
         "rtgMaxVA": 15000,
         "rtgMaxVar": 4400,
-        "rtgMaxVarNeg": 4400,
+        "rtgMaxVarNeg": -4400,
         "rtgMaxChargeRateW": 15000,
         "rtgMaxChargeRateVA": 15000,
         "rtgMaxDischargeRateW": 15000,
@@ -145,6 +145,23 @@ class TestBuildDerCapability:
     def test_ctrl_modes_default_when_absent(self) -> None:
         model = build_der_capability({"rtgMaxW": 1000})
         assert model.modes_supported.value == b"\x00\x00\x00\x00"
+
+    @pytest.mark.parametrize("value", ["0x1F", 3.0, True, -1, 2**32, b"\x01"])
+    def test_a_modes_value_that_is_not_an_int_is_warned_about(
+        self, value: object, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            model = build_der_capability({"rtgMaxW": 1000, "modesSupported": value})
+
+        assert model.modes_supported.value == b"\x00\x00\x00\x00"
+        assert any("modesSupported" in r.getMessage() for r in caplog.records)
+
+    def test_an_int_modes_value_is_not_warned_about(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING"):
+            build_der_capability({"rtgMaxW": 1000, "modesSupported": 3})
+            build_der_capability({"rtgMaxW": 1000})
+
+        assert caplog.records == []
 
     def test_full_print_demo(self) -> None:
         nameplate = _print_demo_nameplate()

@@ -207,6 +207,73 @@ class TestQueuedObserver:
         release.set()
         queued.close()
 
+    def test_close_returns_within_the_timeout_when_the_target_is_stuck(self) -> None:
+        release = threading.Event()
+        started = threading.Event()
+
+        def stuck(_record: object) -> None:
+            started.set()
+            release.wait(10)
+
+        queued: QueuedObserver[ExchangeRecord] = QueuedObserver(stuck, maxsize=2)
+        queued(_exchange(exchange_id="held"))
+        assert started.wait(5)
+        queued(_exchange(exchange_id="queued-1"))
+        queued(_exchange(exchange_id="queued-2"))
+        assert queued.pending == 2, "the queue is full"
+
+        start = time.monotonic()
+        queued.close(timeout=0.3)
+        elapsed = time.monotonic() - start
+        release.set()
+        queued._thread.join(5)  # pylint: disable=protected-access
+
+        assert elapsed < 2
+        assert not queued._thread.is_alive()  # pylint: disable=protected-access
+        assert queued.dropped == 2, "the records still queued when close gave up are counted"
+
+    def test_close_with_a_timeout_still_delivers_what_is_queued_when_the_target_is_fast(
+        self,
+    ) -> None:
+        seen: list[str] = []
+        queued: QueuedObserver[ExchangeRecord] = QueuedObserver(
+            lambda r: seen.append(r.exchange_id), maxsize=100
+        )
+        for i in range(50):
+            queued(_exchange(exchange_id=str(i)))
+        queued.close(timeout=5)
+
+        assert seen == [str(i) for i in range(50)]
+        assert queued.dropped == 0
+
+    def test_a_record_offered_while_closing_is_queued_or_counted(self) -> None:
+        seen: list[str] = []
+        queued: QueuedObserver[ExchangeRecord] = QueuedObserver(
+            lambda r: seen.append(r.exchange_id), maxsize=1_000_000
+        )
+        sent = 0
+        stop = threading.Event()
+        count_lock = threading.Lock()
+
+        def producer() -> None:
+            nonlocal sent
+            while not stop.is_set():
+                queued(_exchange())
+                with count_lock:
+                    sent += 1
+
+        threads = [threading.Thread(target=producer) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        time.sleep(0.05)
+        queued.close(timeout=5)
+        time.sleep(0.05)
+        stop.set()
+        for thread in threads:
+            thread.join(5)
+
+        assert len(seen) + queued.dropped == sent
+
     def test_maxsize_must_be_positive(self) -> None:
         with pytest.raises(ValueError):
             QueuedObserver(lambda _r: None, maxsize=0)

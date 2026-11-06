@@ -1,7 +1,6 @@
-"""IEEE 2030.5 XML sample fixtures for schema validation and forwarder tests.
+"""IEEE 2030.5 XML sample fixtures for schema validation tests.
 
-Provides both valid and intentionally invalid XML for testing the XSD validator,
-the MQTT adapter payload serialization, and the HTTP client forwarding pipeline.
+Provides both valid and intentionally invalid XML for testing the XSD validator.
 """
 
 from __future__ import annotations

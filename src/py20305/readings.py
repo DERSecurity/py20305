@@ -30,6 +30,7 @@ from py20305.connectors.base import BaseConnector
 from py20305.connectors.reading import (
     Reading,
     ReadingIdentity,
+    effective_multiplier,
     is_valid_reading,
     reading_identity,
     reading_key,
@@ -44,10 +45,12 @@ def index_readings(readings: object) -> dict[str, Reading]:
 
     A connector is third-party code and may return anything. A value that is not
     a list or tuple raises ``TypeError``; an entry that is not a valid
-    :class:`Reading`, or repeats an earlier reading's identity, is dropped (see
-    :func:`~py20305.telemetry.mup.valid_readings`). Every path that turns a
-    ``fetch_monitoring`` response into entries applies this, so the snapshots
-    agree.
+    :class:`Reading`, or repeats an earlier reading's identity, is dropped with
+    a warning (see :func:`~py20305.telemetry.mup.valid_readings`). Identity
+    includes the multiplier, so two readings that differ only in multiplier are
+    both kept: the second is keyed by its ``reading_key`` plus ``:m<multiplier>``.
+    Every path that turns a ``fetch_monitoring`` response into entries applies
+    this, so the snapshots agree.
     """
     if not isinstance(readings, list | tuple):
         raise TypeError(
@@ -55,7 +58,13 @@ def index_readings(readings: object) -> dict[str, Reading]:
         )
     from py20305.telemetry.mup import valid_readings
 
-    return {reading_key(r): r for r in valid_readings(readings)}
+    indexed: dict[str, Reading] = {}
+    for reading in valid_readings(readings):
+        key = reading_key(reading)
+        if key in indexed:
+            key = f"{key}:m{effective_multiplier(reading)}"
+        indexed[key] = reading
+    return indexed
 
 
 def typed_declaration(declared: Any) -> frozenset[ReadingIdentity] | None:

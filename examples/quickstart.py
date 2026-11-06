@@ -10,14 +10,10 @@ the controls it would have applied. That makes this script safe to point at a
 real server before any inverter is wired up -- you see the full discovery,
 event and telemetry path, and nothing moves.
 
-To drive real hardware instead, swap PrintDemoDeviceConfig for a
-CustomDeviceConfig that names your own connector (a BaseConnector subclass):
+To drive real hardware instead, swap PrintDemoDeviceConfig for
+SunSpecDeviceConfig with your device's address:
 
-    CustomDeviceConfig(
-        lfdi=DEVICE_LFDI,
-        class_path="myproject.connectors.MyInverter",
-        init_kwargs={"host": "192.168.1.50"},
-    )
+    SunSpecDeviceConfig(lfdi=DEVICE_LFDI, host="192.168.1.50", port=502)
 """
 
 from __future__ import annotations

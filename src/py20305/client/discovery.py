@@ -472,6 +472,17 @@ async def _discover_programs_from_pages(
             )
 
 
+def register_device_prefixes(client: Sep2Client, state: DiscoveredState) -> None:
+    """Tell ``client`` each discovered EndDevice's LFDI, keyed by its href.
+
+    Exchange records then name the device a request concerns. A request for
+    anything under an EndDevice href is attributed to that EndDevice.
+    """
+    client.update_discovered_devices(
+        {href: edev.lfdi.hex() for href, edev in state.end_devices.items() if edev.lfdi}
+    )
+
+
 async def discover(
     client: Sep2Client,
     state: DiscoveredState,
@@ -544,6 +555,7 @@ async def discover(
     if not edev_list_href:
         logger.warning("No EndDeviceListLink in DeviceCapability")
         _set_time_poll_rate(state)
+        register_device_prefixes(client, state)
         return
 
     edev_pages = await client.get_list(edev_list_href, EndDeviceList)
@@ -775,6 +787,8 @@ async def discover(
         )
 
     _set_time_poll_rate(state)
+
+    register_device_prefixes(client, state)
 
     logger.info(
         "Discovery complete: %d devices, %d programs",
@@ -1020,6 +1034,7 @@ async def refresh_end_device_lists(client: Sep2Client, state: DiscoveredState) -
                 state.end_devices[edev_href].device = edev
                 state.end_devices[edev_href].lfdi = edev.l_fdi or b""
 
+    register_device_prefixes(client, state)
     logger.debug("Refreshed EndDevice list with %d devices", len(state.end_devices))
 
 

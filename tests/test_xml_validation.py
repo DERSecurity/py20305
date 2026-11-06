@@ -109,15 +109,45 @@ def test_ieee_2030_5_elements_inside_an_extension_are_checked_with_it(
 ) -> None:
     """opModExpLimW is an ActivePower: its multiplier and value are IEEE 2030.5
     elements, checked with the extension rather than set aside from it."""
-    body = (
-        f'<csipaus:opModExpLimW xmlns="{SEP}" xmlns:csipaus="{CSIPAUS}">'
-        f"<multiplier>0</multiplier><value>{value}</value></csipaus:opModExpLimW>"
-    ).encode()
+    body = _capability(
+        MODES,
+        RATING,
+        TYPE,
+        f"<csipaus:opModExpLimW><multiplier>0</multiplier><value>{value}</value>"
+        "</csipaus:opModExpLimW>",
+    )
 
     errors = validate_xml(body)
 
     assert (errors == []) is valid
     assert all(error.startswith("opModExpLimW: ") for error in errors)
+
+
+def test_an_extension_element_that_is_not_a_resource_cannot_be_the_root() -> None:
+    body = f'<doeModesSupported xmlns="{CSIPAUS}">03</doeModesSupported>'.encode()
+
+    errors = validate_xml(body)
+
+    assert errors
+    assert "doeModesSupported" in errors[0] and "IEEE 2030.5 namespace" in errors[0]
+
+
+def test_a_root_in_an_unrelated_namespace_is_an_error() -> None:
+    errors = validate_xml(b'<Time xmlns="urn:example:other"><currentTime>0</currentTime></Time>')
+
+    assert any("IEEE 2030.5 namespace" in error for error in errors)
+
+
+def test_a_schema_dir_with_only_the_extension_schema_uses_the_packaged_imports(
+    tmp_path: Path,
+) -> None:
+    """csipaus-ext.xsd imports the 2018 schema by relative path; the directory lacks it."""
+    (tmp_path / "csipaus-ext.xsd").write_bytes((SCHEMAS / "csipaus-ext.xsd").read_bytes())
+    assert not (tmp_path / "sep2_schema_2018.xsd").exists()
+
+    assert validate_xml(_capability(MODES, RATING, TYPE, _doe()), schema_dir=tmp_path) == []
+    errors = validate_xml(_capability(MODES, RATING, TYPE, _doe("zz")), schema_dir=tmp_path)
+    assert errors and all(error.startswith("doeModesSupported: ") for error in errors)
 
 
 def test_stray_text_after_an_extension_is_an_error_not_a_parse_failure() -> None:

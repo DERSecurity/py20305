@@ -240,7 +240,7 @@ class TestSlots:
         slot_mrids = {_create_mrid(LFDI, index=i).value for i in range(0, 100)}
 
         for identity in identities:
-            for salt in ("", "signed_as_reported"):
+            for salt in ("default", "signed_load_convention", "signed_as_reported"):
                 assert _hashed_mrid(LFDI, identity, salt=salt).value not in slot_mrids
                 assert _hashed_mrid(LFDI, identity, salt=salt).value.hex()[12] == "f"
 

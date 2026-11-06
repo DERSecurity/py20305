@@ -25,11 +25,13 @@ from lxml import etree
 
 from py20305.client.connector import Address, SocketPair, socket_pair_of
 from py20305.client.errors import (
+    Sep2ConnectionError,
     Sep2NoContentError,
     Sep2PayloadError,
     Sep2ProtocolError,
     Sep2RateLimitError,
     Sep2RedirectError,
+    Sep2TlsError,
 )
 from py20305.client.tls import CertChainError
 from py20305.observers import (
@@ -87,6 +89,38 @@ def classify_error(exc: BaseException) -> ErrorKind:
     if cause is not None and cause is not exc:
         return classify_error(cause)
     return ErrorKind.OTHER
+
+
+def is_transport_failure(exc: BaseException | None) -> bool:
+    """Return whether ``exc`` is a transport failure rather than a protocol-level one.
+
+    A transport failure is a connection, TLS, timeout or read error, including the
+    library's own connection error that wraps one. A status, redirect, rate-limit or
+    payload error means the server answered, so it is not one.
+    """
+    if exc is None or isinstance(
+        exc,
+        (Sep2ProtocolError, Sep2PayloadError, Sep2RateLimitError, Sep2RedirectError),
+    ):
+        return False
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(
+            current,
+            (
+                aiohttp.ClientError,
+                OSError,
+                TimeoutError,
+                asyncio.TimeoutError,
+                Sep2ConnectionError,
+                Sep2TlsError,
+            ),
+        ):
+            return True
+        current = current.__cause__
+    return False
 
 
 def _connection_outcome(exc: BaseException, kind: ErrorKind) -> ConnectionOutcome | None:
@@ -230,11 +264,11 @@ class ExchangeScope:
             self._pair = socket_pair_of(transport)
 
     def response_body(self, body: bytes) -> None:
-        """Note the response body exactly as received."""
+        """Note the response body as aiohttp delivers it, after content decoding."""
         self._response_body = body
 
     def failed(self, exc: BaseException) -> None:
-        """Report the attempt as failed with ``exc``, unless a response arrived."""
+        """Report the attempt as failed with ``exc``."""
         self._report(exc)
 
     def __exit__(
@@ -273,7 +307,9 @@ class ExchangeScope:
 
     def _deliver(self, exc: BaseException | None) -> None:
         observers = self._observers
-        failure = exc if self._status is None else None
+        # A transport failure after the headers arrived (a truncated body, a reset)
+        # is still a failure. A protocol-level exception with a status is not.
+        failure = exc if self._status is None or is_transport_failure(exc) else None
         kind = classify_error(failure) if failure is not None else None
         if observers.exchange is not None:
             self._guard.deliver(observers.exchange, self._record(failure, kind))
@@ -290,7 +326,11 @@ class ExchangeScope:
     def _record(self, failure: BaseException | None, kind: ErrorKind | None) -> ExchangeRecord:
         observers = self._observers
         (request_valid, request_error), (response_valid, response_error) = self._validated()
-        end = self._received_monotonic if self._received_monotonic is not None else time.monotonic()
+        end = (
+            self._received_monotonic
+            if self._received_monotonic is not None and failure is None
+            else time.monotonic()
+        )
         capture = observers.capture_bodies
         return ExchangeRecord(
             exchange_id=self.exchange_id,

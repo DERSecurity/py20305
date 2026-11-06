@@ -126,6 +126,39 @@ class TestReleaseSlots:
         assert 10 in slots and 1 in slots
 
 
+class TestSignedLoadNetReadings:
+    """A Net reading keeps its sign under signed_load_convention."""
+
+    @staticmethod
+    def _posted(role: DeviceRole, **fields: Any) -> int:
+        reading = Reading(uom=38, **fields)
+        posted = create_meter_reading_list(LFDI, [reading], 0, profile=SIGNED, role=role)
+        (entry,) = posted.mirror_meter_reading
+        return entry.reading.value
+
+    @pytest.mark.parametrize("role", [DeviceRole.DER, DeviceRole.DER_METER, DeviceRole.SITE_METER])
+    def test_a_net_reading_is_signed_like_an_unmarked_one(self, role: DeviceRole) -> None:
+        for value in (-2500.0, 2500.0):
+            net = self._posted(role, value=value, flow_direction=4)
+            unmarked = self._posted(role, value=value)
+            assert net == unmarked
+        assert self._posted(role, value=-2500.0, flow_direction=4) == -self._posted(
+            role, value=2500.0, flow_direction=4
+        )
+
+    def test_a_net_reading_from_a_der_is_negative_on_export(self) -> None:
+        assert self._posted(DeviceRole.DER, value=2500.0, flow_direction=4) < 0
+        assert self._posted(DeviceRole.DER, value=-2500.0, flow_direction=4) > 0
+
+    def test_a_net_reading_from_a_site_meter_is_positive_on_import(self) -> None:
+        assert self._posted(DeviceRole.SITE_METER, value=2500.0, flow_direction=4) > 0
+        assert self._posted(DeviceRole.SITE_METER, value=-2500.0, flow_direction=4) < 0
+
+    def test_a_forward_reading_stays_a_magnitude(self) -> None:
+        assert self._posted(DeviceRole.DER, value=-2500.0, flow_direction=1) > 0
+        assert self._posted(DeviceRole.DER, value=2500.0, flow_direction=1) > 0
+
+
 class TestHashedMrids:
     def test_a_reading_with_no_release_slot_gets_a_hashed_mrid(self) -> None:
         reading = Reading(uom=29, value=240.0, phase=224, data_qualifier=2)
@@ -134,7 +167,7 @@ class TestHashedMrids:
 
         assert mrid not in _SLOT_BY_MRID
         assert mrid.hex()[12] == "f"
-        assert mrid == _hashed_mrid(LFDI, reading_identity(reading)).value
+        assert mrid == _hashed_mrid(LFDI, reading_identity(reading), salt="default").value
         assert mrid.hex().endswith(f"{DEFAULT_PEN:08x}")
 
     def test_hashed_mrids_never_match_a_slot_mrid(self) -> None:
@@ -155,6 +188,28 @@ class TestHashedMrids:
             default.mirror_meter_reading[0].m_rid.value
             != hundredths.mirror_meter_reading[0].m_rid.value
         )
+
+    def test_two_multipliers_of_one_reading_type_get_two_mrids(self) -> None:
+        tenths = Reading(uom=29, value=240.0, phase=224, data_qualifier=2, multiplier=-1)
+        hundredths = Reading(uom=29, value=240.0, phase=224, data_qualifier=2, multiplier=-2)
+        first = create_mup(LFDI, [tenths], 300).mirror_meter_reading[0].m_rid.value
+        second = create_mup(LFDI, [hundredths], 300).mirror_meter_reading[0].m_rid.value
+
+        assert first.hex()[12] == second.hex()[12] == "f", "both are hashed"
+        assert first != second
+
+    @pytest.mark.parametrize("profile", list(ReadingProfile))
+    def test_every_profile_hashes_to_its_own_mrid(self, profile: ReadingProfile) -> None:
+        reading = Reading(uom=29, value=240.0, phase=224, data_qualifier=2)
+        by_profile = {
+            other: create_mup(LFDI, [reading], 300, profile=other)
+            .mirror_meter_reading[0]
+            .m_rid.value
+            for other in ReadingProfile
+        }
+
+        assert len(set(by_profile.values())) == len(ReadingProfile)
+        assert by_profile[profile].hex()[12] == "f"
 
     def test_hashed_mrids_are_stable_and_per_device(self) -> None:
         reading = Reading(uom=38, value=1.0, phase=224)

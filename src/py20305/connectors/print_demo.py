@@ -62,7 +62,7 @@ class PrintDemoConnector(BaseConnector):
             "rtgUnderExcitedPF": 0.800,
             "rtgMaxVA": 15000,
             "rtgMaxVar": 4400,
-            "rtgMaxVarNeg": 4400,
+            "rtgMaxVarNeg": -4400,
             "rtgMaxChargeRateW": 15000,
             "rtgMaxChargeRateVA": 15000,
             # Storage ratings. A 0 here would be reported as 0; only a missing
@@ -86,7 +86,7 @@ class PrintDemoConnector(BaseConnector):
             "setMinPFUnderExcited": 0.850,
             "setMaxVA": 10000,
             "setMaxVar": 4400,
-            "setMaxVarNeg": 4400,
+            "setMaxVarNeg": -4400,
             "setMaxChargeRateW": 15000,
             "setMaxChargeRateVA": 15000,
             "setMaxDischargeRateW": 15000,

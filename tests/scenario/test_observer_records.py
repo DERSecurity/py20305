@@ -253,3 +253,23 @@ async def test_an_observer_that_raises_does_not_stop_the_client(tmp_path):
         assert stack.client.http.observer_failures > 0
     finally:
         await stack.close()
+
+
+async def test_exchanges_under_a_discovered_end_device_name_its_lfdi(tmp_path):
+    stack = await build_stack(tmp_path)
+    try:
+        await stack.client.connect()
+        await stack.client.poll_now()
+        # Rediscovery rebuilds the mapping; attribution must continue.
+        await stack.client.trigger_rediscovery()
+        stack.recorder.exchanges.clear()
+        await stack.client.poll_now()
+
+        under_device = [r for r in stack.recorder.exchanges if r.path.startswith("/edev/")]
+        assert under_device, "the poll read nothing under an EndDevice"
+        for record in under_device:
+            assert record.device_lfdi == stack.client_lfdi.lower()
+            assert record.end_device_href is not None
+            assert record.path.startswith(record.end_device_href)
+    finally:
+        await stack.close()
