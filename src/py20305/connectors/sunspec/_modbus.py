@@ -120,13 +120,12 @@ def _cvalue_or_none(model: Any, attr: str) -> Any:
 #: the opModFixedPF* documentation), so the lower bound is 0.0.
 #:
 #: Not -1.0: the reactive direction rides on the separate ``excitation`` flag, not
-#: on the sign of the displacement. Admitting a negative would defeat this guard
-#: on both connectors -- model 704's PF points are ``uint16``, so a negative
-#: passes the range test and then dies inside pysunspec2's encoder *after* the
-#: mode-enable point has been written, which is the stranded-lever failure this
-#: refuses in order to avoid; and the 1xx core derives ``OutPFSet``'s sign from
-#: ``excitation`` (``pf if excitation else -pf``), so a negative input silently
-#: inverts the requested direction.
+#: on the sign of the displacement. Model 704's PF points are ``uint16``, so a
+#: negative passes the range test and then dies inside pysunspec2's encoder
+#: *after* the mode-enable point has been written, which is the stranded-lever
+#: failure this refuses in order to avoid. A connector that writes a signed power
+#: factor derives the sign from ``excitation``, so a negative input there would
+#: silently invert the requested direction.
 _PF_MIN = 0.0
 _PF_MAX = 1.0
 
@@ -1793,16 +1792,20 @@ class SunSpecModbusConnector:
         """
         model = self._get_model(704)
         sides = (
-            ("inj", "PFWInjEna", "PFWInj", "opModFixedPFInjectW", "Power factor (inject)", 0),
-            ("abs", "PFWAbsEna", "PFWAbs", "opModFixedPFAbsorbW", "Power factor (absorb)", 1),
+            ("inj", "PFWInjEna", "PFWInj", "opModFixedPFInjectW", "Power factor (inject)"),
+            ("abs", "PFWAbsEna", "PFWAbs", "opModFixedPFAbsorbW", "Power factor (absorb)"),
         )
-        for key, enable, group, control, label, over_excited in sides:
+        for key, enable, group, control, label in sides:
             side = params.get(key) or {}
             if side.get("mode"):
                 # Validate before _update_enable: an out-of-range displacement
                 # must not leave the enable raised over a setpoint never written.
                 pf = _require_power_factor(side["pf"], control)
-                exc = over_excited if side.get("excitation") else 1 - over_excited
+                # IEEE 2030.5 excitation is true when the DER absorbs reactive
+                # power (under-excited). Model 704 Ext is 0 over-excited and 1
+                # under-excited. Over-excited exports reactive power whichever
+                # way active power flows, so both sides map the flag the same way.
+                exc = 1 if side.get("excitation") else 0
                 missing = _unimplemented_points(model, (f"{group}.Ext", f"{group}.PF"))
                 if missing:
                     self._control_unsupported(
