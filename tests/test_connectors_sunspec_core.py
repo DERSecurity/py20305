@@ -810,6 +810,21 @@ class TestSunSpecUpdate:
         }
         await sunspec_connector.update_const_pf(params)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("side", ["inj", "abs"])
+    @pytest.mark.parametrize(("excitation", "ext"), [(False, 0), (True, 1)])
+    async def test_excitation_maps_to_ext_the_same_way_on_both_sides(
+        self, sunspec_connector, side, excitation, ext
+    ):
+        """IEEE 2030.5 excitation true is absorbing (under-excited); model 704
+        Ext is 0 over-excited, 1 under-excited, whichever way active power flows."""
+        params = {"inj": {"mode": False}, "abs": {"mode": False}}
+        params[side] = {"mode": True, "pf": 0.9, "excitation": excitation}
+        await sunspec_connector.update_const_pf(params)
+        model = sunspec_connector._target.models[704][0]
+        group = model.PFWInj if side == "inj" else model.PFWAbs
+        assert group.Ext.cvalue == ext
+
 
 class TestSunSpecConstPFRange:
     """A power factor displacement above unity is invalid event data, not a
