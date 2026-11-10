@@ -967,7 +967,7 @@ class TestPollSuppression:
         ) as mock_refresh:
             await client._do_poll_fsa()
 
-        assert not mock_refresh.await_args.kwargs["skip_hrefs"]
+        assert mock_refresh.await_args.kwargs["skip_hrefs"] is None
 
     @pytest.mark.asyncio
     async def test_notification_fast_path_works_when_suppressed(
