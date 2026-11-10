@@ -944,6 +944,31 @@ class TestPollSuppression:
         assert "/edev/1/fsa" in skip
         assert "/edev/2/fsa" not in skip
 
+
+    @pytest.mark.asyncio
+    async def test_the_backstop_poll_refreshes_every_subscribed_fsa_list(
+        self, client: CsipClient, sub_manager: SubscriptionManager, mock_http: AsyncMock
+    ):
+        """With every FSA list subscribed the fsa poll is suppressed, so a run of it
+        is the backstop poll: it refreshes the subscribed lists rather than skipping
+        them all and fetching nothing."""
+        client._state.end_devices["/edev/1"] = _make_edev_state(fsa_list_link_href="/edev/1/fsa")
+        client._state.end_devices["/edev/2"] = _make_edev_state(fsa_list_link_href="/edev/2/fsa")
+        mock_http.post.side_effect = ["/edev/1/sub/1", "/edev/2/sub/1"]
+        await sub_manager.subscribe("/edev/1/sub", "/edev/1/fsa", "FSAList")
+        await sub_manager.subscribe("/edev/2/sub", "/edev/2/fsa", "FSAList")
+        client._update_poll_suppression()
+        assert "fsa" in client._scheduler.suppressed_keys
+
+        with patch(
+            "py20305.client.csip_client.refresh_function_set_assignments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as mock_refresh:
+            await client._do_poll_fsa()
+
+        assert not mock_refresh.await_args.kwargs["skip_hrefs"]
+
     @pytest.mark.asyncio
     async def test_notification_fast_path_works_when_suppressed(
         self, client: CsipClient, sub_manager: SubscriptionManager
