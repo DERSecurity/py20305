@@ -293,6 +293,9 @@ class Sep2Client:
         # _last_contact_epoch now) for the connectivity probe and status surface.
         self._last_validated_epoch: int | None = None
         self._consecutive_failures = 0
+        # Responses received this session, so a caller can tell whether a piece
+        # of work it ran reached the server at all.
+        self._contacts = 0
         # Operator-triggered outage simulation, plus the in-flight request count
         # it needs to drain on activation. Inert unless armed; the gate lives in
         # the session wrapper so the failure lands inside each caller's own try.
@@ -770,6 +773,16 @@ class Sep2Client:
         return self._last_validated_epoch
 
     @property
+    def contacts(self) -> int:
+        """Number of responses received from the server this session.
+
+        Increases by one for each reachable round-trip, the same events that
+        set ``last_contact_epoch``. Compare two readings to tell whether any
+        request was answered in between.
+        """
+        return self._contacts
+
+    @property
     def consecutive_failures(self) -> int:
         """Number of consecutive unreachable attempts since the last contact."""
         return self._consecutive_failures
@@ -849,6 +862,7 @@ class Sep2Client:
             self._consecutive_failures += 1
             return
         self._last_contact_epoch = int(time.time())
+        self._contacts += 1
         self._consecutive_failures = 0
         self._server_alive = True
         self._last_validated_epoch = self._last_contact_epoch

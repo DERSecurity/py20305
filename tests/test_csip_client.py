@@ -11,6 +11,7 @@ import pytest
 
 from py20305.client.csip_client import _RESOURCE_TYPE_TO_POLL_KEY, CsipClient
 from py20305.client.errors import (
+    Sep2ConnectionError,
     Sep2NoContentError,
     Sep2ProtocolError,
     Sep2RedirectError,
@@ -159,6 +160,75 @@ async def test_poll_204_below_threshold_resubscribes(client: CsipClient):
         assert client._poll_failure_count == 0
 
 
+
+@pytest.mark.asyncio
+async def test_a_poll_that_sends_no_request_neither_clears_nor_extends_a_failure_streak(
+    client: CsipClient,
+):
+    """A poll that skips every resource it covers has not reached the server.
+
+    Counted as contact, it cleared the failure streak on every cycle, so a
+    server that was down for many cycles was never treated as restarted.
+    """
+
+    async def poll_without_a_request() -> None:
+        return None
+
+    with patch.object(client, "trigger_rediscovery", new_callable=AsyncMock) as rediscover:
+        client._poll_failure_count = 3
+        await client._poll_with_404_recovery(poll_without_a_request)
+
+    assert client._poll_failure_count == 3
+    rediscover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_poll_the_server_answered_is_contact(client: CsipClient):
+    async def poll_answered() -> None:
+        client._http._record_contact(reachable=True)
+
+    with patch.object(client, "trigger_rediscovery", new_callable=AsyncMock) as rediscover:
+        client._poll_failure_count = 3
+        await client._poll_with_404_recovery(poll_answered)
+
+    assert client._poll_failure_count == 0
+    rediscover.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_outage_is_a_restart_while_every_fsa_list_is_subscribed(client: CsipClient):
+    """The FSA poll sends nothing while its lists are subscribed; the DER program
+    poll fails. The streak builds, and the next answered poll rediscovers."""
+    device = MagicMock()
+    device.function_set_assignments_list_link = MagicMock(href="/edev/1/fsa")
+    client._state.end_devices["/edev/1"] = EndDeviceState(
+        device=device, href="/edev/1", lfdi=bytes.fromhex("abcd")
+    )
+    down = Sep2ConnectionError("connect failed after 3 attempts")
+
+    async def unreachable_programs() -> None:
+        raise down
+
+    with (
+        patch.object(client, "_subscribed_fsa_hrefs", return_value={"/edev/1/fsa"}),
+        patch.object(client._http, "get_list", new_callable=AsyncMock) as get_list,
+        patch.object(client, "_do_poll_derp", side_effect=unreachable_programs),
+        patch.object(client, "trigger_rediscovery", new_callable=AsyncMock) as rediscover,
+    ):
+        for _ in range(3):
+            await client._poll_fsa()
+            with pytest.raises(Sep2ConnectionError):
+                await client._poll_derp()
+        get_list.assert_not_awaited()
+        assert client._poll_failure_count == 3
+
+        async def answered() -> None:
+            client._http._record_contact(reachable=True)
+
+        await client._poll_with_404_recovery(answered)
+
+    rediscover.assert_awaited_once()
+
 @pytest.mark.asyncio
 async def test_sustained_failure_recovery_reports_reconnect_before_rediscovery():
     """A host learns of a reconnect before the rediscovery that follows it, so
@@ -277,7 +347,8 @@ async def test_recovery_after_sustained_failure_triggers_rediscovery(
         client._poll_failure_count = 3
 
         async def succeeding_poll() -> None:
-            pass
+            # A poll succeeds by getting an answer from the server.
+            client._http._record_contact(reachable=True)
 
         with caplog.at_level("INFO"):
             await client._poll_with_404_recovery(succeeding_poll)
@@ -308,7 +379,8 @@ async def test_recovery_below_threshold_only_resubscribes(client: CsipClient):
         client._poll_failure_count = 1
 
         async def succeeding_poll() -> None:
-            pass
+            # A poll succeeds by getting an answer from the server.
+            client._http._record_contact(reachable=True)
 
         await client._poll_with_404_recovery(succeeding_poll)
         mock_redisc.assert_not_awaited()

@@ -1323,9 +1323,15 @@ class CsipClient:
         self,
         poll_fn: Callable[[], Awaitable[None]],
     ) -> None:
+        contacts = self._http.contacts
         try:
             await poll_fn()
-            await self._note_successful_contact()
+            # A poll that sent no request, such as a backstop poll whose
+            # resources are all subscribed, says nothing about the server. Taken
+            # as contact, it cleared the failure streak on every cycle, so an
+            # outage was never treated as a restart.
+            if self._http.contacts != contacts:
+                await self._note_successful_contact()
 
         except Sep2NoContentError:
             # 204 No Content on a polled resource is benign (the resource is
