@@ -266,6 +266,8 @@ async def test_both_fixed_power_factors_apply_and_withdraw(device) -> None:
     assert (model.PFWInjEna.value, model.PFWAbsEna.value) == (1, 1)
     assert model.PFWInj.PF.cvalue == pytest.approx(0.95)
     assert model.PFWAbs.PF.cvalue == pytest.approx(0.95)
+    # excitation false is injecting reactive power: over-excited (0) on both sides.
+    assert (model.PFWInj.Ext.value, model.PFWAbs.Ext.value) == (0, 0)
 
     await connector.update_op_mod_fixed_pf_inject_w({"enabled": False})
     await connector.update_op_mod_fixed_pf_absorb_w({"enabled": False})
