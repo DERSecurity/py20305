@@ -9,6 +9,30 @@ below says so explicitly.
 
 Nothing yet.
 
+## [1.0.1] - 2026-11-10
+
+### Fixed
+
+- **A fixed power factor sent as opModFixedPFInjectW now writes the excitation it asks for to model 704 (#94).**
+  The SunSpec Modbus connector wrote `PFWInj.Ext` inverted: `excitation` false (inject
+  reactive power) wrote 1 (under-excited), so a model 704 device absorbed reactive power when
+  told to inject it, and the reverse. Both sides now write `Ext` 1 when `excitation` is true
+  and 0 when it is false, as IEEE 2030.5 and SunSpec define them. opModFixedPFAbsorbW was
+  already correct.
+
+- **A poll that sends no request no longer hides a server outage (#96).**
+  A poll that sent no request, such as the backstop poll of FSA lists that are all
+  subscribed, counted as contact with the server and cleared the poll-failure streak, so an
+  outage never reached the restart threshold: the reconnect listeners did not run and no
+  rediscovery followed. A poll now counts as contact only when the server answered a request
+  while it ran, read from the new `Sep2Client.contacts`.
+
+- **The backstop poll refreshes FSA lists that are all subscribed (#97).**
+  With every FSA list subscribed, the backstop poll that runs in place of the suppressed FSA
+  poll skipped each subscribed list and fetched nothing, so a change whose notification the
+  server failed to send was not picked up until a rediscovery. It now refreshes every FSA
+  list; the regular poll still skips the subscribed ones.
+
 ## [1.0.0] - 2026-11-06
 
 ### Added
