@@ -93,6 +93,8 @@ def _payloads(profile: ServerProfile) -> dict[str, bytes]:
         csip_aus_mode=aus is not None,
         modes_supported2=INJECT_ABSORB,
         profile=profile,
+        # Fixed, so two builds compare equal across a second boundary.
+        updated_time=1,
     )
     status = build_der_status(
         {
