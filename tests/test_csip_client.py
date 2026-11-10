@@ -174,6 +174,8 @@ async def test_a_poll_that_sends_no_request_neither_clears_nor_extends_a_failure
     async def poll_without_a_request() -> None:
         return None
 
+    # A running client has been answered before the outage, so its count is not 0.
+    client._http._record_contact(reachable=True)
     with patch.object(client, "trigger_rediscovery", new_callable=AsyncMock) as rediscover:
         client._poll_failure_count = 3
         await client._poll_with_404_recovery(poll_without_a_request)
@@ -205,6 +207,8 @@ async def test_an_outage_is_a_restart_while_every_fsa_list_is_subscribed(client:
         device=device, href="/edev/1", lfdi=bytes.fromhex("abcd")
     )
     down = Sep2ConnectionError("connect failed after 3 attempts")
+    # Discovery was answered before the outage began.
+    client._http._record_contact(reachable=True)
 
     async def unreachable_programs() -> None:
         raise down
