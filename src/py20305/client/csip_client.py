@@ -1122,9 +1122,15 @@ class CsipClient:
             "Polling fsa: refreshing FSA lists for %d end devices", len(self._state.end_devices)
         )
         # Skip FSA lists we're subscribed to (rule r); a cancelled FSA is still
-        # polled while its still-subscribed siblings are not.
+        # polled while its still-subscribed siblings are not. The poll is
+        # suppressed only when every FSA list is subscribed, so a run of it then
+        # is the backstop poll, which refreshes them all: skipping them would
+        # fetch nothing and miss what a dropped notification carried.
+        backstop = "fsa" in self._scheduler.suppressed_keys
         removed_programs = await refresh_function_set_assignments(
-            self._http, self._state, skip_hrefs=self._subscribed_fsa_hrefs()
+            self._http,
+            self._state,
+            skip_hrefs=None if backstop else self._subscribed_fsa_hrefs(),
         )
 
         # Gap 3: cancel events from removed FSA programs (IEEE 8.8.3)
