@@ -160,7 +160,6 @@ async def test_poll_204_below_threshold_resubscribes(client: CsipClient):
         assert client._poll_failure_count == 0
 
 
-
 @pytest.mark.asyncio
 async def test_a_poll_that_sends_no_request_neither_clears_nor_extends_a_failure_streak(
     client: CsipClient,
@@ -232,6 +231,7 @@ async def test_an_outage_is_a_restart_while_every_fsa_list_is_subscribed(client:
         await client._poll_with_404_recovery(answered)
 
     rediscover.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 async def test_sustained_failure_recovery_reports_reconnect_before_rediscovery():

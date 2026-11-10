@@ -774,11 +774,11 @@ class Sep2Client:
 
     @property
     def contacts(self) -> int:
-        """Number of responses received from the server this session.
+        """Number of responses received from the server since this client was created.
 
         Increases by one for each reachable round-trip, the same events that
-        set ``last_contact_epoch``. Compare two readings to tell whether any
-        request was answered in between.
+        set ``last_contact_epoch``, and is never reset, so two readings can be
+        compared to tell whether any request was answered in between.
         """
         return self._contacts
 
