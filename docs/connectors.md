@@ -59,7 +59,14 @@ What it reports:
   the lines (A, AB or ABC). Under the signed-load reading profile the power
   totals carry the wiring's PhaseCode too, as that profile registers them.
 - **Ratings and settings** from model 702, under the `rtg*` and `set*` names,
-  with `rtgMaxA` from the current rating.
+  with `rtgMaxA` from the current rating. The device's `CtrlModes` bits are
+  reported as the DERControlType bitmap of the controls the connector applies
+  for each function (fixed power factor is both `opModFixedPFAbsorbW` and
+  `opModFixedPFInjectW`, frequency-watt is `opModFreqDroop`); functions with no
+  such control, such as the trip functions and scheduling, set no bit. The
+  operating categories are reported as IEEE 2030.5 numbers them, from 1 with 0
+  meaning not specified (`rtgNormalCategory` 1 is Category A, `rtgAbnormalCategory`
+  1 is Category I), so SunSpec category A is 1, not 0.
 - **Status** from model 701 in the DERStatus types: `inverterStatus`,
   `operationalModeStatus`, the 2030.5-2023 `connectStatus` and 2030.5-2018
   `genConnectStatus` bitmaps, and the AC over- and under-voltage and over-
@@ -70,6 +77,35 @@ and its inject and absorb forms, `opModFixedW`, `opModTargetW`,
 `opModFixedVar`, the two fixed power factors, `opModFreqDroop`, the CSIP-AUS
 generation and load limits, and `opModConnect` / `opModEnergize` through the
 model 703 enter-service permit. Any other element is unsupported by design.
+
+A control the device cannot take is declined, so the server is told the control
+is not supported (IEEE 2030.5 Table 31 status 251) and no register or enable
+point is changed. That covers a model 704 setpoint the device does not
+implement, a curve whose `yRefType` has no SunSpec reference, an
+`opModFixedVar` `refType` with no SunSpec reactive-power mode, an
+`opModTargetW` on a device with no percent base, and an `opModFreqDroop`
+`pMin` on a device without the `PMin` point or a rating.
+
+Curves and the frequency droop are written and adopted before the function is
+enabled, so a refused write leaves the function as it was. A curve's `yRefType`
+selects the curve's SunSpec reference: for volt-var and watt-var `%setMaxW`,
+`%setMaxVar`, `%statVarAvail` and `%setMaxVA`, for volt-watt `%setMaxW` and
+`%statWAvail`. A volt-var curve with no `vRef` is written with a reference
+voltage of 100% of nominal, which leaves its points unadjusted.
+`autonomousVRefTimeConstant`, in hundredths of a second, is written in whole
+seconds. An `opModFreqDroop` `pMin`, in watts, is written as a whole percent of
+the device's rated active power (`WMaxRtg`), and a value beyond the rating is
+refused.
+
+`opModMaxLimWInject` is written to the device's discharge rate limit and
+mirrored onto its maximum active power (`WMax`), which some devices honor
+alone. An `opModMaxLimW` percent keeps meaning a percent of the device's own
+maximum while the mirror is in force: the connector scales the percent it
+writes, so the cap is the lower of the two limits in watts whichever control
+arrives first. When `opModMaxLimWInject` clears, the discharge rate limit
+returns to its rating, the value for no limit, and `WMax` returns to the value
+the device had. The mirror is held in memory, so a restart during an event
+leaves `WMax` at the mirrored value until the device's own value is set again.
 
 The connector does not apply ramp times. A control's `rampTms` is accepted and
 ignored: the device ramps at its own rate. The connector logs that once at INFO
