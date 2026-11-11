@@ -391,13 +391,12 @@ def _whole_seconds(seconds: object, control: str, quantity: str) -> int:
     seconds. A value that cannot be held is refused before anything is written.
     """
     number = _as_number(seconds, control, quantity)
-    whole = round(number)
-    if not _U16_MIN <= whole <= _U16_MAX:
+    if not _U16_MIN <= number <= _U16_MAX:
         raise ConnectorValueError(
             f"{control} {quantity} {number:g} s does not fit a register holding "
             f"{_U16_MIN} to {_U16_MAX} s; refusing to write."
         )
-    return whole
+    return round(number)
 
 
 class SunSpecModbusConnector:
@@ -491,6 +490,9 @@ class SunSpecModbusConnector:
         # event and written back when the control clears. None means nothing is
         # mirrored, so there is nothing to restore.
         self._wmax_baseline: float | None = None
+        # (planned WMax, baseline) while a limit is rewritten ahead of a WMax
+        # increase; see _rewrite_ahead_of_wmax_increase.
+        self._wmax_plan: tuple[float, float] | None = None
         # Suppresses log noise after the first enable per device on the one
         # combination that cannot be applied at all: opModMaxLimWAbsorb on a
         # device implementing neither WChaRteMax nor any absorb-direction limit.
@@ -1148,6 +1150,9 @@ class SunSpecModbusConnector:
 
         1.0 when nothing is mirrored, or when either value is unusable.
         """
+        if self._wmax_plan is not None:
+            planned, plan_baseline = self._wmax_plan
+            return plan_baseline / planned if planned else 1.0
         baseline = self._wmax_baseline
         if not baseline:
             return 1.0
@@ -1198,8 +1203,19 @@ class SunSpecModbusConnector:
         register. When no inject-direction slot is active the enable bit is
         driven low.
         """
+        previous = self._p_lim_slots[slot]
         self._p_lim_slots[slot] = (enabled, pct)
+        try:
+            self._write_merged_inject_pct(slot)
+        except Exception:
+            # Record only what the device accepted, so a later rewrite of this
+            # register (after the connector moves WMax) never replays a limit
+            # that was refused.
+            self._p_lim_slots[slot] = previous
+            raise
 
+    def _write_merged_inject_pct(self, slot: str) -> None:
+        """Write the merged value of the inject-direction slots to WMaxLimPct."""
         model = self._get_model(704)
         merged_enabled, merged_value = self._compute_merged_inject_pct(self._wmax_scale())
         # Checked before the enable: raising it over a register this device does
@@ -1490,11 +1506,47 @@ class SunSpecModbusConnector:
             return
 
         _require_uint16_watts(value, model_702.W_SF.value, control)
+        self._rewrite_ahead_of_planned_mirror(model_702, value)
         point.cvalue = value
         self._mirror_inject_onto_wmax(model_702, value)
         model_702.write()
         self._p_lim_w_settings[slot] = value
         self._refresh_wmax_relative_limits()
+
+    def _rewrite_ahead_of_planned_mirror(self, model_702: Any, watts: float) -> None:
+        """Write the percent limits for the WMax a mirror of ``watts`` will set, if higher.
+
+        See ``_rewrite_ahead_of_wmax_increase``. Runs before the model 702 point
+        values are assigned, since reading the model discards unsent values.
+        """
+        wmax_point = model_702.WMax
+        if wmax_point.value is None:  # the mirror will not run
+            return
+        current = wmax_point.cvalue
+        wmax_rtg = model_702.WMaxRtg.cvalue
+        planned = min(watts, wmax_rtg) if wmax_rtg else watts
+        baseline = self._wmax_baseline if self._wmax_baseline is not None else current
+        self._rewrite_ahead_of_wmax_increase(current, planned, baseline)
+
+    def _rewrite_ahead_of_wmax_increase(
+        self, current: float | None, planned: float, baseline: float | None
+    ) -> None:
+        """Write the percent limits for ``planned`` WMax before WMax is raised to it.
+
+        WMaxLimPct is a percent of the WMax register. Raising WMax first would
+        loosen an active percent limit until the percent is rewritten, for good
+        if that rewrite fails. Writing the percent for the higher WMax first is
+        the stricter order: until WMax moves, the same percent of the lower WMax
+        holds a lower cap. A decrease needs no such step, since the lower WMax
+        already holds a stricter cap until the percent is rewritten afterwards.
+        """
+        if not current or not baseline or planned <= current:
+            return
+        self._wmax_plan = (planned, baseline)
+        try:
+            self._refresh_wmax_relative_limits()
+        finally:
+            self._wmax_plan = None
 
     def _clear_discharge_limit(self) -> None:
         """Set WDisChaRteMax to WDisChaRteMaxRtg, the value for no discharge limit.
@@ -1590,6 +1642,9 @@ class SunSpecModbusConnector:
             return
 
         model_702 = self._get_model(702)
+        self._rewrite_ahead_of_wmax_increase(
+            model_702.WMax.cvalue, self._wmax_baseline, self._wmax_baseline
+        )
         model_702.WMax.cvalue = self._wmax_baseline
         model_702.write()
         # The baseline is the retry marker: dropped only once the active
@@ -1609,7 +1664,7 @@ class SunSpecModbusConnector:
         is no settable WMax to be lower than it.
         """
         model_702 = self._get_model(702)
-        wmax = model_702.WMax.cvalue
+        wmax = self._wmax_plan[0] if self._wmax_plan is not None else model_702.WMax.cvalue
         if not wmax:  # None or 0
             wmax = model_702.WMaxRtg.cvalue
             if wmax:
@@ -1769,13 +1824,13 @@ class SunSpecModbusConnector:
                 "model 702 WMaxRtg is not available to convert pMin to the percent "
                 "model 711 PMin takes",
             )
-        percent = round(value / rating * 100)
+        percent = value / rating * 100
         if abs(percent) > 100:
             raise ConnectorValueError(
-                f"opModFreqDroop pMin {value:g} W is {percent}% of the {rating:g} W "
+                f"opModFreqDroop pMin {value:g} W is {percent:.1f}% of the {rating:g} W "
                 f"rating; model 711 PMin holds -100 to 100. Refusing to write."
             )
-        return percent
+        return round(percent)
 
     def _update_const_q_sync(self, params: dict[str, Any]) -> None:
         model = self._get_model(704)

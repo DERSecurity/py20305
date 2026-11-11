@@ -1301,6 +1301,104 @@ class TestSunSpecPLimWattsRegisters:
         assert model_704.WMaxLimPctEna.cvalue == 1
 
     @pytest.mark.asyncio
+    async def test_a_refused_percent_limit_is_not_replayed_by_a_later_inject_limit(
+        self, sunspec_connector
+    ):
+        """The device holds 60% (3000 W). A 20% update the device refuses must not
+        stay recorded, or the next inject update rewrites WMaxLimPct with it."""
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        model_704 = sunspec_connector._target.models[704][0]
+
+        model_704.write.side_effect = ConnectorWriteError("write refused")
+        with pytest.raises(ConnectorWriteError):
+            await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 20})
+        model_704.write.side_effect = None
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(3000)
+
+    @pytest.mark.asyncio
+    async def test_a_refused_percent_clear_is_not_recorded(self, sunspec_connector):
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        model_704 = sunspec_connector._target.models[704][0]
+
+        model_704.WMaxLimPctEna.write.side_effect = ConnectorWriteError("write refused")
+        with pytest.raises(ConnectorWriteError):
+            await sunspec_connector.update_p_lim({"p_lim_mode_enable": 0})
+        model_704.WMaxLimPctEna.write.side_effect = None
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        assert model_704.WMaxLimPctEna.cvalue == 1
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(3000)
+
+    @staticmethod
+    def _watch_device_cap(sunspec_connector, start_pct, start_wmax):
+        """Record the cap in watts the device holds after each model 702 and 704 write."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_704 = sunspec_connector._target.models[704][0]
+        device = {"pct": start_pct, "wmax": start_wmax}
+        caps: list[float] = []
+
+        def wrote_704():
+            device["pct"] = model_704.WMaxLimPct.cvalue
+            caps.append(device["pct"] / 100 * device["wmax"])
+
+        def wrote_702():
+            device["wmax"] = model_702.WMax.cvalue
+            caps.append(device["pct"] / 100 * device["wmax"])
+
+        model_704.write.side_effect = wrote_704
+        model_702.write.side_effect = wrote_702
+        return caps
+
+    @pytest.mark.asyncio
+    async def test_raising_the_inject_limit_never_loosens_the_percent_limit(
+        self, sunspec_connector
+    ):
+        """60% of the device's 5000 W is 3000 W. Raising the mirror from 4000 W to
+        4500 W must not leave the old 75% in force over the higher WMax, which
+        would hold 3375 W until the percent is rewritten."""
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        caps = self._watch_device_cap(sunspec_connector, 75, 4000)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4500})
+
+        assert caps
+        assert max(caps) <= 3000 + 1e-6
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(3000)
+
+    @pytest.mark.asyncio
+    async def test_restoring_wmax_never_loosens_the_percent_limit(self, sunspec_connector):
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        caps = self._watch_device_cap(sunspec_connector, 75, 4000)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        assert caps
+        assert max(caps) <= 3000 + 1e-6
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(3000)
+
+    @pytest.mark.asyncio
+    async def test_raising_the_inject_limit_never_loosens_an_active_generation_limit(
+        self, sunspec_connector
+    ):
+        """opModGenLimW is held in watts: 3000 W of the 5000 W WMax, or 75% of the
+        4000 W mirror, and the same ordering applies when the mirror rises."""
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 3000})
+        model_704 = sunspec_connector._target.models[704][0]
+        caps = self._watch_device_cap(sunspec_connector, model_704.WMaxLimPct.cvalue, 4000)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4500})
+
+        assert caps
+        assert max(caps) <= 3000 + 1e-6
+
+    @pytest.mark.asyncio
     async def test_a_percent_limit_cleared_under_an_inject_limit_does_not_touch_the_mirror(
         self, sunspec_connector
     ):
@@ -3202,15 +3300,16 @@ class TestCurveReferenceAndReferenceVoltage:
         assert crv.VRefAutoTms.cvalue == 60
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("seconds", [65535.4, 70000.0, -0.4])
     async def test_a_time_constant_that_overflows_the_register_is_refused_before_any_write(
-        self, sunspec_connector
+        self, sunspec_connector, seconds
     ):
         model = sunspec_connector._target.models[705][0]
         with pytest.raises(ConnectorValueError, match="autonomousVRefTimeConstant"):
             await sunspec_connector.update_qv(
                 {
                     "qv_mode_enable": 1,
-                    "qv_vref_olrt": 70000.0,
+                    "qv_vref_olrt": seconds,
                     "qv_curve_v_pts": [0.95, 1.05],
                     "qv_curve_q_pts": [0.44, -0.44],
                 }
@@ -3371,7 +3470,7 @@ class TestDroopMinimumPower:
         assert ctl.PMin.cvalue == 7
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("watts", [5100, -5100])
+    @pytest.mark.parametrize("watts", [5020, -5020, 5100, -5100])
     async def test_a_pmin_beyond_the_rating_is_refused_before_any_write(
         self, sunspec_connector, watts
     ):
