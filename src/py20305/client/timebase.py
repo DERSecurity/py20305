@@ -192,6 +192,18 @@ class ServerTimebase:
         self._per_fsa.pop(fsa_href, None)
         self._reported_stale.discard(fsa_href)
 
+    def retain_fsas(self, fsa_hrefs: set[str]) -> None:
+        """Drop the observation of every FSA not in ``fsa_hrefs``.
+
+        Called once a full discovery has read the FSA lists, with the FSAs the
+        server advertises now. An FSA the server no longer lists is not polled
+        or consulted any more, so its observation must not answer ``GET /time``
+        or count toward the spread. During a rediscovery, before this call, the
+        previous observations stay in place.
+        """
+        for href in [h for h in self._per_fsa if h not in fsa_hrefs]:
+            self.forget_fsa(href)
+
     def observe(
         self,
         server_time: int,

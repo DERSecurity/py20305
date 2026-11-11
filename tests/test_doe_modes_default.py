@@ -184,3 +184,39 @@ async def test_the_manager_puts_no_doe_elements_to_a_plain_server():
 
     for call in client.put_bytes.call_args_list:
         assert b"doeModes" not in call[0][1]
+
+
+class _Offer(_Reporting):
+    """A connector whose implemented limits change while it runs."""
+
+    def __init__(self) -> None:
+        self.offered: set[str] = {"update_op_mod_exp_lim_w"}
+
+    def __getattribute__(self, item: str) -> Any:
+        if item.startswith("update_op_mod_") and item.endswith("_lim_w"):
+            if item not in object.__getattribute__(self, "offered"):
+                raise AttributeError(item)
+            return AsyncMock()
+        return object.__getattribute__(self, item)
+
+
+@pytest.mark.parametrize("policy", ["periodic", "on_change"])
+@pytest.mark.asyncio
+async def test_a_change_in_the_implemented_limits_puts_the_settings_again(policy):
+    client = _client(csip_aus_mode=True)
+    connector = _Offer()
+
+    async def resolve(_lfdi: str) -> Any:
+        return connector
+
+    manager = DerResourceManager(client, resolve, put_policy=policy)
+    manager.start_device("ab", "/cap", "/set", None)
+    await manager._settings_cycle("ab")
+    await manager._settings_cycle("ab")
+    assert client.put_bytes.await_count == 1
+
+    connector.offered.add("update_op_mod_gen_lim_w")
+    await manager._settings_cycle("ab")
+
+    assert client.put_bytes.await_count == 2
+    assert _doe_element(client.put_bytes.call_args[0][1], "doeModesEnabled") == "05"

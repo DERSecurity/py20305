@@ -794,6 +794,11 @@ async def discover(
 
     _set_time_poll_rate(state)
 
+    # Observations of FSAs the server stopped advertising are of no further use.
+    client.timebase.retain_fsas(
+        {fsa.href for edev in state.end_devices.values() for fsa in edev.fsa_list if fsa.href}
+    )
+
     register_device_prefixes(client, state)
 
     logger.info(
