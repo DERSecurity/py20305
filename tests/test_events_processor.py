@@ -5092,12 +5092,11 @@ class TestPartlySupersededEvent:
 
     @pytest.mark.asyncio
     async def test_the_superseding_event_ending_first_still_leaves_the_device_released(self):
-        """Whoever ends last releases the device.
+        """Every device is released once, at the end of the event that held it last.
 
-        B takes `/edev/1` from A and then ends before A does. B's own end can
-        release nothing there, because A is still registered for the mode. If
-        A's end also passed the device over, it would keep B's limit with no
-        event behind it.
+        B takes `/edev/1` from A and then ends before A does. B's end releases
+        `/edev/1`, because A gave up the mode when B took it. A's end then
+        releases only `/edev/2`, which B never reached.
         """
         now = int(time.time())
         dispatcher = AsyncMock()
@@ -5127,14 +5126,16 @@ class TestPartlySupersededEvent:
 
         state.der_programs["/derp/2"].der_controls = [self._cancelled(0x02, now, base_b)]
         await proc.process_controls("/derp/2")
+        after_b = self._disabled(dispatcher)
         dispatcher.reset_mock()
         state.der_programs["/derp/1"].der_controls = [self._cancelled(0x01, now, base_a)]
         await proc.process_controls("/derp/1")
+        after_a = self._disabled(dispatcher)
 
-        assert self._disabled(dispatcher) == {
-            "/edev/1": frozenset({"op_mod_max_lim_w"}),
-            "/edev/2": frozenset({"op_mod_max_lim_w"}),
-        }, "the device B took over is left holding its limit with no event active"
+        assert after_b == {"/edev/1": frozenset({"op_mod_max_lim_w"})}, (
+            "the device B took over is left holding its limit with no event active"
+        )
+        assert after_a == {"/edev/2": frozenset({"op_mod_max_lim_w"})}
         await proc.shutdown()
 
     @pytest.mark.asyncio
@@ -5159,6 +5160,131 @@ class TestPartlySupersededEvent:
             "an ended event is still registered on the shared device"
         )
         assert proc._mode_tracker.covered("/edev/2") == frozenset()
+
+
+class TestSupersededEventGivesUpItsModes:
+    """The event that took a mode over is its only owner, so its end releases it.
+
+    Leaving the mode on the superseded event's registration has the tracker read
+    it as covered when the superseding event ends. The device then keeps the
+    setpoint until the superseded event ends too, and for good when a third
+    event is running on the device at that point.
+    """
+
+    MAX_LIM_W = "op_mod_max_lim_w"
+    FIXED_W = "op_mod_fixed_w"
+    MRID_A = b"\x01" * 16
+    MRID_B = b"\x02" * 16
+
+    async def _processor(
+        self, dispatcher: AsyncMock, *, with_third_event: bool
+    ) -> tuple[EventProcessor, DiscoveredState, int]:
+        """A on /edev/1 and /edev/2 and B on /edev/1, both setting opModMaxLimW.
+
+        B has the lower primacy, so it supersedes A on /edev/1. With
+        ``with_third_event``, C sets opModFixedW on /edev/1 and keeps running.
+        Neither program has a default, so a mode left on a device shows up as a
+        missing ``disable_modes`` call.
+        """
+        now = int(time.time())
+        limit_a = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=5000))
+        limit_b = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        fixed_c = DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=1000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=limit_a)],
+            device_hrefs=["/edev/1", "/edev/2"],
+        )
+        programs = [("/derp/2", 0, 0x02, limit_b)]
+        if with_third_event:
+            programs.append(("/derp/3", 2, 0x03, fixed_c))
+        for href, primacy, mrid_byte, base in programs:
+            state.der_programs[href] = DerProgramState(
+                program=_make_program(href, primacy),
+                href=href,
+                primacy=primacy,
+                default_dercontrol=None,
+                der_controls=[_make_derc(mrid_byte, start=now - 10, duration=3600, base=base)],
+            )
+            state.device_mapping.add(href, "/edev/1")
+        http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
+        http.post = AsyncMock(return_value=None)
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event())
+        for href in state.der_programs:
+            await proc.process_controls(href)
+        return proc, state, now
+
+    @staticmethod
+    async def _end(proc: EventProcessor, state: DiscoveredState, href: str, now: int) -> None:
+        """Cancel the program's one event and run the fallback that follows."""
+        old = state.der_programs[href].der_controls[0]
+        state.der_programs[href].der_controls = [
+            _make_derc(
+                old.m_rid.value[0],
+                start=now - 10,
+                duration=3600,
+                current_status=2,
+                base=old.dercontrol_base,
+            )
+        ]
+        await proc.process_controls(href)
+
+    @staticmethod
+    def _disabled(dispatcher: AsyncMock) -> dict[str, frozenset[str]]:
+        calls = dispatcher.disable_modes.await_args_list
+        return {call.args[0]: frozenset(call.args[1]) for call in calls}
+
+    @pytest.mark.asyncio
+    async def test_the_superseding_event_releases_the_mode_it_took_when_it_ends(self):
+        dispatcher = AsyncMock()
+        proc, state, now = await self._processor(dispatcher, with_third_event=False)
+
+        await self._end(proc, state, "/derp/2", now)
+        after_b = self._disabled(dispatcher)
+        dispatcher.reset_mock()
+        await self._end(proc, state, "/derp/1", now)
+        after_a = self._disabled(dispatcher)
+        await proc.shutdown()
+
+        assert after_b == {"/edev/1": frozenset({self.MAX_LIM_W})}
+        # A's end releases only the device it still held, not the one B released.
+        assert after_a == {"/edev/2": frozenset({self.MAX_LIM_W})}
+
+    @pytest.mark.asyncio
+    async def test_the_mode_is_released_when_a_third_event_is_running_on_the_device(self):
+        dispatcher = AsyncMock()
+        proc, state, now = await self._processor(dispatcher, with_third_event=True)
+
+        await self._end(proc, state, "/derp/2", now)
+        after_b = self._disabled(dispatcher)
+        dispatcher.reset_mock()
+        await self._end(proc, state, "/derp/1", now)
+        after_a = self._disabled(dispatcher)
+        dispatcher.reset_mock()
+        await self._end(proc, state, "/derp/3", now)
+        after_c = self._disabled(dispatcher)
+        await proc.shutdown()
+
+        assert after_b == {"/edev/1": frozenset({self.MAX_LIM_W})}
+        assert after_a == {"/edev/2": frozenset({self.MAX_LIM_W})}
+        assert after_c == {"/edev/1": frozenset({self.FIXED_W})}
+
+    @pytest.mark.asyncio
+    async def test_the_superseded_event_no_longer_holds_the_mode_it_lost(self):
+        dispatcher = AsyncMock()
+        proc, _state, _now = await self._processor(dispatcher, with_third_event=False)
+        tracker = proc._mode_tracker
+
+        held_by_a = tracker.covered_among("/edev/1", frozenset({self.MRID_A}))
+        held_by_b = tracker.covered_among("/edev/1", frozenset({self.MRID_B}))
+        a_on_other_device = tracker.covered_among("/edev/2", frozenset({self.MRID_A}))
+        await proc.shutdown()
+
+        assert held_by_a == frozenset()
+        assert held_by_b == frozenset({self.MAX_LIM_W})
+        assert a_on_other_device == frozenset({self.MAX_LIM_W})
 
 
 class _MeterAwareDispatcher(NullDispatcher):

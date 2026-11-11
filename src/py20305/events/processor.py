@@ -814,6 +814,13 @@ class EventProcessor:
                 for dev in result.affected_devices:
                     existing = superseded.superseded_modes.get(dev, frozenset())
                     superseded.superseded_modes[dev] = existing | result.affected_modes
+                    # The superseding event owns these modes now. Leaving them
+                    # on the superseded event's registration would have the
+                    # tracker read them as still covered when the superseding
+                    # event ends, so nothing would release them until the
+                    # superseded event ended too, or ever, when another event
+                    # is running on the device then.
+                    self._mode_tracker.release(dev, superseded.mrid, result.affected_modes)
 
             # If all devices for this program are superseded, fully supersede
             program_devices = device_map.get(superseded.program_href, set())
