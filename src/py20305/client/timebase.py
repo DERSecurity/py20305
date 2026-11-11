@@ -74,6 +74,24 @@ class TimeObservation:
     receipt_monotonic: float | None = None
 
 
+@dataclass(frozen=True)
+class HeadEndTime:
+    """The observation ``GET /time`` answers from, and which scope it came from."""
+
+    #: Head-end wall time now: the observation's offset applied to the local clock.
+    server_now: float
+    #: The observation the reading is based on.
+    observation: TimeObservation
+    #: Seconds since the observation, measured on the monotonic clock.
+    age_seconds: float
+    #: The FSA whose Time resource was observed, or ``None`` for the
+    #: DeviceCapability's Time resource.
+    fsa_href: str | None
+    #: Largest difference between the per-FSA offsets, in seconds, when the
+    #: reading is from an FSA and more than one FSA was observed; else ``None``.
+    spread_seconds: float | None
+
+
 def _age_seconds(obs: TimeObservation) -> float:
     """How long ago *obs* was taken, measured on the monotonic clock where possible.
 
@@ -86,6 +104,11 @@ def _age_seconds(obs: TimeObservation) -> float:
     if obs.receipt_monotonic is not None:
         return max(0.0, time.monotonic() - obs.receipt_monotonic)
     return max(0.0, time.time() - obs.receipt_epoch)
+
+
+def _recency(obs: TimeObservation) -> float:
+    """A number that grows with how recently *obs* was observed."""
+    return obs.receipt_monotonic if obs.receipt_monotonic is not None else obs.receipt_epoch
 
 
 def _is_newer(candidate: TimeObservation, other: TimeObservation) -> bool:
@@ -326,6 +349,48 @@ class ServerTimebase:
         if obs is None:
             return None
         return time.time() + obs.offset
+
+    def head_end_time(self) -> HeadEndTime | None:
+        """Return the head-end's time and the observation it rests on, or ``None``.
+
+        The DeviceCapability's Time resource answers when it was observed. A
+        head-end may publish ``TimeLink`` only on its FunctionSetAssignments
+        (IEEE 2030.5 §9.2.3 scopes events to the FSA's own Time resource), and
+        the client then holds one observation per FSA and no global one. Those
+        observations are separate readings and can disagree, so one is chosen:
+        among those still being renewed (not older than ``fsa_stale_seconds``),
+        the one with the lowest ``quality``, because the Time resource defines
+        lower values as more accurate time sources; a tie goes to the most
+        recently observed. When every FSA observation has aged out, the most
+        recent one is used. Like :meth:`server_now`, this never falls back to
+        the local clock and ignores ``enabled``.
+        """
+        if self._global is not None:
+            return HeadEndTime(
+                time.time() + self._global.offset,
+                self._global,
+                _age_seconds(self._global),
+                None,
+                None,
+            )
+        if not self._per_fsa:
+            return None
+        fresh = {
+            href: obs
+            for href, obs in self._per_fsa.items()
+            if _age_seconds(obs) <= self.fsa_stale_seconds
+        }
+        if fresh:
+            best_href, best = min(
+                fresh.items(), key=lambda item: (item[1].quality, -_recency(item[1]))
+            )
+        else:
+            best_href, best = max(self._per_fsa.items(), key=lambda item: _recency(item[1]))
+        offsets = [obs.offset for obs in self._per_fsa.values()]
+        spread = round(max(offsets) - min(offsets), 3) if len(offsets) > 1 else None
+        return HeadEndTime(
+            time.time() + best.offset, best, _age_seconds(best), best_href, spread
+        )
 
     def snapshot(self) -> dict[str, Any]:
         """Offset/quality/age per scope, for status surfacing."""
