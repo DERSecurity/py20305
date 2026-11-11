@@ -703,6 +703,29 @@ async def test_poll_now_calls_do_poll_derp(client: CsipClient):
 
 
 @pytest.mark.asyncio
+async def test_derp_poll_ends_the_control_on_a_device_withdrawn_from_a_program(
+    client: CsipClient,
+):
+    """The pairs the refresh dropped from the mapping reach the event processor."""
+
+    async def refresh(_http: object, _state: object, withdrawn: list | None = None) -> list[str]:
+        assert withdrawn is not None
+        withdrawn.append(("/derp/1", "/edev/2"))
+        return []
+
+    client._event_processor.release_withdrawn_devices = AsyncMock()  # type: ignore[method-assign]
+    with (
+        patch("py20305.client.csip_client.refresh_der_programs", side_effect=refresh),
+        patch("py20305.client.csip_client.refresh_der_controls", new_callable=AsyncMock),
+    ):
+        await client._do_poll_derp()
+
+    client._event_processor.release_withdrawn_devices.assert_awaited_once_with(
+        [("/derp/1", "/edev/2")]
+    )
+
+
+@pytest.mark.asyncio
 async def test_state_property(client: CsipClient):
     assert isinstance(client.state, DiscoveredState)
 

@@ -354,7 +354,22 @@ where one of its program lists could not be read, or the server did not serve it
 does not treat the failure as a withdrawal; a list the server serves and that
 names nothing is a withdrawal.
 
-The withdrawal does not undo a control already applied to the device.
+A withdrawal also ends the control a running event holds on the device, as soon
+as the poll finds it. IEEE 2030.5-2023 §8.8.3 has a client act on the events of
+the function set assignments it is in, so a device no longer assigned to a
+program is no longer governed by that program's events. The client releases the
+event's modes on that device as it would at the event's end: a mode the device's
+other programs' defaults do not carry is switched off, and the default that now
+governs the device is applied. The event keeps running on its other devices. The
+standard defines no response status for a withdrawal, so the client posts none
+for that device, and the event's later "completed" or "cancelled" response goes
+only to the devices still running it. Where a group lookup stands in for the
+program's devices, the whole group is the program's reach, so nothing is
+released until the event ends. A device the client finds withdrawn only after
+the event has ended, or by a full rediscovery, is released when the event ends.
+
+The same release happens for every device an event held when its whole program
+is removed.
 
 ## Superseded events and the modes they give up
 
@@ -365,6 +380,15 @@ when the superseding event ends first, the client releases those modes on the
 device at that moment, by applying the default's value or switching the mode off
 when no default names it. It does so whether or not the superseded event is
 still running, and whether or not another event is running on the device.
+
+The CSIP-AUS limits (`opModExpLimW`, `opModImpLimW`, `opModGenLimW` and
+`opModLoadLimW`) are modes like any other. CSIP-AUS v1.1a §5.2.4.1 puts
+DERControls under the IEEE 2030.5 event rules, and IEEE 2030.5-2023 §10.2.2.3
+rule q) supersedes overlapping events mode by mode. A higher-priority event with
+`opModExpLimW` therefore supersedes a lower-priority event with `opModExpLimW`
+on the same device and leaves that event's other limits and modes running. Two
+events that carry different limits do not supersede each other. Events with no
+CSIP-AUS elements are compared as before.
 
 ## Default controls while an event runs
 
@@ -377,9 +401,16 @@ the event ends, the whole default is applied, as before.
 
 A mode goes to the default of the program with the lowest primacy that names it,
 so a default does not write a mode that the default of a higher-priority program
-also names. The client works this out from the programs as they stand, and
+also names, and a program's default still writes the modes no higher-priority
+default names. The client works this out from the programs as they stand, and
 writes a mode that has since been freed even when the same default was written
-before without it.
+before without it. The choice is the same when a device first receives its
+defaults and when an event ends: a device in two programs receives each mode from
+the lowest-primacy default that names it, whichever program that is. Programs of
+equal primacy are ranked in the order the device was assigned to them, so a mode
+both name has one source. The default of the lowest-primacy program also carries
+the settings that are not modes, such as `setGradW`; the other defaults supply
+only modes.
 
 A default that names no control mode is not applied to a device while an event
 is active on it.

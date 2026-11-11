@@ -2450,6 +2450,24 @@ async def test_refresh_derp_unmaps_a_device_withdrawn_from_a_program():
 
 
 @pytest.mark.asyncio
+async def test_refresh_derp_reports_each_withdrawn_pair_to_its_caller():
+    """The caller learns which pairs left the mapping, to end the control they held."""
+    client, _ = _two_devices_one_program()
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+    client._responses["/edev/2/fsa"] = _make_fsa_list()
+    await refresh_function_set_assignments(client, state)  # type: ignore[arg-type]
+    withdrawn: list[tuple[str, str]] = []
+
+    await refresh_der_programs(client, state, withdrawn=withdrawn)  # type: ignore[arg-type]
+    assert withdrawn == [("/derp/1", "/edev/2")]
+
+    again: list[tuple[str, str]] = []
+    await refresh_der_programs(client, state, withdrawn=again)  # type: ignore[arg-type]
+    assert again == [], "a pair already dropped is not reported twice"
+
+
+@pytest.mark.asyncio
 async def test_refresh_derp_maps_a_withdrawn_device_again_when_it_is_reassigned():
     """The pair comes back once the server assigns the program to the device again.
 

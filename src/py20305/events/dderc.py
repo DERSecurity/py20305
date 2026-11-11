@@ -51,8 +51,8 @@ class DdercTracker:
         """Check if initial DDERC should be applied for this (lfdi, derp_path).
 
         Used at startup/rediscovery. Blocks application when:
-        - Another program has already applied a higher-priority DDERC to
-          the same device (cross-program check), OR
+        - Programs of higher priority have already applied every mode this
+          write carries to the same device (cross-program check), OR
         - This program already applied this exact DDERC (same mrid) at this
           primacy (no redundant re-apply for unchanged content).
 
@@ -66,10 +66,22 @@ class DdercTracker:
         or when the earlier writes did not record their modes, only the mRID
         decides.
         """
-        # Cross-program check: if any other program already applied a
-        # higher-priority DDERC to the same device, block this one.
-        for (other_lfdi, other_path), other in self._applied.items():
-            if other_lfdi == lfdi and other_path != derp_path and other.primacy < primacy:
+        # Cross-program check: block this write when programs of higher priority
+        # already applied the modes it carries. IEEE 2030.5-2023 §10.10.4.2.1
+        # selects the default per mode, so a mode that no higher-priority write
+        # carried is still this program's to write. When either side did not
+        # record its modes, or this write names none, the whole default is
+        # blocked by any higher-priority write.
+        higher = [
+            other
+            for (other_lfdi, other_path), other in self._applied.items()
+            if other_lfdi == lfdi and other_path != derp_path and other.primacy < primacy
+        ]
+        if higher:
+            if modes is None or not modes or any(other.modes is None for other in higher):
+                return False
+            applied_above = frozenset().union(*(other.modes or frozenset() for other in higher))
+            if modes <= applied_above:
                 return False
 
         key = (lfdi, derp_path)

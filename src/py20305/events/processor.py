@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable, Coroutine, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Coroutine, Iterable, Sequence
 from dataclasses import replace
 from functools import cache, partial
 from typing import Any
@@ -23,6 +23,7 @@ from py20305.client.timebase import ServerTimebase
 from py20305.commands import CommandOrigin
 from py20305.connectors.base import ScheduleNotification
 from py20305.connectors.control_errors import DeviceNotConfiguredError, ModeNotSupportedError
+from py20305.connectors.modes import DEFAULT_CONTROL_ELEMENTS
 from py20305.events.active_modes import ActiveModeTracker
 from py20305.events.comms_loss import CommsLossState
 from py20305.events.dderc import DdercTracker
@@ -509,6 +510,27 @@ class EventProcessor:
                 "Cancelled %d event(s) from removed program %s", cancelled_count, program_href
             )
 
+    async def release_cancelled_program(self, program_href: str) -> None:
+        """Release the control that events cancelled by :meth:`cancel_program` still hold.
+
+        Cancelling an event does not touch the device: the registration of the
+        modes it set stays until they are released. For a program that was
+        removed those modes would stay on every device for good, since no end
+        of the event is left to release them. Each such event releases them as
+        an ended event does: modes no default carries are disabled, and the
+        default that now governs the device is applied. Call it after the
+        program has left the discovered state, so its own default is not
+        chosen. A device the event never registered on is untouched.
+        """
+        for record in self._store.by_state(EventState.CANCELLED):
+            if record.program_href != program_href or record.opted_out:
+                continue
+            if not self._mode_tracker.devices_of(record.mrid):
+                continue
+            await self._apply_dderc_fallback(record)
+            if self._closed:
+                return
+
     async def shutdown(self) -> None:
         """Cancel all event timers + in-flight background tasks and mark closed."""
         self._closed = True
@@ -740,17 +762,70 @@ class EventProcessor:
             )
             return
 
-        audience = record.applied_devices - record.superseded_devices
+        audience = record.applied_devices - record.superseded_devices - record.withdrawn_devices
         if not audience:
             logger.info(
-                "Event %s: no device was running it (%d rejected, %d superseded); posting no %s",
+                "Event %s: no device was running it "
+                "(%d rejected, %d superseded or withdrawn); posting no %s",
                 mrid_short,
                 len(record.rejected_devices),
-                len(record.superseded_devices),
+                len(record.superseded_devices) + len(record.withdrawn_devices),
                 code.name,
             )
             return
         await self._post_response_for_devices(record.derc, code, audience)
+
+    async def release_withdrawn_devices(self, withdrawn: Iterable[tuple[str, str]]) -> None:
+        """End the control running events hold on devices withdrawn from their programs.
+
+        ``withdrawn`` holds ``(program_href, device_href)`` pairs the discovery
+        refresh dropped from the device mapping. IEEE 2030.5-2023 §8.8.3 has a
+        client act on the events of the function set assignments it is in, so a
+        device no longer assigned to a program stops being governed by that
+        program's events when the client learns of it. Each event the device
+        was registered on releases its modes there, as at the end of the event:
+        modes the device's remaining defaults do not carry are disabled, and the
+        default that now governs the device is applied. The event keeps running
+        on its other devices. The standard defines no response status for a
+        withdrawal, so none is posted for the device.
+
+        Under a group lookup a program's control reaches its whole group
+        whichever server-side device was withdrawn, so nothing is released until
+        the event ends.
+        """
+        by_program: dict[str, set[str]] = {}
+        for program_href, dev_href in withdrawn:
+            by_program.setdefault(program_href, set()).add(dev_href)
+        if not by_program:
+            return
+        for record in self._store.by_state(EventState.ACTIVE):
+            candidates = by_program.get(record.program_href)
+            if not candidates or record.opted_out:
+                continue
+            # A device mapped to the program again is not withdrawn any more.
+            mapped = set(self._unique_devices(record.program_href))
+            running = (candidates & self._mode_tracker.devices_of(record.mrid)) - mapped
+            if not running:
+                continue
+            if self._group_local_lfdis(record.program_href) is not None:
+                logger.debug(
+                    "Event %s: program %s uses a group lookup; its control on withdrawn "
+                    "device(s) %s is released when the event ends",
+                    record.mrid.hex()[:8],
+                    record.program_href,
+                    sorted(running),
+                )
+                continue
+            logger.info(
+                "Event %s: ending its control on %s, withdrawn from program %s",
+                record.mrid.hex()[:8],
+                ", ".join(sorted(running)),
+                record.program_href,
+            )
+            record.withdrawn_devices |= running
+            await self._apply_dderc_fallback(record, only_devices=sorted(running))
+            if self._closed:
+                return
 
     async def _run_supersession(self) -> None:
         """Run supersession algorithm and apply transitions.
@@ -1496,7 +1571,11 @@ class EventProcessor:
         await self._apply_dderc_fallback(record, clear_if_no_dderc=True)
 
     async def _apply_dderc_fallback(
-        self, record: EventRecord, *, clear_if_no_dderc: bool = False
+        self,
+        record: EventRecord,
+        *,
+        clear_if_no_dderc: bool = False,
+        only_devices: Collection[str] | None = None,
     ) -> None:
         """Apply per-mode DDERC fallback for modes released by the completing event.
 
@@ -1505,13 +1584,29 @@ class EventProcessor:
         event get DDERC applied. If no modes were tracked (empty DercontrolBase),
         fall back to checking whether other active events cover the device.
 
+        The devices are the program's current devices and every device the
+        event is still registered on. A device withdrawn from the program while
+        the event ran is only in the second group, and it still holds the
+        event's modes until they are released here. ``only_devices`` limits the
+        release to those devices and leaves the event running on the others.
+
         ``clear_if_no_dderc`` is the comms-loss opt-out failsafe: a device
         with no DDERC on any program is dispatched a connector clear instead of
         being left untouched. Opted-out events (``record.opted_out``) are ignored
         when deciding whether another active event still covers a device, so
         opting out every active event reverts the device to its planning limit.
         """
-        all_devices = self._unique_devices(record.program_href)
+        if only_devices is not None:
+            all_devices = list(dict.fromkeys(only_devices))
+        else:
+            all_devices = list(
+                dict.fromkeys(
+                    [
+                        *self._unique_devices(record.program_href),
+                        *sorted(self._mode_tracker.devices_of(record.mrid)),
+                    ]
+                )
+            )
         # Asked in the vocabulary the supersession answered in. ``superseded_modes``
         # is recorded from the keys supersession compares, which leave out connect
         # and energize and do not reach extension elements, so measuring it against
@@ -1561,9 +1656,11 @@ class EventProcessor:
         if not needs_fallback:
             return
 
-        # For each device, find the highest-priority program with a DDERC.
-        # A shared device may belong to multiple programs; on event completion,
-        # it should revert to the best (lowest primacy number) DDERC available.
+        # Each device gets its default mode by mode (IEEE 2030.5-2023
+        # §10.10.4.2.1): a mode comes from the default of the lowest-primacy
+        # program that names it. The lowest-primacy default is always sent, as
+        # one default always was; a default of another program is sent only
+        # for the modes it supplies.
         dderc_targets: list[tuple[str, bytes, DerProgramState, DefaultDercontrol]] = []
         # Modes the ended event set that the default does not carry. The
         # default only writes the modes it names, so these would stay in
@@ -1575,9 +1672,9 @@ class EventProcessor:
             lfdi = self._get_device_lfdi(dev_href)
             if lfdi is None:
                 continue
-            best = self._best_dderc_program_for_device(dev_href)
+            selection = self._default_modes_by_program(dev_href)
             released = released_modes.get(dev_href, frozenset())
-            if best is None:
+            if not selection:
                 if clear_if_no_dderc:
                     clear_targets.append((dev_href, lfdi))
                 elif released:
@@ -1594,47 +1691,62 @@ class EventProcessor:
                         dev_href,
                     )
                 continue
-            dderc = best.default_dercontrol
-            assert dderc is not None  # guaranteed by _best_dderc_program_for_device
-            carried = get_active_mode_names(dderc.dercontrol_base)
-            # A default is the baseline for the modes no event is controlling,
-            # and this project does not let it override one. The default is
-            # written whole, so where it names a mode an event that is still
-            # running holds, applying it would take that mode from the event
-            # that owns it. Withhold it there and disable what this event
-            # released instead: the event still holding the device keeps what
-            # is its, and its own end brings the default back for everything at
-            # once. Recorded as a decision rather than quoted from the standard
-            # -- see the note on `_modes_running_in`.
-            # The default belongs to ``best.href``, which need not be the ending
-            # event's program: under a group lookup it fans out to *that*
-            # program's local devices, so that is what the write reaches.
-            held = self._modes_running_in(self._reach_of(best.href, [dev_href]), active_events)
-            taken = carried & held
-            if taken:
-                logger.debug(
-                    "Event %s: sending the default for %s without %s, which "
-                    "another running event is controlling",
-                    record.mrid.hex()[:8],
-                    dev_href,
-                    sorted(taken),
+            written_on_device: set[str] = set()
+            for rank, (program, supplied) in enumerate(selection):
+                if rank > 0 and not supplied:
+                    continue
+                default = program.default_dercontrol
+                assert default is not None  # guaranteed by _default_modes_by_program
+                carried = get_active_mode_names(default.dercontrol_base)
+                # A default is the baseline for the modes no event is controlling,
+                # and this project does not let it override one. The default is
+                # written whole, so where it names a mode an event that is still
+                # running holds, applying it would take that mode from the event
+                # that owns it. Withhold it there and disable what this event
+                # released instead: the event still holding the device keeps what
+                # is its, and its own end brings the default back for everything at
+                # once. Recorded as a decision rather than quoted from the standard
+                # -- see the note on `_modes_running_in`.
+                # The default belongs to ``program.href``, which need not be the
+                # ending event's program: under a group lookup it fans out to *that*
+                # program's local devices, so that is what the write reaches.
+                held = self._modes_running_in(
+                    self._reach_of(program.href, [dev_href]), active_events
                 )
-            # Taken here rather than in the dispatch loop below, which is still
-            # before any await: a refresh during dispatch can replace the
-            # program's default, and recording the replacement would have the
-            # next pass skip a default the device never received.
-            effective = self._default_without(dderc, taken) if taken else dderc
-            written = carried - taken
-            default_modes |= written
-            uncovered = released - written
+                outranked = carried - supplied
+                running = supplied & held
+                if running:
+                    logger.debug(
+                        "Event %s: sending the default for %s without %s, which "
+                        "another running event is controlling",
+                        record.mrid.hex()[:8],
+                        dev_href,
+                        sorted(running),
+                    )
+                # Taken here rather than in the dispatch loop below, which is still
+                # before any await: a refresh during dispatch can replace the
+                # program's default, and recording the replacement would have the
+                # next pass skip a default the device never received.
+                taken = frozenset(outranked | running)
+                effective = (
+                    self._default_without(default, taken, settings=rank > 0)
+                    if taken or rank > 0
+                    else default
+                )
+                written = carried - taken
+                written_on_device |= written
+                # Nothing left to send only when the default had modes and every one
+                # of them is being controlled. A default that names nothing still
+                # goes out: it always did, and masking cannot have emptied it.
+                emptied = bool(carried) and not written
+                if not emptied and self._dderc_tracker.should_apply(
+                    lfdi, program.href, program.primacy
+                ):
+                    dderc_targets.append((dev_href, lfdi, program, effective))
+            default_modes |= written_on_device
+            uncovered = released - written_on_device
             if uncovered:
                 withdraw_targets.append((dev_href, uncovered))
-            # Nothing left to send only when the default had modes and every one
-            # of them is being controlled. A default that names nothing still
-            # goes out: it always did, and masking cannot have emptied it.
-            emptied = bool(carried) and not written
-            if not emptied and self._dderc_tracker.should_apply(lfdi, best.href, best.primacy):
-                dderc_targets.append((dev_href, lfdi, best, effective))
 
         # Dispatch DDERC in parallel, then update tracker for successes.
         # With a group lookup supplied, each server-side EDev resolves
@@ -1851,7 +1963,7 @@ class EventProcessor:
         # Each target is sent the default without the modes that something
         # else governs on it (IEEE 2030.5-2023 §10.10.4.2.1): the modes a
         # running event holds where the write lands, and the modes the default
-        # of a higher-priority program names. A device with neither gets the
+        # of a higher-priority program supplies. A device with neither gets the
         # whole default. Under a group lookup the write reaches the program's
         # local devices whichever server-side device it was decided for, so every
         # target resolves to the same reach and the same held modes.
@@ -1862,7 +1974,12 @@ class EventProcessor:
                 continue
 
             held = self._modes_running_in(self._reach_of(program_href, [dev_href]), active_events)
-            taken = carried & (held | self._higher_priority_default_modes(dev_href, derp_state))
+            selection = self._default_modes_by_program(dev_href)
+            supplied = {p.href: modes for p, modes in selection}
+            # The lowest-primacy default also carries the settings that are not
+            # modes; a default beside it supplies only modes.
+            lead = not selection or selection[0][0].href == program_href
+            taken = (carried - supplied.get(program_href, carried)) | (carried & held)
             written = carried - taken
             if carried and not written:
                 logger.debug(
@@ -1897,8 +2014,8 @@ class EventProcessor:
                     sorted(taken),
                 )
             effective = (
-                self._default_without(derp_state.default_dercontrol, taken)
-                if taken
+                self._default_without(derp_state.default_dercontrol, taken, settings=not lead)
+                if taken or not lead
                 else derp_state.default_dercontrol
             )
             targets.append((dev_href, lfdi, effective, written))
@@ -1945,30 +2062,37 @@ class EventProcessor:
                     lfdi, program_href, dderc_mrid, derp_state.primacy, written
                 )
 
-    def _higher_priority_default_modes(
-        self, dev_href: str, program: DerProgramState
-    ) -> frozenset[str]:
-        """The modes named by the default of a program that outranks ``program`` on a device.
+    def _default_modes_by_program(
+        self, dev_href: str
+    ) -> list[tuple[DerProgramState, frozenset[str]]]:
+        """Return each program whose default applies to a device, with the modes it supplies.
 
-        IEEE 2030.5-2023 §10.10.4.2.1 gives a mode with no active control to the
-        default of the program with the lowest primacy that contains it, so a
-        default does not write a mode that a lower-numbered program's default
-        names. Read from the programs as they stand, not from what was written
-        before: the record of earlier writes is cleared when an event arrives,
-        and says nothing about precedence.
+        IEEE 2030.5-2023 §10.10.4.2.1: a mode no active control holds is managed
+        by the default of the program with the lowest primacy that contains it.
+        The programs come in that order, and each supplies the modes of its
+        default that no program before it names. The first program is the one
+        with the lowest primacy; programs of equal primacy rank in discovery
+        order, so a mode two of them name has one source. Read from the programs
+        as they stand, not from what was written before: the record of earlier
+        writes is cleared when an event arrives and says nothing about
+        precedence. Both the initial pass and the end-of-event fallback ask this,
+        so the two cannot choose differently.
         """
-        modes: set[str] = set()
-        for other_href in self._state.device_mapping.device_to_programs.get(dev_href, []):
-            other = self._state.der_programs.get(other_href)
-            if (
-                other is None
-                or other.href == program.href
-                or other.default_dercontrol is None
-                or other.primacy >= program.primacy
-            ):
-                continue
-            modes |= get_active_mode_names(other.default_dercontrol.dercontrol_base)
-        return frozenset(modes)
+        ranked: list[tuple[int, int, DerProgramState]] = []
+        programs = self._state.device_mapping.device_to_programs.get(dev_href, [])
+        for index, program_href in enumerate(dict.fromkeys(programs)):
+            program = self._state.der_programs.get(program_href)
+            if program is not None and program.default_dercontrol is not None:
+                ranked.append((program.primacy, index, program))
+        ranked.sort(key=lambda entry: entry[:2])
+        claimed: set[str] = set()
+        selection: list[tuple[DerProgramState, frozenset[str]]] = []
+        for _primacy, _index, program in ranked:
+            assert program.default_dercontrol is not None
+            carried = get_active_mode_names(program.default_dercontrol.dercontrol_base)
+            selection.append((program, frozenset(carried - claimed)))
+            claimed |= carried
+        return selection
 
     @staticmethod
     def _default_control_failure(results: Sequence[object]) -> Exception | None:
@@ -1987,8 +2111,14 @@ class EventProcessor:
         return None
 
     @staticmethod
-    def _default_without(dderc: DefaultDercontrol, modes: frozenset[str]) -> DefaultDercontrol:
+    def _default_without(
+        dderc: DefaultDercontrol, modes: frozenset[str], *, settings: bool = False
+    ) -> DefaultDercontrol:
         """The default with ``modes`` taken out of it.
+
+        ``settings`` also takes out the settings that are not modes (``setGradW``
+        and the enter-service settings). A default sent beside one of lower
+        primacy leaves those to it.
 
         A default is written whole, so the only way to let it set the modes no
         event is controlling without disturbing the ones an event is, is to
@@ -2005,7 +2135,10 @@ class EventProcessor:
         ]
         if len(kept) != len(base.other_element or []):
             cleared["other_element"] = kept
-        return dderc.model_copy(update={"dercontrol_base": base.model_copy(update=cleared)})
+        update: dict[str, Any] = {"dercontrol_base": base.model_copy(update=cleared)}
+        if settings:
+            update.update({element.field: None for element in DEFAULT_CONTROL_ELEMENTS})
+        return dderc.model_copy(update=update)
 
     def _reach_of(self, program_href: str, devices: Sequence[str]) -> frozenset[str]:
         """What a write made for ``devices`` of ``program_href`` actually touches.
@@ -2078,19 +2211,6 @@ class EventProcessor:
             ):
                 return True
         return False
-
-    def _best_dderc_program_for_device(self, dev_href: str) -> DerProgramState | None:
-        """Find the highest-priority program with a DDERC that covers this device."""
-        best: DerProgramState | None = None
-        for prog_href, prog_devices in self._state.device_mapping.program_to_devices.items():
-            if dev_href not in prog_devices:
-                continue
-            derp = self._state.der_programs.get(prog_href)
-            if derp is None or derp.default_dercontrol is None:
-                continue
-            if best is None or derp.primacy < best.primacy:
-                best = derp
-        return best
 
     def _unique_devices(self, program_href: str) -> list[str]:
         """The program's devices, each once, in discovery order.

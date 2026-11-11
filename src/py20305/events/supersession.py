@@ -18,6 +18,7 @@ import bisect
 from dataclasses import dataclass
 
 from py20305.events.state_machine import EventRecord
+from py20305.models.csipaus.elements import doe_limits
 from py20305.models.sep.sep import DercontrolBase
 
 _EXCLUDED_FIELDS = frozenset({"op_mod_connect", "op_mod_energize"})
@@ -38,15 +39,24 @@ class SupersessionResult:
 def compared_mode_keys(base: DercontrolBase) -> frozenset[str]:
     """Return the modes supersession compares, as it compares them.
 
-    `DERControlBase` field names, leaving out connect and energize and not
-    seeing extension elements -- narrower than
-    :func:`~py20305.events.modes_bitmask.get_active_mode_names`, which names
-    every mode an event sets. Anything deciding what a supersession covered
-    has to ask in this vocabulary: ``superseded_modes`` is recorded from it,
-    so comparing it against the wider set says a device was only partly taken
-    over whenever an event carries a mode this cannot see.
+    ``DERControlBase`` field names, leaving out connect and energize, plus the
+    CSIP-AUS envelope limits by element name (``opModExpLimW``, ``opModImpLimW``,
+    ``opModGenLimW``, ``opModLoadLimW``). The limits are extension elements
+    carried in ``other_element``, not fields, and they are modes of the
+    DERControlBase: CSIP-AUS v1.1a section 5.2.4.1 has DERControls follow the
+    event rules of IEEE 2030.5, and IEEE 2030.5-2023 section 10.2.2.3 rule q
+    (rule t in IEEE 2030.5-2018 section 10.2.3.3) supersedes overlapping events
+    mode by mode. An event with none of those elements has no CSIP-AUS modes to
+    compare, so servers that do not use them see no change.
+
+    Narrower than :func:`~py20305.events.modes_bitmask.get_active_mode_names`,
+    which also names connect and energize.
+    Anything deciding what a supersession covered has to ask in this
+    vocabulary: ``superseded_modes`` is recorded from it, so comparing it
+    against the wider set says a device was only partly taken over whenever an
+    event carries a mode this cannot see.
     """
-    keys: list[str] = []
+    keys: set[str] = set(doe_limits(base))
     for name in DercontrolBase.model_fields:
         if name in _EXCLUDED_FIELDS:
             continue
@@ -54,7 +64,7 @@ def compared_mode_keys(base: DercontrolBase) -> frozenset[str]:
             continue
         val = getattr(base, name, None)
         if val is not None:
-            keys.append(name)
+            keys.add(name)
     return frozenset(keys)
 
 

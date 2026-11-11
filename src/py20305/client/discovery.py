@@ -1129,7 +1129,11 @@ async def refresh_tariffs(client: Sep2Client, state: DiscoveredState) -> None:
             await _discover_tariffs_for_fsa(client, fsa, state)
 
 
-async def refresh_der_programs(client: Sep2Client, state: DiscoveredState) -> list[str]:
+async def refresh_der_programs(
+    client: Sep2Client,
+    state: DiscoveredState,
+    withdrawn: list[tuple[str, str]] | None = None,
+) -> list[str]:
     """Re-fetch DER program lists from all known FSAs.
 
     Updates existing programs (primacy, program object) and discovers new
@@ -1151,6 +1155,10 @@ async def refresh_der_programs(client: Sep2Client, state: DiscoveredState) -> li
     device with a program list that could not be read, or that the server
     answered with no list at all (404 or 204), keeps all of its pairs, because
     the unread list may be the one that names them.
+
+    ``withdrawn``, when given, receives each ``(program_href, device_href)``
+    pair dropped from the mapping, so a caller can end the control a running
+    event still holds on that device.
 
     Returns a list of removed program hrefs so callers can cancel events.
     """
@@ -1272,6 +1280,8 @@ async def refresh_der_programs(client: Sep2Client, state: DiscoveredState) -> li
                     program_href,
                 )
                 mapping.remove_pair(program_href, edev_href)
+                if withdrawn is not None:
+                    withdrawn.append((program_href, edev_href))
 
     # Prune programs no longer in any FSA's DERP list. Preserve programs
     # from FSAs we couldn't reach (404) since we can't confirm removal.

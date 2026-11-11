@@ -78,6 +78,26 @@ class TestDdercTrackerShouldApplyInitial:
         t.record_application(b"\x01" * 20, "/derp/1", self.MRID_A, primacy=0)
         assert not t.should_apply_initial(b"\x01" * 20, "/derp/2", self.MRID_B, primacy=5)
 
+    def test_cross_program_a_mode_the_higher_priority_write_lacks_is_allowed(self):
+        """IEEE 2030.5-2023 10.10.4.2.1 selects per mode: the other program still owns mode b."""
+        t = DdercTracker()
+        t.record_application(b"" * 20, "/derp/1", self.MRID_A, 0, frozenset({"a"}))
+        assert t.should_apply_initial(b"" * 20, "/derp/2", self.MRID_B, 5, frozenset({"b"}))
+
+    def test_cross_program_modes_all_applied_by_the_higher_priority_write_are_blocked(self):
+        t = DdercTracker()
+        t.record_application(b"" * 20, "/derp/1", self.MRID_A, 0, frozenset({"a", "b"}))
+        assert not t.should_apply_initial(
+            b"" * 20, "/derp/2", self.MRID_B, 5, frozenset({"a"})
+        )
+
+    def test_cross_program_unrecorded_modes_block_the_whole_default(self):
+        t = DdercTracker()
+        t.record_application(b"" * 20, "/derp/1", self.MRID_A, 0)
+        assert not t.should_apply_initial(
+            b"" * 20, "/derp/2", self.MRID_B, 5, frozenset({"b"})
+        )
+
     def test_cross_program_higher_priority_allowed(self):
         """Higher-priority program's DDERC allowed even when lower-priority already applied."""
         t = DdercTracker()

@@ -5738,3 +5738,414 @@ class TestGroupDispatchSkipsMeters:
         assert dispatcher.asked == []
         assert ResponseCode.NOT_APPLICABLE in codes
         assert ResponseCode.ACTIVE not in codes
+
+
+def _http_ok() -> AsyncMock:
+    http = AsyncMock()
+    http.profile = ServerProfile(base=Edition.E2023)
+    http.post = AsyncMock(return_value=None)
+    return http
+
+
+def _default_with(m_rid: int, **modes: object) -> DefaultDercontrol:
+    return DefaultDercontrol(
+        m_rid=MRidtype(value=bytes([m_rid]) * 16), dercontrol_base=DercontrolBase(**modes)
+    )
+
+
+class TestDeviceWithdrawnDuringAnEvent:
+    """A device withdrawn from a program while its event runs does not keep the control.
+
+    IEEE 2030.5-2023 section 8.8.3: a client acts on the events of the function
+    set assignments it is in. Section 10.10.4.2.1: with no active control for a
+    mode, the default of the lowest-primacy program containing the mode manages it.
+    """
+
+    FIXED_W = "op_mod_fixed_w"
+    MAX_LIM_W = "op_mod_max_lim_w"
+    MRID = b"\x01" * 16
+
+    def _running_event(self, *, dispatcher: AsyncMock, http: AsyncMock | None = None):
+        """/derp/1 runs an opModFixedW event on /edev/1 and /edev/2."""
+        now = int(time.time())
+        derc = _make_derc(
+            0x01,
+            start=now - 10,
+            duration=3600,
+            base=DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=2500)),
+        )
+        state, _lfdi1, _lfdi2 = _two_device_state(der_controls=[derc])
+        proc = EventProcessor(http or _http_ok(), state, dispatcher, asyncio.Event())
+        return proc, state
+
+    @staticmethod
+    def _disabled(dispatcher: AsyncMock) -> dict[str, list[frozenset[str]]]:
+        out: dict[str, list[frozenset[str]]] = {}
+        for call in dispatcher.disable_modes.await_args_list:
+            out.setdefault(call.args[0], []).append(call.args[1])
+        return out
+
+    @pytest.mark.asyncio
+    async def test_the_events_modes_are_disabled_on_a_withdrawn_device_when_it_ends(self):
+        dispatcher = AsyncMock()
+        proc, state = self._running_event(dispatcher=dispatcher)
+        await proc.process_controls("/derp/1")
+        record = proc._store.get(self.MRID)
+        assert record is not None and record.state == EventState.ACTIVE
+
+        state.device_mapping.remove_pair("/derp/1", "/edev/2")
+        await proc._on_completion(record)
+        await proc.shutdown()
+
+        assert self._disabled(dispatcher) == {
+            "/edev/1": [frozenset({self.FIXED_W})],
+            "/edev/2": [frozenset({self.FIXED_W})],
+        }
+        assert proc._mode_tracker.devices_of(self.MRID) == frozenset()
+
+    @pytest.mark.asyncio
+    async def test_a_withdrawn_device_gets_the_default_that_now_governs_it(self):
+        """/edev/2 left /derp/1 but is still in /derp/2, so /derp/2 default applies to it."""
+        dispatcher = AsyncMock()
+        proc, state = self._running_event(dispatcher=dispatcher)
+        state.der_programs["/derp/1"].default_dercontrol = _default_with(
+            0x20, op_mod_fixed_w=SignedPerCentControlType(value=1000)
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 5),
+            href="/derp/2",
+            primacy=5,
+            default_dercontrol=_default_with(0x21, op_mod_max_lim_w=PerCentControlType(value=9000)),
+            der_controls=[],
+        )
+        state.device_mapping.add("/derp/2", "/edev/2")
+        await proc.process_controls("/derp/1")
+        record = proc._store.get(self.MRID)
+        assert record is not None
+        dispatcher.reset_mock()
+
+        state.device_mapping.remove_pair("/derp/1", "/edev/2")
+        await proc._on_completion(record)
+        await proc.shutdown()
+
+        written = {
+            call.args[0]: call.args[1].m_rid.value
+            for call in dispatcher.apply_default_control.await_args_list
+        }
+        assert written == {"/edev/1": b"\x20" * 16, "/edev/2": b"\x21" * 16}
+        assert self._disabled(dispatcher) == {"/edev/2": [frozenset({self.FIXED_W})]}
+
+    @pytest.mark.asyncio
+    async def test_a_device_still_in_the_program_is_released_as_before(self):
+        dispatcher = AsyncMock()
+        proc, _state = self._running_event(dispatcher=dispatcher)
+        await proc.process_controls("/derp/1")
+        record = proc._store.get(self.MRID)
+        assert record is not None
+
+        await proc._on_completion(record)
+        await proc.shutdown()
+
+        assert self._disabled(dispatcher) == {
+            "/edev/1": [frozenset({self.FIXED_W})],
+            "/edev/2": [frozenset({self.FIXED_W})],
+        }
+
+    @pytest.mark.asyncio
+    async def test_withdrawal_ends_the_control_on_that_device_while_the_event_runs(self):
+        http = _http_ok()
+        dispatcher = AsyncMock()
+        proc, state = self._running_event(dispatcher=dispatcher, http=http)
+        await proc.process_controls("/derp/1")
+        record = proc._store.get(self.MRID)
+        assert record is not None
+        http.post.reset_mock()
+
+        state.device_mapping.remove_pair("/derp/1", "/edev/2")
+        await proc.release_withdrawn_devices([("/derp/1", "/edev/2")])
+
+        assert self._disabled(dispatcher) == {"/edev/2": [frozenset({self.FIXED_W})]}
+        assert record.state == EventState.ACTIVE, "the event keeps running on its other device"
+        assert proc._mode_tracker.devices_of(self.MRID) == frozenset({"/edev/1"})
+        assert record.withdrawn_devices == {"/edev/2"}
+        assert http.post.await_count == 0, "the standard has no status for a withdrawal"
+
+        dispatcher.reset_mock()
+        await proc._on_completion(record)
+        await proc.shutdown()
+
+        assert self._disabled(dispatcher) == {"/edev/1": [frozenset({self.FIXED_W})]}
+        assert _codes_by_lfdi(http) == {_DEV1_LFDI: {ResponseCode.COMPLETED}}
+
+    @pytest.mark.asyncio
+    async def test_a_device_mapped_to_the_program_again_is_not_released(self):
+        dispatcher = AsyncMock()
+        proc, _state = self._running_event(dispatcher=dispatcher)
+        await proc.process_controls("/derp/1")
+
+        await proc.release_withdrawn_devices([("/derp/1", "/edev/2")])
+        await proc.shutdown()
+
+        assert dispatcher.disable_modes.await_count == 0
+        assert proc._mode_tracker.devices_of(self.MRID) == frozenset({"/edev/1", "/edev/2"})
+
+    @pytest.mark.asyncio
+    async def test_a_group_lookup_program_is_released_when_the_event_ends(self):
+        """The group is the program reach, so one device leaving it frees nothing early."""
+        dispatcher = AsyncMock()
+        proc, state = self._running_event(dispatcher=dispatcher)
+        proc._group_lookup = lambda _href: ["cc" * 20]
+        await proc.process_controls("/derp/1")
+        state.device_mapping.remove_pair("/derp/1", "/edev/2")
+
+        await proc.release_withdrawn_devices([("/derp/1", "/edev/2")])
+        await proc.shutdown()
+
+        assert dispatcher.disable_modes_by_lfdi.await_count == 0
+        assert proc._mode_tracker.devices_of(self.MRID) == frozenset({"/edev/1", "/edev/2"})
+
+    @pytest.mark.asyncio
+    async def test_a_removed_program_releases_the_control_its_cancelled_events_held(self):
+        dispatcher = AsyncMock()
+        proc, state = self._running_event(dispatcher=dispatcher)
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 5),
+            href="/derp/2",
+            primacy=5,
+            default_dercontrol=_default_with(0x21, op_mod_max_lim_w=PerCentControlType(value=9000)),
+            der_controls=[],
+        )
+        state.device_mapping.add("/derp/2", "/edev/2")
+        await proc.process_controls("/derp/1")
+        dispatcher.reset_mock()
+
+        proc.cancel_program("/derp/1")
+        state.der_programs.pop("/derp/1")
+        state.device_mapping.remove_program("/derp/1")
+        await proc.release_cancelled_program("/derp/1")
+        await proc.shutdown()
+
+        assert self._disabled(dispatcher) == {
+            "/edev/1": [frozenset({self.FIXED_W})],
+            "/edev/2": [frozenset({self.FIXED_W})],
+        }
+        assert [
+            (call.args[0], call.args[1].m_rid.value)
+            for call in dispatcher.apply_default_control.await_args_list
+        ] == [("/edev/2", b"\x21" * 16)]
+        assert proc._mode_tracker.devices_of(self.MRID) == frozenset()
+
+
+class TestDefaultSelectedPerMode:
+    """Each mode comes from the default of the lowest-primacy program that names it.
+
+    IEEE 2030.5-2023 section 10.10.4.2.1. /derp/0 (primacy 0) names opModMaxLimW
+    and /derp/5 (primacy 5) names opModMaxLimW and opModFixedW. Both reach /edev/1.
+    """
+
+    FIXED_W = "op_mod_fixed_w"
+    MAX_LIM_W = "op_mod_max_lim_w"
+
+    def _state(self, *, event_in_derp5: bool = False) -> DiscoveredState:
+        now = int(time.time())
+        events = (
+            [
+                _make_derc(
+                    0x05,
+                    start=now - 10,
+                    duration=3600,
+                    base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+                )
+            ]
+            if event_in_derp5
+            else []
+        )
+        state = _setup_state(
+            program_href="/derp/5",
+            primacy=5,
+            der_controls=events,
+            dderc=_default_with(
+                0x25,
+                op_mod_max_lim_w=PerCentControlType(value=9000),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+        state.der_programs["/derp/0"] = DerProgramState(
+            program=_make_program("/derp/0", 0),
+            href="/derp/0",
+            primacy=0,
+            default_dercontrol=_default_with(0x20, op_mod_max_lim_w=PerCentControlType(value=5000)),
+            der_controls=[],
+        )
+        state.device_mapping.add("/derp/0", "/edev/1")
+        return state
+
+    @staticmethod
+    def _written(dispatcher: AsyncMock) -> dict[bytes, frozenset[str]]:
+        return {
+            call.args[1].m_rid.value: get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control.await_args_list
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_initial_pass_writes_each_mode_from_its_lowest_primacy_default(self):
+        dispatcher = AsyncMock()
+        proc = EventProcessor(_http_ok(), self._state(), dispatcher, asyncio.Event())
+
+        await proc.process_controls("/derp/0")
+        await proc.process_controls("/derp/5")
+        await proc.shutdown()
+
+        assert self._written(dispatcher) == {
+            b"\x20" * 16: frozenset({self.MAX_LIM_W}),
+            b"\x25" * 16: frozenset({self.FIXED_W}),
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_fallback_writes_each_mode_from_its_lowest_primacy_default(self):
+        dispatcher = AsyncMock()
+        proc = EventProcessor(
+            _http_ok(), self._state(event_in_derp5=True), dispatcher, asyncio.Event()
+        )
+        await proc.process_controls("/derp/5")
+        record = proc._store.get(b"\x05" * 16)
+        assert record is not None and record.state == EventState.ACTIVE
+        dispatcher.reset_mock()
+
+        await proc._on_completion(record)
+        await proc.shutdown()
+
+        assert self._written(dispatcher) == {
+            b"\x20" * 16: frozenset({self.MAX_LIM_W}),
+            b"\x25" * 16: frozenset({self.FIXED_W}),
+        }
+        assert dispatcher.disable_modes.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_mode_a_running_event_holds_is_still_left_out_of_the_fallback(self):
+        """A second event in /derp/0 holds opModFixedW, so no default may write it."""
+        state = self._state(event_in_derp5=True)
+        now = int(time.time())
+        state.der_programs["/derp/0"].der_controls = [
+            _make_derc(
+                0x06,
+                start=now - 10,
+                duration=7200,
+                base=DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=100)),
+            )
+        ]
+        dispatcher = AsyncMock()
+        proc = EventProcessor(_http_ok(), state, dispatcher, asyncio.Event())
+        await proc.process_controls("/derp/0")
+        await proc.process_controls("/derp/5")
+        record = proc._store.get(b"\x05" * 16)
+        assert record is not None
+        dispatcher.reset_mock()
+
+        await proc._on_completion(record)
+        await proc.shutdown()
+
+        assert self._written(dispatcher) == {b"\x20" * 16: frozenset({self.MAX_LIM_W})}
+
+    @pytest.mark.asyncio
+    async def test_programs_of_equal_primacy_give_a_shared_mode_one_source(self):
+        """Both programs have primacy 5 and name opModMaxLimW; the first discovered supplies it."""
+        state = self._state()
+        state.der_programs["/derp/0"].primacy = 5
+        dispatcher = AsyncMock()
+        proc = EventProcessor(_http_ok(), state, dispatcher, asyncio.Event())
+
+        await proc.process_controls("/derp/5")
+        await proc.process_controls("/derp/0")
+        await proc.shutdown()
+
+        assert self._written(dispatcher) == {
+            b"\x25" * 16: frozenset({self.MAX_LIM_W, self.FIXED_W})
+        }
+
+
+    @pytest.mark.asyncio
+    async def test_only_the_lowest_primacy_default_carries_the_settings_that_are_not_modes(self):
+        """setGradW is not a mode, so two defaults naming it would race for it."""
+        state = self._state(event_in_derp5=True)
+        for program in state.der_programs.values():
+            base = program.default_dercontrol
+            assert base is not None
+            program.default_dercontrol = base.model_copy(update={"set_grad_w": 100})
+        dispatcher = AsyncMock()
+        proc = EventProcessor(_http_ok(), state, dispatcher, asyncio.Event())
+        await proc.process_controls("/derp/5")
+        record = proc._store.get(b"" * 16)
+        assert record is not None
+        dispatcher.reset_mock()
+
+        await proc._on_completion(record)
+        await proc.shutdown()
+
+        gradients = {
+            call.args[1].m_rid.value: call.args[1].set_grad_w
+            for call in dispatcher.apply_default_control.await_args_list
+        }
+        assert gradients == {b" " * 16: 100, b"%" * 16: None}
+
+
+class TestCsipAusLimitSupersession:
+    """Events that carry only CSIP-AUS limits supersede mode by mode.
+
+    CSIP-AUS v1.1a section 5.2.4.1 puts DERControls under the IEEE 2030.5 event
+    rules; IEEE 2030.5-2023 section 10.2.2.3 rule q supersedes per DERControl mode.
+    """
+
+    @staticmethod
+    def _processor(low_limit: str) -> tuple[EventProcessor, AsyncMock]:
+        now = int(time.time())
+
+        def event(mrid: int, limit: str) -> Dercontrol1:
+            return _make_derc(
+                mrid,
+                start=now - 10,
+                duration=3600,
+                base=DercontrolBase(other_element=[_envelope_elem(limit, 5000)]),
+            )
+
+        state = _setup_state(
+            program_href="/derp/0", primacy=0, der_controls=[event(0x01, "opModExpLimW")]
+        )
+        state.der_programs["/derp/5"] = DerProgramState(
+            program=_make_program("/derp/5", 5),
+            href="/derp/5",
+            primacy=5,
+            default_dercontrol=None,
+            der_controls=[event(0x02, low_limit)],
+        )
+        state.device_mapping.add("/derp/5", "/edev/1")
+        http = _http_ok()
+        return EventProcessor(http, state, AsyncMock(), asyncio.Event()), http
+
+    @pytest.mark.asyncio
+    async def test_a_lower_priority_event_with_the_same_limit_is_superseded(self):
+        proc, http = self._processor("opModExpLimW")
+
+        await proc.process_controls("/derp/0")
+        await proc.process_controls("/derp/5")
+        await proc.shutdown()
+
+        loser = proc._store.get(b"" * 16)
+        assert loser is not None and loser.state == EventState.SUPERSEDED
+        assert loser.superseded_modes == {"/edev/1": frozenset({"opModExpLimW"})}
+        assert proc._mode_tracker.devices_of(b"" * 16) == frozenset()
+        assert ResponseCode.SUPERSEDED in {
+            call[0][1].status for call in http.post.call_args_list
+        }
+
+    @pytest.mark.asyncio
+    async def test_an_event_with_a_different_limit_is_not_superseded(self):
+        proc, _http = self._processor("opModImpLimW")
+
+        await proc.process_controls("/derp/0")
+        await proc.process_controls("/derp/5")
+        await proc.shutdown()
+
+        other = proc._store.get(b"" * 16)
+        assert other is not None and other.state == EventState.ACTIVE
+        assert other.superseded_devices == set()

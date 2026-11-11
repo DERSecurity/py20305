@@ -43,6 +43,11 @@ class EventRecord:
     #: ``rejected_devices`` means dispatch never had a target at all, which is the
     #: one case where the any-LFDI fallback still announces the lifecycle.
     applied_devices: set[str] = field(default_factory=set)
+    #: Devices withdrawn from the program while the event ran. The control the
+    #: event held on them was ended at the withdrawal, so they are not told the
+    #: event completed or was cancelled: those say the event ran its course on a
+    #: device the program no longer reaches.
+    withdrawn_devices: set[str] = field(default_factory=set)
     #: Under a group lookup, each local device's dispatch outcome by its LFDI,
     #: for the audit trail. The two sets above are in the server's terms: one
     #: EndDevice stands for several local devices, its response reports them as
