@@ -2505,6 +2505,94 @@ async def test_refresh_derp_keeps_the_pairs_of_a_device_whose_program_list_is_un
 
 
 @pytest.mark.asyncio
+async def test_refresh_derp_keeps_the_pairs_of_a_device_whose_program_list_was_not_served():
+    """``get_list`` returns no page for a 404 or 204 on the first page.
+
+    That is a list the server did not serve, which is not the same as a list
+    served empty, so it cannot show that the device was withdrawn.
+    """
+    client, _ = _two_devices_one_program()
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    client._responses["/fsa/2/derp"] = []
+    await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1", "/edev/2"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_derp_removes_the_pairs_of_a_device_whose_program_list_is_served_empty():
+    """The counterpart: a list that is served and names nothing is a withdrawal."""
+    client, _ = _two_devices_one_program()
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    client._responses["/fsa/2/derp"] = _make_derp_list()
+    await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_derp_keeps_a_device_mapped_through_the_device_capability_list():
+    """A device with no assignments is mapped from the DeviceCapability program list.
+
+    Full discovery builds that mapping, so the refresh must rebuild it from the
+    same list and not read the device's empty assignment list as a withdrawal.
+    """
+    edev1 = _make_edev("/edev/1")
+    edev1.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    edev2 = _make_edev("/edev/2", lfdi=bytes([0xBB]) * 20)
+    edev2.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/2/fsa")
+    derp = _make_derp("/derp/1", primacy=5)
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(derp_list_href="/derp"),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev1, edev2),
+            "/edev/1/fsa": _make_fsa_list(_make_fsa("/fsa/1", derp_list_href="/fsa/1/derp")),
+            "/edev/2/fsa": _make_fsa_list(),
+            "/fsa/1/derp": _make_derp_list(derp),
+            "/derp": _make_derp_list(derp),
+        }
+    )
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1", "/edev/2"]
+
+    removed = await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    assert removed == []
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1", "/edev/2"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_derp_keeps_a_program_only_the_device_capability_list_names():
+    """The refresh sees the DeviceCapability list, so it does not prune that program."""
+    edev = _make_edev("/edev/1")
+    edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(derp_list_href="/derp"),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev),
+            "/edev/1/fsa": _make_fsa_list(),
+            "/derp": _make_derp_list(_make_derp("/derp/1", primacy=5)),
+        }
+    )
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+    assert "/derp/1" in state.der_programs
+
+    removed = await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    assert removed == []
+    assert "/derp/1" in state.der_programs
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1"]
+
+
+@pytest.mark.asyncio
 async def test_a_withdrawn_device_is_not_sent_the_programs_control():
     """Driven through the client's refresh sequence, then the event processor.
 

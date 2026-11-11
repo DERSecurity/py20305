@@ -43,6 +43,7 @@ from py20305.models.sep.sep import (
     Sfditype,
     SignedPerCentControlType,
     TimeType,
+    UnsignedActivePowerControlType,
 )
 from py20305.server_profile import Edition, ServerProfile
 
@@ -5520,6 +5521,166 @@ class TestInitialDefaultAppliesModesNoEventControls:
         await proc.shutdown()
 
         assert self._sent(dispatcher) == [frozenset({self.MAX_LIM_W})]
+
+    @pytest.mark.asyncio
+    async def test_a_default_does_not_overwrite_a_mode_set_through_a_type_2_element(self):
+        """opModMaxLimWInject is a DERControlType2 mode, and an event owns it all the same."""
+        limit = UnsignedActivePowerControlType(
+            multiplier=PowerOfTenMultiplierType(value=0), value=1
+        )
+        dispatcher = AsyncMock()
+        proc, _state, _now = self._processor(
+            dispatcher,
+            event_base=DercontrolBase(op_mod_max_lim_winject=limit),
+            default=self._default(
+                b"\x20" * 16,
+                op_mod_max_lim_winject=limit,
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+
+        await proc.process_controls("/derp/1")
+        await proc.shutdown()
+
+        assert [
+            (
+                call.args[1].dercontrol_base.op_mod_fixed_w is not None,
+                call.args[1].dercontrol_base.op_mod_max_lim_winject is not None,
+            )
+            for call in dispatcher.apply_default_control.await_args_list
+        ] == [(True, False)], "the default must carry opModFixedW and not opModMaxLimWInject"
+
+    @pytest.mark.asyncio
+    async def test_a_lower_priority_default_does_not_overwrite_a_higher_priority_one(self):
+        """A mode goes to the default of the program with the lowest primacy that names it.
+
+        The record of earlier writes is cleared when an event arrives, so it
+        cannot be what keeps /derp/5's default off a mode /derp/0's default
+        sets. The mode an event holds in /derp/5 does not change that.
+        """
+        now = int(time.time())
+        state = _setup_state(
+            program_href="/derp/5",
+            primacy=5,
+            der_controls=[
+                _make_derc(
+                    0x05,
+                    start=now - 10,
+                    duration=3600,
+                    base=DercontrolBase(op_mod_fixed_w=SignedPerCentControlType(value=1000)),
+                )
+            ],
+            dderc=self._default(b"\x25" * 16, op_mod_max_lim_w=PerCentControlType(value=9000)),
+        )
+        state.der_programs["/derp/0"] = DerProgramState(
+            program=_make_program("/derp/0", 0),
+            href="/derp/0",
+            primacy=0,
+            default_dercontrol=self._default(
+                b"\x20" * 16, op_mod_max_lim_w=PerCentControlType(value=5000)
+            ),
+            der_controls=[],
+        )
+        state.device_mapping.add("/derp/0", "/edev/1")
+        http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event())
+
+        await proc.process_controls("/derp/0")
+        await proc.process_controls("/derp/5")
+        await proc.shutdown()
+
+        written = [
+            call.args[1].m_rid.value for call in dispatcher.apply_default_control.await_args_list
+        ]
+        assert written == [b"\x20" * 16], "only the higher-priority default may set the mode"
+
+    @pytest.mark.asyncio
+    async def test_a_lower_priority_default_still_sets_the_modes_the_other_default_lacks(self):
+        state = _setup_state(
+            program_href="/derp/5",
+            primacy=5,
+            der_controls=[],
+            dderc=self._default(
+                b"\x25" * 16,
+                op_mod_max_lim_w=PerCentControlType(value=9000),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+        state.der_programs["/derp/0"] = DerProgramState(
+            program=_make_program("/derp/0", 0),
+            href="/derp/0",
+            primacy=0,
+            default_dercontrol=self._default(
+                b"\x20" * 16, op_mod_max_lim_w=PerCentControlType(value=5000)
+            ),
+            der_controls=[],
+        )
+        state.device_mapping.add("/derp/0", "/edev/1")
+        http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event())
+
+        await proc.process_controls("/derp/5")
+        await proc.shutdown()
+
+        assert self._sent(dispatcher) == [frozenset({self.FIXED_W})]
+
+    @pytest.mark.asyncio
+    async def test_a_mode_freed_after_the_default_was_written_without_it_is_written(self):
+        """The default's mRID is unchanged, but the mode it was written without is free now.
+
+        Event A holds opModMaxLimW, so the default goes out without it. Event
+        B, scheduled earlier, then starts, takes the mode from A, and is
+        rejected by the device. Nothing holds the mode any more, so the next
+        poll has to write it, not skip the default as already applied.
+        """
+        now = int(time.time())
+        limit = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=limit)],
+            dderc=self._default(
+                b"\x20" * 16,
+                op_mod_max_lim_w=PerCentControlType(value=9999),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 0),
+            href="/derp/2",
+            primacy=0,
+            default_dercontrol=None,
+            der_controls=[_make_derc(0x02, start=now + 300, duration=3600, base=limit)],
+        )
+        state.device_mapping.add("/derp/2", "/edev/1")
+        http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+
+        def apply_control(device, derc, curves):
+            if derc.m_rid.value == b"\x02" * 16:
+                raise ConnectorValueError("the device would not take it")
+
+        dispatcher.apply_control.side_effect = apply_control
+        proc = EventProcessor(http, state, dispatcher, asyncio.Event())
+        await proc.process_controls("/derp/2")
+        await proc.process_controls("/derp/1")
+        assert self._sent(dispatcher) == [frozenset({self.FIXED_W})]
+        dispatcher.reset_mock()
+
+        await proc._on_activation(proc._store.get(b"\x02" * 16))
+        assert proc._store.get(b"\x02" * 16).rejected_devices == {"/edev/1"}
+        await proc.process_controls("/derp/1")
+        await proc.shutdown()
+
+        assert any(self.MAX_LIM_W in modes for modes in self._sent(dispatcher))
 
 
 class _MeterAwareDispatcher(NullDispatcher):

@@ -1711,7 +1711,11 @@ class EventProcessor:
                     # The event still running can bring the whole default back
                     # when it ends: this fallback checks primacy, not the mRID.
                     self._dderc_tracker.record_application(
-                        lfdi, best_prog.href, dderc.m_rid.value, best_prog.primacy
+                        lfdi,
+                        best_prog.href,
+                        dderc.m_rid.value,
+                        best_prog.primacy,
+                        get_active_mode_names(dderc.dercontrol_base),
                     )
 
         if withdraw_targets:
@@ -1844,35 +1848,38 @@ class EventProcessor:
         dderc_mrid = derp_state.default_dercontrol.m_rid.value
         carried = get_active_mode_names(derp_state.default_dercontrol.dercontrol_base)
 
-        # Each target is sent the default without the modes the running events
-        # hold where the write lands. A device with no running event gets the
+        # Each target is sent the default without the modes that something
+        # else governs on it (IEEE 2030.5-2023 §10.10.4.2.1): the modes a
+        # running event holds where the write lands, and the modes the default
+        # of a higher-priority program names. A device with neither gets the
         # whole default. Under a group lookup the write reaches the program's
         # local devices whichever server-side device it was decided for, so every
         # target resolves to the same reach and the same held modes.
-        targets: list[tuple[str, bytes, DefaultDercontrol]] = []
+        targets: list[tuple[str, bytes, DefaultDercontrol, frozenset[str]]] = []
         for dev_href in devices:
             lfdi = self._get_device_lfdi(dev_href)
             if lfdi is None:
                 continue
 
+            held = self._modes_running_in(self._reach_of(program_href, [dev_href]), active_events)
+            taken = carried & (held | self._higher_priority_default_modes(dev_href, derp_state))
+            written = carried - taken
+            if carried and not written:
+                logger.debug(
+                    "Initial DDERC skip %s: every mode it names is governed elsewhere on %s",
+                    program_href,
+                    dev_href,
+                )
+                continue
+
             if not self._dderc_tracker.should_apply_initial(
-                lfdi, program_href, dderc_mrid, derp_state.primacy
+                lfdi, program_href, dderc_mrid, derp_state.primacy, written
             ):
                 logger.debug(
                     "Initial DDERC skip %s: tracker blocked for %s (primacy=%d)",
                     program_href,
                     dev_href,
                     derp_state.primacy,
-                )
-                continue
-
-            held = self._modes_running_in(self._reach_of(program_href, [dev_href]), active_events)
-            taken = carried & held
-            if carried and not (carried - taken):
-                logger.debug(
-                    "Initial DDERC skip %s: every mode it names is being controlled on %s",
-                    program_href,
-                    dev_href,
                 )
                 continue
             if not carried and dev_href in active_devices:
@@ -1884,7 +1891,7 @@ class EventProcessor:
                 continue
             if taken:
                 logger.debug(
-                    "Initial DDERC from %s sent to %s without %s, which a running event controls",
+                    "Initial DDERC from %s sent to %s without %s, which something else governs",
                     program_href,
                     dev_href,
                     sorted(taken),
@@ -1894,7 +1901,7 @@ class EventProcessor:
                 if taken
                 else derp_state.default_dercontrol
             )
-            targets.append((dev_href, lfdi, effective))
+            targets.append((dev_href, lfdi, effective, written))
 
         if not targets:
             logger.debug("Initial DDERC skip %s: no eligible devices", program_href)
@@ -1910,7 +1917,7 @@ class EventProcessor:
         # to the program's local sub-device LFDIs.
         local_lfdis = self._group_local_lfdis(program_href)
         coros: list[Coroutine[Any, Any, None]] = []
-        for dev_href, _, dderc in targets:
+        for dev_href, _, dderc, _written in targets:
             if local_lfdis is not None:
                 coros.extend(
                     self._dispatcher.apply_default_control_by_lfdi(lfdi, dderc, curves)
@@ -1922,20 +1929,46 @@ class EventProcessor:
 
         per_target_n = len(local_lfdis) if local_lfdis is not None else 1
         idx = 0
-        for dev_href, lfdi, _ in targets:
+        for dev_href, lfdi, _, written in targets:
             target_results = results[idx : idx + per_target_n]
             idx += per_target_n
             failure = self._default_control_failure(target_results)
             if failure is not None:
                 logger.warning("Initial DDERC dispatch to %s failed: %s", dev_href, failure)
             else:
-                # Recorded for a default sent without some of its modes too, so
-                # the next poll does not write it again. This does not stop the
-                # end of the running event bringing the whole default back: the
-                # fallback checks primacy, and the program is the same.
+                # Recorded with the modes it carried, so the next poll does not
+                # write the same modes again but does write one that was freed
+                # since. The end of a running event still brings the whole
+                # default back: the fallback checks primacy, and the program is
+                # the same.
                 self._dderc_tracker.record_application(
-                    lfdi, program_href, dderc_mrid, derp_state.primacy
+                    lfdi, program_href, dderc_mrid, derp_state.primacy, written
                 )
+
+    def _higher_priority_default_modes(
+        self, dev_href: str, program: DerProgramState
+    ) -> frozenset[str]:
+        """The modes named by the default of a program that outranks ``program`` on a device.
+
+        IEEE 2030.5-2023 §10.10.4.2.1 gives a mode with no active control to the
+        default of the program with the lowest primacy that contains it, so a
+        default does not write a mode that a lower-numbered program's default
+        names. Read from the programs as they stand, not from what was written
+        before: the record of earlier writes is cleared when an event arrives,
+        and says nothing about precedence.
+        """
+        modes: set[str] = set()
+        for other_href in self._state.device_mapping.device_to_programs.get(dev_href, []):
+            other = self._state.der_programs.get(other_href)
+            if (
+                other is None
+                or other.href == program.href
+                or other.default_dercontrol is None
+                or other.primacy >= program.primacy
+            ):
+                continue
+            modes |= get_active_mode_names(other.default_dercontrol.dercontrol_base)
+        return frozenset(modes)
 
     @staticmethod
     def _default_control_failure(results: Sequence[object]) -> Exception | None:
