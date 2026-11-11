@@ -4608,9 +4608,7 @@ class TestTheInitialDefaultAndRunningEvents:
             der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=base_1)],
             dderc=DefaultDercontrol(
                 m_rid=MRidtype(value=b" " * 16),
-                dercontrol_base=DercontrolBase(
-                    op_mod_max_lim_w=PerCentControlType(value=9999)
-                ),
+                dercontrol_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=9999)),
             ),
             device_hrefs=["/edev/1", "/edev/2"],
         )
@@ -5285,6 +5283,243 @@ class TestSupersededEventGivesUpItsModes:
         assert held_by_a == frozenset()
         assert held_by_b == frozenset({self.MAX_LIM_W})
         assert a_on_other_device == frozenset({self.MAX_LIM_W})
+
+
+class TestInitialDefaultAppliesModesNoEventControls:
+    """A default sets the modes no active event controls, even on a device with an event.
+
+    IEEE 2030.5-2023 §10.10.4.2.1 reads per DERControl Mode: a mode with no
+    active DERControl in any program is managed by the DefaultDERControl, and
+    that holds while an event runs on the device for other modes.
+    """
+
+    FIXED_W = "op_mod_fixed_w"
+    MAX_LIM_W = "op_mod_max_lim_w"
+    GEN_LIM_W = "opModGenLimW"
+
+    @staticmethod
+    def _default(m_rid: bytes, **modes: object) -> DefaultDercontrol:
+        return DefaultDercontrol(
+            m_rid=MRidtype(value=m_rid), dercontrol_base=DercontrolBase(**modes)
+        )
+
+    @staticmethod
+    def _sent(dispatcher: AsyncMock) -> list[frozenset[str]]:
+        return [
+            get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control.await_args_list
+        ]
+
+    def _processor(
+        self,
+        dispatcher: AsyncMock,
+        *,
+        event_base: DercontrolBase,
+        default: DefaultDercontrol | None,
+        devices: list[str] | None = None,
+    ) -> tuple[EventProcessor, DiscoveredState, int]:
+        """An event running on /edev/1 under /derp/1, which holds ``default``."""
+        now = int(time.time())
+        state = _setup_state(
+            program_href="/derp/1",
+            primacy=1,
+            der_controls=[_make_derc(0x01, start=now - 10, duration=3600, base=event_base)],
+            dderc=default,
+            device_hrefs=devices or ["/edev/1"],
+        )
+        http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
+        http.post = AsyncMock(return_value=None)
+        return EventProcessor(http, state, dispatcher, asyncio.Event()), state, now
+
+    @pytest.mark.asyncio
+    async def test_the_modes_the_event_does_not_control_are_applied_during_the_event(self):
+        dispatcher = AsyncMock()
+        proc, _state, _now = self._processor(
+            dispatcher,
+            event_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+            default=self._default(
+                b"\x20" * 16,
+                op_mod_max_lim_w=PerCentControlType(value=9999),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+
+        await proc.process_controls("/derp/1")
+        await proc.shutdown()
+
+        assert self._sent(dispatcher) == [frozenset({self.FIXED_W})], (
+            "the default must set the mode no event controls, and leave the event's mode alone"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_default_naming_only_the_events_modes_writes_nothing(self):
+        dispatcher = AsyncMock()
+        proc, _state, _now = self._processor(
+            dispatcher,
+            event_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+            default=self._default(b"\x20" * 16, op_mod_max_lim_w=PerCentControlType(value=9999)),
+        )
+
+        await proc.process_controls("/derp/1")
+        await proc.shutdown()
+
+        assert dispatcher.apply_default_control.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_default_that_names_no_mode_waits_for_the_event_to_end(self):
+        dispatcher = AsyncMock()
+        proc, _state, _now = self._processor(
+            dispatcher,
+            event_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+            default=self._default(b"\x20" * 16),
+        )
+
+        await proc.process_controls("/derp/1")
+        await proc.shutdown()
+
+        assert dispatcher.apply_default_control.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_device_without_an_event_gets_the_whole_default(self):
+        """/edev/2 is in a second program that has no event, so nothing is held there."""
+        dispatcher = AsyncMock()
+        proc, state, now = self._processor(
+            dispatcher,
+            event_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+            default=self._default(
+                b"\x20" * 16,
+                op_mod_max_lim_w=PerCentControlType(value=9999),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+        state.end_devices["/edev/2"] = EndDeviceState(
+            device=_make_edev("/edev/2"), href="/edev/2", lfdi=b"\xbb" * 20
+        )
+        state.der_programs["/derp/2"] = DerProgramState(
+            program=_make_program("/derp/2", 1),
+            href="/derp/2",
+            primacy=1,
+            default_dercontrol=self._default(
+                b"\x21" * 16,
+                op_mod_max_lim_w=PerCentControlType(value=9999),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+            der_controls=[],
+        )
+        state.device_mapping.add("/derp/2", "/edev/2")
+
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/2")
+        await proc.shutdown()
+
+        written = {
+            call.args[0]: get_active_mode_names(call.args[1].dercontrol_base)
+            for call in dispatcher.apply_default_control.await_args_list
+        }
+        assert written == {
+            "/edev/1": frozenset({self.FIXED_W}),
+            "/edev/2": frozenset({self.FIXED_W, self.MAX_LIM_W}),
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_same_default_is_not_written_again_on_the_next_poll(self):
+        dispatcher = AsyncMock()
+        proc, _state, _now = self._processor(
+            dispatcher,
+            event_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+            default=self._default(
+                b"\x20" * 16,
+                op_mod_max_lim_w=PerCentControlType(value=9999),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+
+        await proc.process_controls("/derp/1")
+        await proc.process_controls("/derp/1")
+        await proc.shutdown()
+
+        assert self._sent(dispatcher) == [frozenset({self.FIXED_W})]
+
+    @pytest.mark.asyncio
+    async def test_a_default_that_changes_during_the_event_reaches_the_free_modes(self):
+        """The case the question was raised for: the default arrives while the event runs."""
+        dispatcher = AsyncMock()
+        proc, state, _now = self._processor(
+            dispatcher,
+            event_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+            default=None,
+        )
+        await proc.process_controls("/derp/1")
+        assert dispatcher.apply_default_control.await_count == 0
+
+        state.der_programs["/derp/1"].default_dercontrol = self._default(
+            b"\x20" * 16,
+            op_mod_max_lim_w=PerCentControlType(value=9999),
+            op_mod_fixed_w=SignedPerCentControlType(value=1000),
+        )
+        await proc.process_controls("/derp/1")
+        await proc.shutdown()
+
+        assert self._sent(dispatcher) == [frozenset({self.FIXED_W})]
+
+    @pytest.mark.asyncio
+    async def test_the_whole_default_is_applied_when_the_event_ends(self):
+        dispatcher = AsyncMock()
+        event_base = DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000))
+        proc, state, now = self._processor(
+            dispatcher,
+            event_base=event_base,
+            default=self._default(
+                b"\x20" * 16,
+                op_mod_max_lim_w=PerCentControlType(value=9999),
+                op_mod_fixed_w=SignedPerCentControlType(value=1000),
+            ),
+        )
+        await proc.process_controls("/derp/1")
+        dispatcher.reset_mock()
+
+        state.der_programs["/derp/1"].der_controls = [
+            _make_derc(0x01, start=now - 10, duration=3600, current_status=2, base=event_base)
+        ]
+        await proc.process_controls("/derp/1")
+        await proc.shutdown()
+
+        assert frozenset({self.FIXED_W, self.MAX_LIM_W}) in self._sent(dispatcher)
+
+    @pytest.mark.asyncio
+    async def test_a_csipaus_limit_the_event_sets_is_left_out_of_the_default(self):
+        """The case from the question: the event holds opModGenLimW, the default names two modes."""
+        from py20305.xml import from_xml
+
+        event_base = from_xml(
+            b'<DERControlBase xmlns="urn:ieee:std:2030.5:ns" '
+            b'xmlns:csipaus="https://csipaus.org/ns">'
+            b"<csipaus:opModGenLimW><multiplier>0</multiplier><value>4000</value>"
+            b"</csipaus:opModGenLimW></DERControlBase>",
+            DercontrolBase,
+        )
+        default_base = from_xml(
+            b'<DERControlBase xmlns="urn:ieee:std:2030.5:ns" '
+            b'xmlns:csipaus="https://csipaus.org/ns">'
+            b"<opModMaxLimW>5000</opModMaxLimW>"
+            b"<csipaus:opModGenLimW><multiplier>0</multiplier><value>7000</value>"
+            b"</csipaus:opModGenLimW></DERControlBase>",
+            DercontrolBase,
+        )
+        dispatcher = AsyncMock()
+        proc, _state, _now = self._processor(
+            dispatcher,
+            event_base=event_base,
+            default=DefaultDercontrol(
+                m_rid=MRidtype(value=b"\x20" * 16), dercontrol_base=default_base
+            ),
+        )
+
+        await proc.process_controls("/derp/1")
+        await proc.shutdown()
+
+        assert self._sent(dispatcher) == [frozenset({self.MAX_LIM_W})]
 
 
 class _MeterAwareDispatcher(NullDispatcher):

@@ -1564,7 +1564,7 @@ class EventProcessor:
         # For each device, find the highest-priority program with a DDERC.
         # A shared device may belong to multiple programs; on event completion,
         # it should revert to the best (lowest primacy number) DDERC available.
-        dderc_targets: list[tuple[str, bytes, DerProgramState, DefaultDercontrol, bool]] = []
+        dderc_targets: list[tuple[str, bytes, DerProgramState, DefaultDercontrol]] = []
         # Modes the ended event set that the default does not carry. The
         # default only writes the modes it names, so these would stay in
         # effect on the device unless they are disabled here.
@@ -1634,7 +1634,7 @@ class EventProcessor:
             # goes out: it always did, and masking cannot have emptied it.
             emptied = bool(carried) and not written
             if not emptied and self._dderc_tracker.should_apply(lfdi, best.href, best.primacy):
-                dderc_targets.append((dev_href, lfdi, best, effective, bool(taken)))
+                dderc_targets.append((dev_href, lfdi, best, effective))
 
         # Dispatch DDERC in parallel, then update tracker for successes.
         # With a group lookup supplied, each server-side EDev resolves
@@ -1642,18 +1642,15 @@ class EventProcessor:
         # Cache the lookup per target so a mid-await groups rebuild can't
         # change the fan-out width between the build and attribution loops.
         if dderc_targets:
-            plans: list[
-                tuple[str, bytes, DerProgramState, list[str] | None, DefaultDercontrol, bool]
-            ] = [
+            plans: list[tuple[str, bytes, DerProgramState, list[str] | None, DefaultDercontrol]] = [
                 (
                     dev_href,
                     lfdi,
                     best_prog,
                     self._group_local_lfdis(best_prog.href),
                     effective,
-                    is_partial,
                 )
-                for dev_href, lfdi, best_prog, effective, is_partial in dderc_targets
+                for dev_href, lfdi, best_prog, effective in dderc_targets
             ]
             # Both reasons land on the same DDERC write, and they read very
             # differently in an audit trail: "an event ended so the default came
@@ -1664,7 +1661,7 @@ class EventProcessor:
                 CommandOrigin.COMMS_LOSS if self._comms_loss.active else CommandOrigin.DDERC_REAPPLY
             )
             coros: list[Coroutine[Any, Any, None]] = []
-            for dev_href, _, best_prog, local_lfdis, dderc, _is_partial in plans:
+            for dev_href, _, best_prog, local_lfdis, dderc in plans:
                 if local_lfdis is not None:
                     coros.extend(
                         self._dispatcher.apply_default_control_by_lfdi(
@@ -1692,7 +1689,7 @@ class EventProcessor:
             # per dderc_target); collapse per-fan-out results down to one
             # success per target so the tracker isn't double-recorded.
             idx = 0
-            for dev_href, lfdi, best_prog, local_lfdis, dderc, is_partial in plans:
+            for dev_href, lfdi, best_prog, local_lfdis, dderc in plans:
                 n = len(local_lfdis) if local_lfdis is not None else 1
                 target_results = results[idx : idx + n]
                 idx += n
@@ -1704,13 +1701,15 @@ class EventProcessor:
                         dev_href,
                         failure,
                     )
-                elif not is_partial:
+                else:
                     # The default's mRID, not the ended event's: the
                     # initial-default pass compares against it to skip a
-                    # default that is already in place. Not recorded for a
-                    # default sent without some of its modes -- the device does
-                    # not have that default, and the event still running has to
-                    # be able to bring the whole of it back when it ends.
+                    # default that is already in place. Recorded for a default
+                    # sent without some of its modes too, since that pass sends
+                    # the same partial default to a device that still has a
+                    # running event and would otherwise write it a second time.
+                    # The event still running can bring the whole default back
+                    # when it ends: this fallback checks primacy, not the mRID.
                     self._dderc_tracker.record_application(
                         lfdi, best_prog.href, dderc.m_rid.value, best_prog.primacy
                     )
@@ -1785,14 +1784,21 @@ class EventProcessor:
                 )
 
     async def _apply_initial_dderc(self, program_href: str) -> None:
-        """Apply DDERC to devices with no active events from any program.
+        """Apply the program's DefaultDERControl to each device, mode by mode.
 
-        Called at the end of process_controls to ensure devices are in their
-        default operating state when no event overrides it. Only applies if:
+        Called at the end of process_controls so a device is in its default
+        operating state wherever no event overrides it. IEEE 2030.5-2023
+        §10.10.4.2.1 reads per DERControl Mode: a mode with no active event in
+        any program is managed by the default of the program with the lowest
+        primacy that contains it. A device that has an active event therefore
+        still takes the default's modes that no event controls there, and
+        does not take the modes an event does control. Applies only if:
         - The program has a DefaultDERControl
-        - The device has no ACTIVE event from ANY program
         - No wind-down timers are pending (cancelled event with delayed fallback)
         - The DDERC hasn't already been applied (tracked by DdercTracker)
+        - The default names a mode no active event controls on the device. A
+          default that names no mode at all waits for the device's active
+          events to end.
         """
         derp_state = self._state.der_programs.get(program_href)
         if derp_state is None or derp_state.default_dercontrol is None:
@@ -1819,10 +1825,9 @@ class EventProcessor:
             logger.debug("Initial DDERC skip %s: no devices in mapping", program_href)
             return
 
-        # Build set of devices that have an ACTIVE event in ANY program.
-        # These devices are already under event control and must not get DDERC.
-        # Opted-out events (comms-loss) don't control their devices -- the device
-        # was reverted to DDERC -- so they're excluded here, consistent with
+        # Devices that have an ACTIVE event in ANY program. Opted-out events
+        # (comms-loss) don't control their devices -- the device was reverted to
+        # DDERC -- so they're excluded here, consistent with
         # _apply_dderc_fallback's "other active" check. A device the event was
         # *rejected* on is the same situation and excluded for the same reason:
         # the control was refused, so nothing is holding that device, and without
@@ -1836,72 +1841,76 @@ class EventProcessor:
                 if d not in evt.superseded_devices and d not in evt.rejected_devices:
                     active_devices.add(d)
 
-        curves = derp_state.der_curves
         dderc_mrid = derp_state.default_dercontrol.m_rid.value
+        carried = get_active_mode_names(derp_state.default_dercontrol.dercontrol_base)
 
-        targets: list[tuple[str, bytes]] = []
+        # Each target is sent the default without the modes the running events
+        # hold where the write lands. A device with no running event gets the
+        # whole default. Under a group lookup the write reaches the program's
+        # local devices whichever server-side device it was decided for, so every
+        # target resolves to the same reach and the same held modes.
+        targets: list[tuple[str, bytes, DefaultDercontrol]] = []
         for dev_href in devices:
-            if dev_href in active_devices:
-                continue
             lfdi = self._get_device_lfdi(dev_href)
             if lfdi is None:
                 continue
 
-            if self._dderc_tracker.should_apply_initial(
+            if not self._dderc_tracker.should_apply_initial(
                 lfdi, program_href, dderc_mrid, derp_state.primacy
             ):
-                targets.append((dev_href, lfdi))
-            else:
                 logger.debug(
                     "Initial DDERC skip %s: tracker blocked for %s (primacy=%d)",
                     program_href,
                     dev_href,
                     derp_state.primacy,
                 )
+                continue
+
+            held = self._modes_running_in(self._reach_of(program_href, [dev_href]), active_events)
+            taken = carried & held
+            if carried and not (carried - taken):
+                logger.debug(
+                    "Initial DDERC skip %s: every mode it names is being controlled on %s",
+                    program_href,
+                    dev_href,
+                )
+                continue
+            if not carried and dev_href in active_devices:
+                logger.debug(
+                    "Initial DDERC skip %s: %s has an active event and the default names no mode",
+                    program_href,
+                    dev_href,
+                )
+                continue
+            if taken:
+                logger.debug(
+                    "Initial DDERC from %s sent to %s without %s, which a running event controls",
+                    program_href,
+                    dev_href,
+                    sorted(taken),
+                )
+            effective = (
+                self._default_without(derp_state.default_dercontrol, taken)
+                if taken
+                else derp_state.default_dercontrol
+            )
+            targets.append((dev_href, lfdi, effective))
 
         if not targets:
             logger.debug("Initial DDERC skip %s: no eligible devices", program_href)
             return
-
-        # A device with an active event is not a target, which is decided one
-        # server-side device at a time. Under a group lookup the write is not
-        # sent that way: each target fans out to every local device of the
-        # program, so a device correctly left out as a target is written to
-        # anyway as part of another target's fan-out. Send the default without
-        # the modes those events are running, as the end-of-event fallback does.
-        held = self._modes_running_in(
-            self._reach_of(program_href, [device for device, _ in targets]), active_events
-        )
-        carried = get_active_mode_names(derp_state.default_dercontrol.dercontrol_base)
-        taken = carried & held
-        if carried and not (carried - taken):
-            logger.debug(
-                "Initial DDERC skip %s: every mode it names is being controlled",
-                program_href,
-            )
-            return
-        dderc = (
-            self._default_without(derp_state.default_dercontrol, taken)
-            if taken
-            else derp_state.default_dercontrol
-        )
-        if taken:
-            logger.debug(
-                "Initial DDERC from %s sent without %s, which a running event controls",
-                program_href,
-                sorted(taken),
-            )
 
         logger.info(
             "Applying initial DDERC from %s to %d device(s)",
             program_href,
             len(targets),
         )
+        curves = derp_state.der_curves
         # With a group lookup supplied, each server-side EDev resolves
         # to the program's local sub-device LFDIs.
         local_lfdis = self._group_local_lfdis(program_href)
         coros: list[Coroutine[Any, Any, None]] = []
-        for dev_href, _ in targets:
+        for dev_href, _, dderc in targets:
             if local_lfdis is not None:
                 coros.extend(
                     self._dispatcher.apply_default_control_by_lfdi(lfdi, dderc, curves)
@@ -1913,13 +1922,17 @@ class EventProcessor:
 
         per_target_n = len(local_lfdis) if local_lfdis is not None else 1
         idx = 0
-        for dev_href, lfdi in targets:
+        for dev_href, lfdi, _ in targets:
             target_results = results[idx : idx + per_target_n]
             idx += per_target_n
             failure = self._default_control_failure(target_results)
             if failure is not None:
                 logger.warning("Initial DDERC dispatch to %s failed: %s", dev_href, failure)
             else:
+                # Recorded for a default sent without some of its modes too, so
+                # the next poll does not write it again. This does not stop the
+                # end of the running event bringing the whole default back: the
+                # fallback checks primacy, and the program is the same.
                 self._dderc_tracker.record_application(
                     lfdi, program_href, dderc_mrid, derp_state.primacy
                 )

@@ -569,6 +569,13 @@ unsupported, because only one of them is anybody's mistake:
 Overriding the method is what support means. A connector that overrides nothing
 is not silently credited with accepting every command.
 
+A DERControl that names several modes is applied for the modes the connector
+implements, and the rest are skipped: IEEE 2030.5-2023 §10.10.4.2.1 lets a
+client "reject or partially act upon" a control for its capabilities. A control
+none of whose modes the connector implements applies nothing, so the client
+answers it as rejected (Table 31 status 251, or 252 for a 2018 server) and does
+not report it as started.
+
 ## Reacting to the schedule
 
 The write path delivers setpoints. Separately, the client pushes a connector the
