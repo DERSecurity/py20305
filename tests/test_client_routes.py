@@ -518,3 +518,36 @@ class TestTimeRoute:
             props = content["application/json"]["schema"]["properties"]
             assert "current_time" in props
             assert "dst_active" in props
+
+
+class TestTimeRouteWithFsaOnlyTime:
+    def _fsa_only_client(self) -> TestClient:
+        service = _make_service()
+        tb = ServerTimebase(drift_warn_seconds=0)
+        with patch("time.time", return_value=1_000.0):
+            tb.observe(1_030, fsa_href="/fsa/1", quality=3, href="/fsa/1/tm")
+        service._client.http.timebase = tb
+        service._client.state.time = None
+        service._client.state.fsa_time = {}
+        return TestClient(_make_test_app(service))
+
+    def test_a_head_end_publishing_time_only_per_fsa_answers_200_with_the_fsa_scope(self) -> None:
+        client = self._fsa_only_client()
+
+        with patch("time.time", return_value=1_000.0):
+            r = client.get("/api/v1/time")
+
+        assert r.status_code == 200
+        data = r.json()
+        assert data["current_time"] == 1_030
+        assert data["scope"] == "fsa"
+        assert data["fsa_href"] == "/fsa/1"
+
+    def test_the_text_variant_is_a_bare_integer_for_an_fsa_reading(self) -> None:
+        client = self._fsa_only_client()
+
+        with patch("time.time", return_value=1_000.0):
+            r = client.get("/api/v1/time?format=text")
+
+        assert r.status_code == 200
+        assert r.text == "1030"

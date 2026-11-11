@@ -94,6 +94,9 @@ $ curl http://127.0.0.1:8080/api/v1/time
   "offset_seconds": 12.482,
   "age_seconds": 43.1,
   "href": "/tm",
+  "scope": "global",
+  "fsa_href": null,
+  "spread_seconds": null,
   "timebase_enabled": true
 }
 ```
@@ -122,9 +125,32 @@ advertises on DeviceCapability (the Time resource carries none of its own),
 plus the connectivity heartbeat, and the reading is served from that cached
 offset, so polling this endpoint costs nothing upstream.
 
+### Which Time resource answered
+
+`scope` says which Time resource the reading comes from. `"global"` is the one
+the head-end links from DeviceCapability. A head-end may link Time only from
+its FunctionSetAssignments instead (IEEE 2030.5 §9.2.3 ties each FSA's events
+to that FSA's own Time resource), and the client then holds an observation per
+FSA and no global one. The endpoint answers from one of them: `scope` is
+`"fsa"`, `fsa_href` names the FSA, `href` is its Time resource, and `local_time`
+and the time zone fields come from that Time resource.
+
+The FSA observations are separate readings and can disagree. The endpoint
+prefers the observation with the lowest `quality`, because IEEE 2030.5 defines
+smaller values as more accurate time sources, and among equals the most
+recently observed. An observation older than the staleness threshold
+(`fsa_stale_seconds` in `/status`) is passed over while a fresher one exists;
+if every observation is that old, the most recent one answers, and
+`age_seconds` shows how old it is. `spread_seconds` is the largest difference
+between the FSAs' offsets, so a consumer can refuse a reading when the head-end
+is inconsistent with itself. It is `null` for a global reading and when only
+one FSA was observed. A global observation always wins when one exists. An FSA the
+server stops listing is forgotten, so it cannot answer or widen the spread.
+
 ### When there is no answer
 
-If no Time resource has been observed, the endpoint returns **503** with
+If no Time resource has been observed, from DeviceCapability or from any
+FunctionSetAssignments, the endpoint returns **503** with
 `"source": "unavailable"` and every derived field `null`. It does not fall back
 to the local clock. That fallback is the one failure a caller cannot detect for
 itself: the unsynchronized clock is exactly the value that looks right and is

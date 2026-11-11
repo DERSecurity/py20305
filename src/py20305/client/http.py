@@ -264,7 +264,9 @@ class Sep2Client:
         # (and tests) compare sessions by identity to detect a rebuild.
         self._gated_session: GatedSession | None = None
         self._traffic_recorder = traffic_recorder
-        self._csip_aus_mode = False
+        # What discovery saw, and what the caller forced; a forced value wins.
+        self._csip_aus_detected = False
+        self._csip_aus_override: bool | None = None
         self._csipaus_namespace = NS_CSIPAUS
         self._timebase = timebase or ServerTimebase()
         #: What the operator configured; the base may still be ``auto``.
@@ -567,12 +569,29 @@ class Sep2Client:
 
     @property
     def csip_aus_mode(self) -> bool:
-        """Whether CSIP-AUS namespace should be included in XML payloads."""
-        return self._csip_aus_mode
+        """Whether CSIP-AUS extensions are written in XML payloads.
+
+        A value the caller assigned, or the configured extension list, decides.
+        Without one, this is what discovery last detected from the server's
+        DeviceCapability.
+        """
+        if self._csip_aus_override is not None:
+            return self._csip_aus_override
+        return self._csip_aus_detected
 
     @csip_aus_mode.setter
     def csip_aus_mode(self, value: bool) -> None:
-        self._csip_aus_mode = value
+        """Force CSIP-AUS extensions on or off; discovery no longer changes the result."""
+        self._csip_aus_override = value
+
+    def observe_csip_aus_detection(self, detected: bool) -> None:
+        """Record whether discovery found CSIP-AUS on the server.
+
+        Each discovery replaces the previous detection, so a server that stops
+        declaring CSIP-AUS turns the extensions off again. A value forced
+        through ``csip_aus_mode`` is not touched.
+        """
+        self._csip_aus_detected = detected
 
     @property
     def csipaus_namespace(self) -> str:
@@ -1346,7 +1365,7 @@ class Sep2Client:
         """POST a resource. Returns the Location header if present."""
         body = to_xml(
             resource,
-            include_csipaus=self._csip_aus_mode,
+            include_csipaus=self.csip_aus_mode,
             csipaus_namespace=self._csipaus_namespace,
             profile=self._profile,
         )
@@ -1420,7 +1439,7 @@ class Sep2Client:
         """PUT a resource. Returns the HTTP status code."""
         body = to_xml(
             resource,
-            include_csipaus=self._csip_aus_mode,
+            include_csipaus=self.csip_aus_mode,
             csipaus_namespace=self._csipaus_namespace,
             profile=self._profile,
         )

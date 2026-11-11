@@ -16,6 +16,7 @@ from py20305.client.discovery import (
     refresh_function_set_assignments,
 )
 from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
+from py20305.client.http import Sep2Client
 from py20305.client.poll_rate import DEFAULT_POLL_RATE
 from py20305.client.state import DiscoveredState
 from py20305.client.timebase import ServerTimebase
@@ -214,6 +215,9 @@ class _MockClient:
 
     def observe_device_capability(self, body: bytes) -> ServerProfile:
         return self.profile
+
+    def observe_csip_aus_detection(self, detected: bool) -> None:
+        self.csip_aus_detected = detected
 
     async def get(self, path: str, model_type: type) -> Any:
         self.calls.append(("get", path))
@@ -2523,3 +2527,103 @@ async def test_fsa_list_fault_between_pages_is_an_error(
     assert state.end_devices["/edev/1"].fsa_list == []
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert any(f"stopped answering between pages ({status})" in m for m in errors)
+
+
+_AUS_DCAP = (
+    b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns" xmlns:csipaus="https://csipaus.org/ns"/>'
+)
+_PLAIN_DCAP = b'<DeviceCapability xmlns="urn:ieee:std:2030.5:ns"/>'
+
+
+def _http_client_serving(raw_dcap: list[bytes]) -> Sep2Client:
+    """Return a real HTTP client whose DeviceCapability body is the last item of ``raw_dcap``."""
+    client = Sep2Client("https://server.example")
+
+    async def get_with_body(path: str, model_type: type) -> tuple[Any, bytes]:
+        return _make_dcap(edev_href=None), raw_dcap[-1]
+
+    async def get(path: str, model_type: type) -> Any:
+        return _make_time()
+
+    client.get_with_body = get_with_body  # type: ignore[method-assign]
+    client.get = get  # type: ignore[method-assign]
+    return client
+
+
+@pytest.mark.asyncio
+async def test_discovery_turns_the_http_clients_csip_aus_flag_on_for_a_csip_aus_server():
+    client = _http_client_serving([_AUS_DCAP])
+    assert client.csip_aus_mode is False
+
+    await discover(client, DiscoveredState())
+
+    assert client.csip_aus_mode is True
+
+
+@pytest.mark.asyncio
+async def test_discovery_leaves_the_http_clients_csip_aus_flag_off_for_a_plain_server():
+    client = _http_client_serving([_PLAIN_DCAP])
+
+    await discover(client, DiscoveredState())
+
+    assert client.csip_aus_mode is False
+
+
+@pytest.mark.asyncio
+async def test_rediscovery_follows_a_server_that_changes_its_csip_aus_declaration():
+    bodies = [_PLAIN_DCAP]
+    client = _http_client_serving(bodies)
+    state = DiscoveredState()
+
+    await discover(client, state)
+    bodies.append(_AUS_DCAP)
+    await discover(client, state)
+    assert client.csip_aus_mode is True
+
+    bodies.append(_PLAIN_DCAP)
+    await discover(client, state)
+    assert client.csip_aus_mode is False
+
+
+@pytest.mark.parametrize("forced", [True, False])
+@pytest.mark.asyncio
+async def test_a_csip_aus_flag_forced_by_the_caller_survives_discovery_and_rediscovery(forced):
+    bodies = [_PLAIN_DCAP if forced else _AUS_DCAP]
+    client = _http_client_serving(bodies)
+    client.csip_aus_mode = forced
+    state = DiscoveredState()
+
+    await discover(client, state)
+    assert client.csip_aus_mode is forced
+
+    bodies.append(_AUS_DCAP if forced else _PLAIN_DCAP)
+    await discover(client, state)
+    assert client.csip_aus_mode is forced
+
+
+@pytest.mark.asyncio
+async def test_full_rediscovery_forgets_the_time_observation_of_an_fsa_the_server_withdrew():
+    edev = _make_edev("/edev/1")
+    edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    fsa1 = _make_fsa("/fsa/1", derp_list_href="/fsa/1/derp", time_href="/fsa/1/tm")
+    fsa2 = _make_fsa("/fsa/2", derp_list_href="/fsa/2/derp", time_href="/fsa/2/tm")
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev),
+            "/edev/1/fsa": _make_fsa_list(fsa1, fsa2),
+            "/fsa/1/derp": _make_derp_list(_make_derp("/derp/1")),
+            "/fsa/2/derp": _make_derp_list(_make_derp("/derp/2")),
+            "/fsa/1/tm": _make_time(),
+            "/fsa/2/tm": _make_time(),
+        }
+    )
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+    assert set(client.timebase.snapshot()["per_fsa"]) == {"/fsa/1", "/fsa/2"}
+
+    client._responses["/edev/1/fsa"] = _make_fsa_list(fsa1)
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert set(client.timebase.snapshot()["per_fsa"]) == {"/fsa/1"}

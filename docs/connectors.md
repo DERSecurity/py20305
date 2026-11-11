@@ -271,7 +271,7 @@ reported; an explicit 0 is.
 | `rtgVNom`, `rtgMaxV`, `rtgMinV` | |
 | `rtgReactiveSusceptance`, `rtgNormalCategory`, `rtgAbnormalCategory` | |
 | `modesSupported` | DERControlType bitmap, as a Python `int` from 0 to 4294967295. Any other type or range is reported as `00000000` and logged as a warning |
-| `doeModesSupported` | CSIP-AUS extension bitmap; defaults to all four limits |
+| `doeModesSupported` | CSIP-AUS extension bitmap (bit 0 export, 1 import, 2 generation, 3 load limit). Defaults to the limits the connector implements: a connector that overrides none of the four `update_op_mod_*_lim_w` methods reports `0`. A value returned here replaces the default |
 
 | `fetch_configuration` key | Notes |
 |---|---|
@@ -283,7 +283,7 @@ reported; an explicit 0 is.
 | `setVNom`, `setMaxV`, `setMinV` | |
 | `setGradW` | |
 | `modesEnabled` | DERControlType bitmap, as a Python `int` from 0 to 4294967295. Any other type or range is left out and logged as a warning |
-| `doeModesEnabled` | CSIP-AUS extension bitmap; defaults to the export and import limits |
+| `doeModesEnabled` | CSIP-AUS extension bitmap, bits as for `doeModesSupported`. Defaults to the limits the connector implements. A value returned here replaces the default |
 
 The absorbed reactive power limits are negative numbers. IEEE 2030.5-2023 says
 of `setMaxVarNeg`: "If present, SHALL be a negative value >= rtgMaxVarNeg
