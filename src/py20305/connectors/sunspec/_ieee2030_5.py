@@ -19,6 +19,9 @@ upward is IEEE 2030.5, so the conversion happens here, in both directions:
   ``alarmStatus`` bits 3, 4, 1 and 2, and the other alarms are not carried.
 - Ratings and settings: the model 702 points take their DERCapability and
   DERSettings element names. ``AMaxRtg`` with ``A_SF`` is ``rtgMaxA``.
+  ``CtrlModes`` is re-expressed as a DERControlType bitmap, and the operating
+  categories are renumbered to the IEEE 2030.5 values, which count from 1 with
+  0 meaning not specified.
 - Controls: each IEEE 2030.5 element becomes the core's write, with its
   parameters in the units the core takes.
 
@@ -30,9 +33,10 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
+from py20305.connectors.control_errors import ModeNotSupportedError
 from py20305.connectors.reading import Reading, is_valid_reading
 
 # ---------------------------------------------------------------------------
@@ -339,13 +343,79 @@ def _negative(value: Any) -> Any:
     return value
 
 
+#: Model 702 ``CtrlModes`` bit -> the DERControlType bits (IEEE 2030.5-2023
+#: DERControlType) of the controls this connector applies for that function.
+#: ``CtrlModes`` has its own bit layout, so its bits cannot be reported as they
+#: are. Fixed power factor is one SunSpec function and two IEEE 2030.5 controls,
+#: injecting (bit 5) and absorbing (bit 4), both written through model 704.
+#: Frequency-Watt is applied as the model 711 droop, opModFreqDroop (bit 8).
+#: Dynamic reactive current, the trip functions and scheduling have no control
+#: the connector applies, so no bit is reported for them.
+_CTRL_MODE_BITS: dict[int, tuple[int, ...]] = {
+    0: (20,),  # MAX_W -> opModMaxLimW
+    1: (7,),  # FIXED_W -> opModFixedW
+    2: (6,),  # FIXED_VAR -> opModFixedVar
+    3: (4, 5),  # FIXED_PF -> opModFixedPFAbsorbW, opModFixedPFInjectW
+    4: (23,),  # VOLT_VAR -> opModVoltVar
+    5: (8,),  # FREQ_WATT -> opModFreqDroop
+    9: (26,),  # WATT_VAR -> opModWattVar
+    10: (24,),  # VOLT_WATT -> opModVoltWatt
+}
+
+
+def _control_modes(value: Any) -> int | None:
+    """Return the DERControlType bitmap for a model 702 ``CtrlModes`` value, or None."""
+    modes = _as_int(value)
+    if modes is None or modes < 0:
+        return None
+    bitmap = 0
+    for sunspec_bit, bits in _CTRL_MODE_BITS.items():
+        if modes & (1 << sunspec_bit):
+            for bit in bits:
+                bitmap |= 1 << bit
+    return bitmap
+
+
+def _category(count: int) -> Callable[[Any], int | None]:
+    """Return a converter from a SunSpec operating category to the IEEE 2030.5 one.
+
+    SunSpec numbers its ``count`` categories from 0 (CAT_A, CAT_1). IEEE 2030.5
+    reserves 0 for not specified and numbers them from 1. A value outside the
+    categories is dropped rather than reported as a reserved value.
+    """
+
+    def convert(value: Any) -> int | None:
+        category = _as_int(value)
+        return category + 1 if category is not None and 0 <= category < count else None
+
+    return convert
+
+
+#: Elements whose SunSpec value is not the IEEE 2030.5 value as read. The
+#: converter returns None for a value that has no IEEE 2030.5 form.
+_CONVERTED: dict[str, Callable[[Any], Any]] = {
+    "modesSupported": _control_modes,
+    "modesEnabled": _control_modes,
+    "rtgNormalCategory": _category(2),
+    "rtgAbnormalCategory": _category(3),
+}
+
+
 def _renamed(values: Mapping[str, Any], names: Mapping[str, str]) -> dict[str, Any]:
-    """Return the values with an element name, renamed; drop the rest."""
-    return {
-        names[key]: _negative(value) if names[key] in _NEGATIVE_ELEMENTS else value
-        for key, value in values.items()
-        if key in names
-    }
+    """Return the values with an element name, converted where needed; drop the rest."""
+    out: dict[str, Any] = {}
+    for key, value in values.items():
+        element = names.get(key)
+        if element is None:
+            continue
+        if element in _NEGATIVE_ELEMENTS:
+            value = _negative(value)
+        elif element in _CONVERTED:
+            value = _CONVERTED[element](value)
+            if value is None:
+                continue
+        out[element] = value
+    return out
 
 
 def nameplate(values: Mapping[str, Any], model_702: Any = None) -> dict[str, Any]:
@@ -449,20 +519,58 @@ def _power_factor(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+#: SunSpec ``DeptRef`` (curve dependent reference) for each IEEE 2030.5
+#: ``yRefType`` (DERUnitRefType), by core method. A volt-var or watt-var curve
+#: is in %setMaxW, %setMaxVar, %statVarAvail or %setMaxVA, and a volt-watt curve
+#: in %setMaxW or %statWAvail (IEEE 2030.5-2023, opModVoltVar, opModVoltWatt and
+#: DERUnitRefType). SunSpec models 705 and 712 number them W_MAX_PCT 0,
+#: VAR_MAX_PCT 1, VAR_AVAL_PCT 2, VA_MAX_PCT 3; model 706 W_MAX_PCT 0 and
+#: W_AVAL_PCT 1. A ``yRefType`` not listed has no SunSpec equivalent.
+_DEPT_REF: dict[str, dict[int, int]] = {
+    "update_qv": {1: 0, 2: 1, 3: 2, 8: 3},
+    "update_qp": {1: 0, 2: 1, 3: 2, 8: 3},
+    "update_pv": {1: 0, 7: 1},
+}
+_CURVE_ELEMENT = {
+    "update_qv": "opModVoltVar",
+    "update_pv": "opModVoltWatt",
+    "update_qp": "opModWattVar",
+}
+
+
+def _dept_ref(method: str, curve: Mapping[str, Any]) -> int:
+    """Return the SunSpec ``DeptRef`` for the curve's ``yRefType``.
+
+    Raises:
+        ModeNotSupportedError: the ``yRefType`` has no SunSpec curve reference on
+            this model, so the curve cannot be applied as the server meant it.
+    """
+    y_ref = curve.get("yRefType")
+    dept_ref = _DEPT_REF[method].get(y_ref) if isinstance(y_ref, int) else None
+    if dept_ref is None:
+        raise ModeNotSupportedError(
+            f"{_CURVE_ELEMENT[method]} curve has yRefType {y_ref!r}, which has no "
+            f"SunSpec curve reference on this model; not applied"
+        )
+    return dept_ref
+
+
 def _core_params(method: str, value: Any) -> dict[str, Any]:
     """Return the core's parameters for an element's IEEE 2030.5 value."""
     if method in _CURVE_PREFIX:
         prefix = _CURVE_PREFIX[method]
+        dept_ref = _dept_ref(method, value)
         x, y = _curve_points(value)
         params: dict[str, Any] = {f"{prefix}_mode_enable": 1, f"{prefix}_olrt": _open_loop(value)}
-        dept_ref = int(value.get("yRefType", 1)) - 1
         if method == "update_qv":
             vref = value.get("vRef")
+            tms = value.get("autonomousVRefTimeConstant")
             params |= {
-                "qv_vref": vref / 100 if vref is not None else 0,
+                "qv_vref": vref / 100 if vref is not None else None,
                 "qv_pri": 1,
                 "qv_vref_auto_ena": 1 if value.get("autonomousVRefEnable") is True else 0,
-                "qv_vref_olrt": value.get("autonomousVRefTimeConstant"),
+                # Hundredths of a second in IEEE 2030.5; the core takes seconds.
+                "qv_vref_olrt": tms / 100 if tms is not None else None,
                 "qv_deptref": dept_ref,
                 "qv_curve_v_pts": x,
                 "qv_curve_q_pts": y,
@@ -488,7 +596,8 @@ def _core_params(method: str, value: Any) -> dict[str, Any]:
             "pf_kof": value["kOF"] / 1000,
             "pf_kuf": value["kUF"] / 1000,
             "pf_olrt": value["openLoopTms"] / 100,
-            "pf_pmin": value.get("pMin"),
+            # Watts; the core converts them to the percent of rating model 711 takes.
+            "pf_pmin_w": _scaled(value["pMin"]) if value.get("pMin") is not None else None,
         }
     if method == "update_const_q":
         return {
