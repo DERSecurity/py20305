@@ -24,7 +24,7 @@ from py20305.client.polling import PollScheduler
 from py20305.client.timebase import ServerTimebase
 from py20305.commands import CommandObserver, NullCommandObserver
 from py20305.connectors.base import ConnectorError
-from py20305.connectors.modes import modes_supported2
+from py20305.connectors.modes import implemented_doe_modes, modes_supported2
 from py20305.telemetry.der_capability import build_der_capability
 from py20305.telemetry.der_settings import build_der_settings
 from py20305.telemetry.der_status import build_der_status
@@ -261,6 +261,7 @@ class DerResourceManager:
                 der_type=connector.der_type,
                 csip_aus_mode=self._client.csip_aus_mode,
                 modes_supported2=modes_supported2(connector),
+                doe_modes_implemented=implemented_doe_modes(connector),
                 profile=self._client.profile,
             )
             body = to_xml(
@@ -343,6 +344,7 @@ class DerResourceManager:
                     updated_time=int(self._timebase.now()),
                     csip_aus_mode=self._client.csip_aus_mode,
                     modes_supported2=modes_supported2(connector),
+                    doe_modes_implemented=implemented_doe_modes(connector),
                     profile=self._client.profile,
                 )
             except ValueError as e:
