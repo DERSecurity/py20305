@@ -1143,14 +1143,20 @@ class CsipClient:
                 self._event_processor.cancel_program(program_href)
                 # Clean up state
                 self._state.der_programs.pop(program_href, None)
+                await self._event_processor.release_cancelled_program(program_href)
 
     async def _do_poll_derp(self) -> None:
         logger.debug(
             "Polling derp: refreshing DER programs for %d end devices", len(self._state.end_devices)
         )
-        removed_programs = await refresh_der_programs(self._http, self._state) or []
+        withdrawn: list[tuple[str, str]] = []
+        removed_programs = (
+            await refresh_der_programs(self._http, self._state, withdrawn=withdrawn) or []
+        )
         for program_href in removed_programs:
             self._event_processor.cancel_program(program_href)
+            await self._event_processor.release_cancelled_program(program_href)
+        await self._event_processor.release_withdrawn_devices(withdrawn)
         n_progs = len(self._state.der_programs)
         logger.debug("Polling derp: refreshing controls for %d programs", n_progs)
         await refresh_der_controls(self._http, self._state)
@@ -1927,7 +1933,13 @@ class CsipClient:
                     # Re-fetch FSA and program hierarchy to catch resources added between
                     # discover() and subscription creation (same race as DERControl refresh).
                     await refresh_function_set_assignments(self._http, self._state)
-                    pruned_programs = await refresh_der_programs(self._http, self._state) or []
+                    withdrawn_pairs: list[tuple[str, str]] = []
+                    pruned_programs = (
+                        await refresh_der_programs(
+                            self._http, self._state, withdrawn=withdrawn_pairs
+                        )
+                        or []
+                    )
                     if self._subscription_manager:
                         await self._auto_subscribe()
                         self._update_poll_suppression()
@@ -1936,6 +1948,8 @@ class CsipClient:
                     all_removed = (previous_programs - current_programs) | set(pruned_programs)
                     for removed in all_removed:
                         self._event_processor.cancel_program(removed)
+                        await self._event_processor.release_cancelled_program(removed)
+                    await self._event_processor.release_withdrawn_devices(withdrawn_pairs)
                     # Re-fetch DER controls before processing: data from discover() may be
                     # stale if controls were written during subscription reconciliation.
                     await refresh_der_controls(self._http, self._state)

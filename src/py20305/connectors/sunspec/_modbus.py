@@ -178,6 +178,17 @@ _P_LIM_PCT_CONTROLS: dict[str, str] = {
 _GEN_LIM_DOE_BIT = 0x04
 _LOAD_LIM_DOE_BIT = 0x08
 
+#: Model 705 and 712 ``DeptRef`` values (curve dependent reference), and model
+#: 706's, where the volt-watt curve takes only the first two. The adapter picks
+#: the value for the curve's IEEE 2030.5 ``yRefType``; these are the values a
+#: caller that names none gets.
+_DEPT_REF_W_MAX_PCT = 0
+_DEPT_REF_VA_MAX_PCT = 3
+
+#: Model 705 ``VRef`` when the curve carries no ``vRef``: 100% of nominal, which
+#: leaves the curve points unadjusted.
+_VREF_UNADJUSTED_PCT = 100.0
+
 
 def _resolve_point(model: Any, dotted: str) -> Any:
     """Return the point at ``dotted`` (e.g. ``"PFWInj.PF"``).
@@ -373,6 +384,21 @@ def _require_uint16_watts(watts: float, w_sf: int, label: str) -> float:
     return watts
 
 
+def _whole_seconds(seconds: object, control: str, quantity: str) -> int:
+    """Return *seconds* rounded to whole seconds that fit a ``uint16`` register.
+
+    Model 705 ``VRefAutoTms`` has no scale factor, so the register holds whole
+    seconds. A value that cannot be held is refused before anything is written.
+    """
+    number = _as_number(seconds, control, quantity)
+    if not _U16_MIN <= number <= _U16_MAX:
+        raise ConnectorValueError(
+            f"{control} {quantity} {number:g} s does not fit a register holding "
+            f"{_U16_MIN} to {_U16_MAX} s; refusing to write."
+        )
+    return round(number)
+
+
 class SunSpecModbusConnector:
     """SunSpec Modbus connector for physical DER devices.
 
@@ -464,10 +490,9 @@ class SunSpecModbusConnector:
         # event and written back when the control clears. None means nothing is
         # mirrored, so there is nothing to restore.
         self._wmax_baseline: float | None = None
-        # Suppresses log noise after the first enable per device on the one
-        # combination that cannot be applied at all: opModMaxLimWAbsorb on a
-        # device implementing neither WChaRteMax nor any absorb-direction limit.
-        self._p_lim_abs_warned: bool = False
+        # (planned WMax, baseline) while a limit is rewritten ahead of a WMax
+        # increase; see _rewrite_ahead_of_wmax_increase.
+        self._wmax_plan: tuple[float, float] | None = None
         #: Controls already reported as unsupported by this device. A
         #: head-end re-sends a control every event, and an operator needs
         #: to see the gap once, not on every dispatch.
@@ -1006,25 +1031,41 @@ class SunSpecModbusConnector:
         return bits
 
     def _update_qv_sync(self, params: dict[str, Any]) -> None:
+        """Apply the Q(V) volt-var curve (IEEE 2030.5 ``opModVoltVar``).
+
+        The enable point is raised last, after the curve is written and adopted,
+        so a failed write leaves the function as it was and never enabled on a
+        curve the device did not take.
+        """
         model = self._get_model(705)
-        self._update_enable(model.Ena, params.get("qv_mode_enable", 0), "Voltage-Reactive Power")
 
         if params.get("qv_mode_enable") != 1:
+            self._update_enable(model.Ena, 0, "Voltage-Reactive Power")
             return
 
         auto_vref = 0 if not params.get("qv_vref_auto_ena") else 1
         v_pts = params.get("qv_curve_v_pts", [])
         q_pts = params.get("qv_curve_q_pts", [])
+        # The curve's own reference, not the device's previous one. Absent vRef
+        # leaves the curve points unadjusted, which is 100% of nominal (IEEE
+        # 2030.5-2023 opModVoltVar: the x values are multiplied by VRef / 10000
+        # only when VRef is present).
+        vref = params.get("qv_vref")
+        vref = _VREF_UNADJUSTED_PCT if vref is None else vref
+        # VRefAutoTms is whole seconds in a uint16 with no scale factor.
+        auto_tms = _whole_seconds(
+            params.get("qv_vref_olrt") or 0, "opModVoltVar", "autonomousVRefTimeConstant"
+        )
 
         crv = model.Crv[1]
         self._require_curve_capacity(crv, len(v_pts), "Volt-Var (Q(V))")
         crv.ActPt.value = len(v_pts)
-        crv.DeptRef.value = 3  # % VA Max
+        crv.DeptRef.value = params.get("qv_deptref", _DEPT_REF_VA_MAX_PCT)
         crv.Pri.value = 1  # Reactive power priority
         # Engineering cvalues -- pysunspec2 handles scale-factor rounding.
-        crv.VRef.cvalue = params.get("qv_vref", 0)
+        crv.VRef.cvalue = vref
         crv.VRefAutoEna.cvalue = auto_vref
-        crv.VRefAutoTms.cvalue = params.get("qv_vref_olrt") or 0
+        crv.VRefAutoTms.cvalue = auto_tms
         crv.RspTms.cvalue = params.get("qv_olrt") or 0
 
         for i, (v, q) in enumerate(zip(v_pts, q_pts, strict=True)):
@@ -1033,13 +1074,18 @@ class SunSpecModbusConnector:
 
         crv.write()
         self._adopt_curve(model)
+        self._update_enable(model.Ena, 1, "Voltage-Reactive Power")
 
     def _update_pv_sync(self, params: dict[str, Any]) -> None:
-        """Apply the P(V) volt-watt curve (uses .W.cvalue for curve points)."""
+        """Apply the P(V) volt-watt curve (uses .W.cvalue for curve points).
+
+        The enable point is raised after the curve is adopted; see
+        ``_update_qv_sync``.
+        """
         model = self._get_model(706)
-        self._update_enable(model.Ena, params.get("pv_mode_enable", 0), "Voltage-Active Power")
 
         if params.get("pv_mode_enable") != 1:
+            self._update_enable(model.Ena, 0, "Voltage-Active Power")
             return
 
         v_pts = params.get("pv_curve_v_pts", [])
@@ -1048,7 +1094,7 @@ class SunSpecModbusConnector:
         crv = model.Crv[1]
         self._require_curve_capacity(crv, len(v_pts), "Volt-Watt (P(V))")
         crv.ActPt.value = len(v_pts)
-        crv.DeptRef.value = 0  # % W Max
+        crv.DeptRef.value = params.get("pv_deptref", _DEPT_REF_W_MAX_PCT)
         crv.RspTms.cvalue = params.get("pv_olrt") or 0
 
         for i, (v, p) in enumerate(zip(v_pts, p_pts, strict=True)):
@@ -1057,14 +1103,18 @@ class SunSpecModbusConnector:
 
         crv.write()
         self._adopt_curve(model)
+        self._update_enable(model.Ena, 1, "Voltage-Active Power")
 
     def _update_qp_sync(self, params: dict[str, Any]) -> None:
+        """Apply the Q(P) watt-var curve.
+
+        The enable point is raised after the curve is adopted; see
+        ``_update_qv_sync``.
+        """
         model = self._get_model(712)
-        self._update_enable(
-            model.Ena, params.get("qp_mode_enable", 0), "Active Power-Reactive Power"
-        )
 
         if params.get("qp_mode_enable") != 1:
+            self._update_enable(model.Ena, 0, "Active Power-Reactive Power")
             return
 
         p_pts = params.get("qp_curve_p_pts", [])
@@ -1073,7 +1123,7 @@ class SunSpecModbusConnector:
         crv = model.Crv[1]
         self._require_curve_capacity(crv, len(p_pts), "Watt-Var (Q(P))")
         crv.ActPt.value = len(p_pts)
-        crv.DeptRef.value = 3  # % VA Max
+        crv.DeptRef.value = params.get("qp_deptref", _DEPT_REF_VA_MAX_PCT)
 
         for i, (p, q) in enumerate(zip(p_pts, q_pts, strict=True)):
             crv.Pt[i].W.cvalue = p
@@ -1081,10 +1131,40 @@ class SunSpecModbusConnector:
 
         crv.write()
         self._adopt_curve(model)
+        self._update_enable(model.Ena, 1, "Active Power-Reactive Power")
 
-    def _compute_merged_inject_pct(self) -> tuple[bool, float | None]:
+    def _wmax_scale(self) -> float:
+        """Return the factor from a percent of the device's own WMax to one of WMax now.
+
+        opModMaxLimW is a percent of setMaxW (IEEE 2030.5-2023, opModMaxLimW),
+        and setMaxW is what the device reported before this connector mirrored an
+        inject limit onto WMax. WMaxLimPct is a percent of the WMax register, so
+        while the mirror is in force a percent from the head-end is multiplied by
+        this factor. Without it a 60% limit under a 4000 W mirror of a 5000 W
+        WMax would hold 2400 W instead of 3000 W, and the result would depend on
+        which control arrived first.
+
+        1.0 when nothing is mirrored, or when either value is unusable.
+        """
+        if self._wmax_plan is not None:
+            planned, plan_baseline = self._wmax_plan
+            return plan_baseline / planned if planned else 1.0
+        baseline = self._wmax_baseline
+        if not baseline:
+            return 1.0
+        current = self._get_model(702).WMax.cvalue
+        if not current:
+            return 1.0
+        return float(baseline) / float(current)
+
+    def _compute_merged_inject_pct(self, any_scale: float = 1.0) -> tuple[bool, float | None]:
         """Collapse the active inject-direction p-limit slots into the
         single value that goes onto WMaxLimPct.
+
+        ``any_scale`` re-expresses the ``"any"`` percent, which is of the
+        device's own WMax, as a percent of the WMax register (see
+        ``_wmax_scale``). The result is held to 100%: the cap is then the WMax
+        register itself, which is as restrictive as the mirrored inject limit.
 
         ``opModMaxLimW`` ("any"), ``opModMaxLimWInject`` ("inj") and CSIP-AUS
         ``opModGenLimW`` ("gen") are independent constraints on the same
@@ -1103,7 +1183,7 @@ class SunSpecModbusConnector:
         for slot in _P_LIM_PCT_CONTROLS:
             enabled, value = self._p_lim_slots[slot]
             if enabled and value is not None:
-                candidates.append(value)
+                candidates.append(min(value * any_scale, _PCT_MAX) if slot == "any" else value)
         if not candidates:
             return (False, None)
         return (True, min(candidates))
@@ -1119,10 +1199,21 @@ class SunSpecModbusConnector:
         register. When no inject-direction slot is active the enable bit is
         driven low.
         """
+        previous = self._p_lim_slots[slot]
         self._p_lim_slots[slot] = (enabled, pct)
+        try:
+            self._write_merged_inject_pct(slot)
+        except Exception:
+            # Record only what the device accepted, so a later rewrite of this
+            # register (after the connector moves WMax) never replays a limit
+            # that was refused.
+            self._p_lim_slots[slot] = previous
+            raise
 
+    def _write_merged_inject_pct(self, slot: str) -> None:
+        """Write the merged value of the inject-direction slots to WMaxLimPct."""
         model = self._get_model(704)
-        merged_enabled, merged_value = self._compute_merged_inject_pct()
+        merged_enabled, merged_value = self._compute_merged_inject_pct(self._wmax_scale())
         # Checked before the enable: raising it over a register this device does
         # not implement asserts a limit nothing is holding. A teardown still
         # runs -- driving an enable low is safe whether or not the setpoint
@@ -1159,7 +1250,8 @@ class SunSpecModbusConnector:
         """Apply opModMaxLimW (the ``"any"`` slot).
 
         opModMaxLimW is PerCentControlType -- ``p_lim_w`` is already a percent
-        of WMax and goes straight onto WMaxLimPct. The watts-typed
+        of the device's own WMax (setMaxW) and goes onto WMaxLimPct, scaled
+        when an inject limit has moved WMax (see ``_wmax_scale``). The watts-typed
         opModMaxLimWInject / opModMaxLimWAbsorb controls are handled by
         ``_update_p_lim_w_sync``.
         """
@@ -1216,7 +1308,7 @@ class SunSpecModbusConnector:
 
         ``_apply_inject_pct_slot`` stores a slot before it checks the register
         and writes. A generation limit left recorded after a decline or a failed
-        write would later be put on the device by ``_refresh_gen_lim_pct``,
+        write would later be put on the device by ``_refresh_wmax_relative_limits``,
         through an unrelated inject limit, after the server was told it was not
         applied. The previous slot is restored rather than cleared, so an update
         that fails leaves the earlier limit recorded: that is what the device
@@ -1232,18 +1324,24 @@ class SunSpecModbusConnector:
         self._gen_lim_unconfirmed = False
         self._gen_lim_watts = watts
 
-    def _refresh_gen_lim_pct(self) -> None:
-        """Re-express an active opModGenLimW against the current WMax.
+    def _refresh_wmax_relative_limits(self) -> None:
+        """Write again the limits whose percent depends on WMax, after WMax moved.
 
-        Called after the connector itself moves WMax. Left alone, a limit set
-        while an inject limit had WMax lowered would allow more than its watts
-        once WMax is restored.
+        Called after the connector itself moves WMax. An opModGenLimW is held in
+        watts and converted against the current WMax; left alone, one set while
+        an inject limit had WMax lowered would allow more than its watts once WMax
+        is restored. An opModMaxLimW is held as the head-end's percent and scaled
+        against the mirror when written (see ``_wmax_scale``), so it is written
+        again for the same reason. Either write carries the merged value.
         """
-        if self._gen_lim_watts is None:
-            return
-        pct = self._watts_as_pct_of_wmax(self._gen_lim_watts, "opModGenLimW")
-        if pct is not None:
-            self._apply_gen_lim_slot(self._gen_lim_watts, pct)
+        if self._gen_lim_watts is not None:
+            pct = self._watts_as_pct_of_wmax(self._gen_lim_watts, "opModGenLimW")
+            if pct is not None:
+                self._apply_gen_lim_slot(self._gen_lim_watts, pct)
+                return
+        enabled, pct = self._p_lim_slots["any"]
+        if enabled and pct is not None:
+            self._apply_inject_pct_slot("any", enabled, pct)
 
     def _update_load_lim_sync(self, params: dict[str, Any]) -> None:
         """Apply CSIP-AUS opModLoadLimW, the maximum charge rate.
@@ -1352,8 +1450,8 @@ class SunSpecModbusConnector:
         These are settings registers with no enable bit. Clearing the absorb
         limit goes through ``_set_charge_limit``, which shares ``WChaRteMax``
         with CSIP-AUS opModLoadLimW and sets it to WChaRteMaxRtg when the last
-        charge limit clears. Clearing the inject limit writes nothing to
-        ``WDisChaRteMax`` yet (#66).
+        charge limit clears. Clearing the inject limit sets ``WDisChaRteMax`` to
+        WDisChaRteMaxRtg, see ``_clear_discharge_limit``.
         """
         if slot not in _P_LIM_W_CONTROLS:
             msg = f"_update_p_lim_w_sync expects 'inj' or 'abs', got {slot!r}"
@@ -1367,14 +1465,13 @@ class SunSpecModbusConnector:
             logger.warning("%s enabled but carried no value; nothing to apply", control)
 
         if not enabled or watts is None:
-            # WDisChaRteMax keeps its last written value for now (#66); the
-            # absorb limit is cleared through _set_charge_limit below. What the
-            # connector put there on its own initiative it does take back: the
-            # mirrored WMax, and an inject cap the fallback route installed on
-            # 704 WMaxLimPct, which would otherwise outlive the event that
-            # imposed it.
+            # The absorb limit is cleared through _set_charge_limit below. The
+            # inject side takes back the discharge-rate limit, the mirrored WMax,
+            # and an inject cap the fallback route installed on 704 WMaxLimPct,
+            # none of which may outlive the event that imposed it.
             if slot == "inj":
                 self._p_lim_w_settings[slot] = None
+                self._clear_discharge_limit()
                 self._restore_mirrored_wmax()
                 # Guarded: only the fallback route populates this slot. On the
                 # direct route model 704 belongs to opModMaxLimW alone, and
@@ -1383,9 +1480,6 @@ class SunSpecModbusConnector:
                 if self._p_lim_slots["inj"] != (False, None):
                     self._apply_inject_pct_slot("inj", enabled, None)
             elif not enabled:
-                # Re-arm the not-applied warning so a future enable is surfaced
-                # once more rather than silently swallowed.
-                self._p_lim_abs_warned = False
                 self._set_charge_limit("abs", None)
             return
 
@@ -1405,11 +1499,75 @@ class SunSpecModbusConnector:
             return
 
         _require_uint16_watts(value, model_702.W_SF.value, control)
+        self._rewrite_ahead_of_planned_mirror(model_702, value)
         point.cvalue = value
         self._mirror_inject_onto_wmax(model_702, value)
         model_702.write()
         self._p_lim_w_settings[slot] = value
-        self._refresh_gen_lim_pct()
+        self._refresh_wmax_relative_limits()
+
+    def _rewrite_ahead_of_planned_mirror(self, model_702: Any, watts: float) -> None:
+        """Write the percent limits for the WMax a mirror of ``watts`` will set, if higher.
+
+        See ``_rewrite_ahead_of_wmax_increase``. Runs before the model 702 point
+        values are assigned, since reading the model discards unsent values.
+        """
+        wmax_point = model_702.WMax
+        if wmax_point.value is None:  # the mirror will not run
+            return
+        current = wmax_point.cvalue
+        wmax_rtg = model_702.WMaxRtg.cvalue
+        planned = min(watts, wmax_rtg) if wmax_rtg else watts
+        baseline = self._wmax_baseline if self._wmax_baseline is not None else current
+        self._rewrite_ahead_of_wmax_increase(current, planned, baseline)
+
+    def _rewrite_ahead_of_wmax_increase(
+        self, current: float | None, planned: float, baseline: float | None
+    ) -> None:
+        """Write the percent limits for ``planned`` WMax before WMax is raised to it.
+
+        WMaxLimPct is a percent of the WMax register. Raising WMax first would
+        loosen an active percent limit until the percent is rewritten, for good
+        if that rewrite fails. Writing the percent for the higher WMax first is
+        the stricter order: until WMax moves, the same percent of the lower WMax
+        holds a lower cap. A decrease needs no such step, since the lower WMax
+        already holds a stricter cap until the percent is rewritten afterwards.
+        """
+        if not current or not baseline or planned <= current:
+            return
+        self._wmax_plan = (planned, baseline)
+        try:
+            self._refresh_wmax_relative_limits()
+        finally:
+            self._wmax_plan = None
+
+    def _clear_discharge_limit(self) -> None:
+        """Set WDisChaRteMax to WDisChaRteMaxRtg, the value for no discharge limit.
+
+        WDisChaRteMax is a setting with no enable bit, so a limit cannot be
+        switched off, only replaced. A device with no limit in force runs to its
+        nameplate, bounded by its own protections; a CSIP control only narrows
+        that range. A DefaultDERControl that does not carry opModMaxLimWInject
+        is a default with no discharge-rate limit, and IEEE 2030.5-2018
+        10.10.4.2, CSIP 4.4.2 and CSIP-AUS 4.4 return the device to the default
+        rather than leave an ended event's value in force.
+
+        The rating is written on every clear, also when no limit is recorded.
+        After a restart during an event the record is empty, and the event's own
+        clear is then what puts the register right. The cost is a write each
+        time the dispatcher clears its modes. A device that does not declare
+        discharge-rate limiting is never written to, and a failed write is
+        repeated by the next clear.
+        """
+        model_702 = self._get_model(702)
+        if not _rate_setting_is_supported(model_702, "inj", model_702.WDisChaRteMax):
+            return
+        rating = model_702.WDisChaRteMaxRtg.cvalue
+        # Unreachable while the rating is a uint16 at W_SF, as the support test
+        # leaves it; kept so an unencodable value is still refused typed.
+        _require_uint16_watts(rating, model_702.W_SF.value, "discharge-rate limit")
+        model_702.WDisChaRteMax.cvalue = rating
+        model_702.write()
 
     def _mirror_inject_onto_wmax(self, model_702: Any, watts: float) -> None:
         """Write an inject limit to WMax as well as WDisChaRteMax.
@@ -1433,6 +1591,11 @@ class SunSpecModbusConnector:
         is a valid request -- it simply does not bind -- but a WMax *above*
         nameplate is meaningless.
 
+        While the mirror is in force a percent opModMaxLimW is still a percent of
+        the device's own WMax: ``_wmax_scale`` re-expresses it against the
+        mirrored value, so the two controls cap independently and the lower
+        watts win, in either order of arrival.
+
         The device's own WMax is captured on the *first* mirror write and put
         back by ``_restore_mirrored_wmax`` when the control clears, so a second
         inject update within one event records what the device had rather than
@@ -1454,8 +1617,8 @@ class SunSpecModbusConnector:
     def _restore_mirrored_wmax(self) -> None:
         """Put WMax back where the device had it before an inject limit lowered it.
 
-        WDisChaRteMax itself still stays where the event left it (#66);
-        WChaRteMax returns to its rating through ``_set_charge_limit``. WMax is different in
+        WDisChaRteMax and WChaRteMax return to their ratings, through
+        ``_clear_discharge_limit`` and ``_set_charge_limit``. WMax is different in
         kind. No head-end control writes it; the connector lowered
         it on its own initiative to cover devices that honour only WMax, so the
         connector owes the restore -- the same reasoning that has the fallback
@@ -1472,26 +1635,29 @@ class SunSpecModbusConnector:
             return
 
         model_702 = self._get_model(702)
+        self._rewrite_ahead_of_wmax_increase(
+            model_702.WMax.cvalue, self._wmax_baseline, self._wmax_baseline
+        )
         model_702.WMax.cvalue = self._wmax_baseline
         model_702.write()
-        # The baseline is the retry marker: dropped only once an active
-        # generation limit has been re-expressed against the restored WMax, so a
+        # The baseline is the retry marker: dropped only once the active
+        # percent limits have been re-expressed against the restored WMax, so a
         # failed 704 write leaves the restore pending for the next clear.
-        self._refresh_gen_lim_pct()
+        self._refresh_wmax_relative_limits()
         self._wmax_baseline = None
 
     def _watts_as_pct_of_wmax(self, watts: float, control: str) -> float | None:
         """Express ``watts`` as a percent of the device's max active power.
 
-        ``None`` when no base is available, in which case nothing is written and
-        the caller returns. WMax is the settable maximum; a device that does not
+        ``None`` when no base is available, in which case the caller declines
+        the control. WMax is the settable maximum; a device that does not
         implement it falls back to the nameplate WMaxRtg, which the
         scan-readiness check guarantees. That is an approximation -- it treats
         nameplate as the effective maximum -- and it holds precisely when there
         is no settable WMax to be lower than it.
         """
         model_702 = self._get_model(702)
-        wmax = model_702.WMax.cvalue
+        wmax = self._wmax_plan[0] if self._wmax_plan is not None else model_702.WMax.cvalue
         if not wmax:  # None or 0
             wmax = model_702.WMaxRtg.cvalue
             if wmax:
@@ -1504,7 +1670,7 @@ class SunSpecModbusConnector:
         if not wmax:
             logger.warning(
                 "%s received (%s W) but neither model 702 WMax nor WMaxRtg is "
-                "available; cannot convert to a percent, ignoring",
+                "available; cannot convert to a percent",
                 control,
                 watts,
             )
@@ -1562,27 +1728,24 @@ class SunSpecModbusConnector:
 
         ``"inj"`` falls back to the indirect route: convert the watts to a
         percent of WMax and merge into 704 WMaxLimPct, which a conformant device
-        does implement. ``"abs"`` has nowhere to go -- model 704 has no
-        absorb-direction active-power limit -- so nothing is applied and a
-        per-device warning is logged the first time an operator enables it,
-        surfacing the gap rather than swallowing it.
+        does implement. It is declined when the device has neither WMax nor
+        WMaxRtg to take the percent of. ``"abs"`` has nowhere to go -- model 704
+        has no absorb-direction active-power limit -- so it is declined. Both
+        raise, so the server is told the control is not supported and not that it
+        is in force.
         """
         # Nothing reaches model 702 on either branch below.
         if slot == "inj":
             self._p_lim_w_settings[slot] = None
 
         if slot == "abs":
-            if not self._p_lim_abs_warned:
-                logger.warning(
-                    "opModMaxLimWAbsorb received (%s W) but this device declares no "
-                    "absorb-direction limiting capability -- model 702 WChaRteMax is "
-                    "unimplemented or its WChaRteMaxRtg rating is zero -- and model "
-                    "704 carries no absorb-direction active-power limit to fall back "
-                    "on; not applied",
-                    watts,
-                )
-                self._p_lim_abs_warned = True
-            return
+            self._control_unsupported(
+                "opModMaxLimWAbsorb",
+                "this device declares no absorb-direction limiting capability "
+                "(model 702 WChaRteMax is unimplemented or its WChaRteMaxRtg rating "
+                "is zero) and model 704 carries no absorb-direction active-power "
+                "limit to fall back on",
+            )
 
         # One conversion for both callers. Keeping a second copy here let the
         # two drift -- this one clamped both ends and the shared helper only the
@@ -1592,17 +1755,27 @@ class SunSpecModbusConnector:
         # to get right than two to keep in step.
         pct = self._watts_as_pct_of_wmax(watts, "opModMaxLimWInject")
         if pct is None:
-            return
+            self._control_unsupported(
+                "opModMaxLimWInject",
+                "neither model 702 WMax nor WMaxRtg is available to convert the "
+                "watts to the percent model 704 WMaxLimPct takes",
+            )
         self._apply_inject_pct_slot("inj", True, pct)
 
     def _update_pf_sync(self, params: dict[str, Any]) -> None:
+        """Apply the frequency droop (IEEE 2030.5 ``opModFreqDroop``) on model 711.
+
+        The enable point is raised after the control is written and adopted, so
+        a failed write leaves the function as it was.
+        """
         model = self._get_model(711)
-        self._update_enable(model.Ena, params.get("pf_mode_enable", 0), "Frequency Droop")
 
         if params.get("pf_mode_enable") != 1:
+            self._update_enable(model.Ena, 0, "Frequency Droop")
             return
 
         ctl = model.Ctl[1]
+        pmin = self._droop_pmin_percent(params.get("pf_pmin_w"), ctl)
         # Fractional engineering values (e.g. KOf=0.05 = 5%/Hz droop) must
         # not be int()-cast -- pysunspec2's cvalue setter applies the scale
         # factor and rounds to the wire-type raw int itself.
@@ -1611,10 +1784,47 @@ class SunSpecModbusConnector:
         ctl.DbUf.cvalue = params.get("pf_dbuf", 0)
         ctl.KOf.cvalue = params.get("pf_kof", 0)
         ctl.KUf.cvalue = params.get("pf_kuf", 0)
-        if params.get("pf_pmin") is not None:
-            ctl.PMin.cvalue = params["pf_pmin"]
+        if pmin is not None:
+            ctl.PMin.cvalue = pmin
         ctl.write()
         self._adopt_control(model)
+        self._update_enable(model.Ena, 1, "Frequency Droop")
+
+    def _droop_pmin_percent(self, watts: object, ctl: Any) -> int | None:
+        """Return the model 711 ``PMin`` percent for a droop ``pMin`` in watts.
+
+        IEEE 2030.5 gives ``pMin`` as an ActivePower in watts; model 711 ``PMin``
+        is an int16 percent of the DER active power rating, so the watts are
+        divided by model 702 ``WMaxRtg``. The percent is rounded to a whole
+        number, as the register has no scale factor.
+
+        ``None`` when the control carries no ``pMin``. A device without the
+        ``PMin`` register, or without a rating to take the percent of, declines
+        the control rather than apply it without the floor the server asked for.
+        A ``pMin`` beyond the rating either way is refused: the register holds
+        -100 to 100, and a clamped floor would not be the one requested.
+        """
+        if watts is None:
+            return None
+        value = _as_number(watts, "opModFreqDroop", "pMin")
+        if _unimplemented_points(ctl, ("PMin",)):
+            self._control_unsupported(
+                "opModFreqDroop", "this device does not implement PMin (model 711)"
+            )
+        rating = self._get_model(702).WMaxRtg.cvalue
+        if not rating:
+            self._control_unsupported(
+                "opModFreqDroop",
+                "model 702 WMaxRtg is not available to convert pMin to the percent "
+                "model 711 PMin takes",
+            )
+        percent = value / rating * 100
+        if abs(percent) > 100:
+            raise ConnectorValueError(
+                f"opModFreqDroop pMin {value:g} W is {percent:.1f}% of the {rating:g} W "
+                f"rating; model 711 PMin holds -100 to 100. Refusing to write."
+            )
+        return round(percent)
 
     def _update_const_q_sync(self, params: dict[str, Any]) -> None:
         model = self._get_model(704)
@@ -1629,19 +1839,30 @@ class SunSpecModbusConnector:
         # equivalent. Reject an unmapped refType rather than silently applying
         # the percent against the wrong base, so a misconfigured server is
         # surfaced instead of quietly delivering the wrong vars.
-        #   IEEE DERUnitRefType: 2=%setMaxVar, 3=%statVarAvail, 8=%setMaxVA
-        #   SunSpec 704 VarSetMod (model_704.json): 1=VAR_MAX_PCT,
-        #     2=VAR_AVAIL_PCT, 3=VA_MAX_PCT
-        ieee_to_sunspec_var_mod = {2: 1, 3: 2, 8: 3}
+        #   IEEE DERUnitRefType: 1=%setMaxW, 2=%setMaxVar, 3=%statVarAvail,
+        #     8=%setMaxVA
+        #   SunSpec 704 VarSetMod (model_704.json): 0=W_MAX_PCT,
+        #     1=VAR_MAX_PCT, 2=VAR_AVAIL_PCT, 3=VA_MAX_PCT
+        # Model 704 describes W_MAX_PCT as a percent of maximum active power and
+        # does not say whether that is WMax or WMaxRtg; the device decides.
+        ieee_to_sunspec_var_mod = {1: 0, 2: 1, 3: 2, 8: 3}
         ieee_ref = params.get("ref_type")
         var_set_mod = ieee_to_sunspec_var_mod.get(ieee_ref) if isinstance(ieee_ref, int) else None
         if var_set_mod is None:
-            logger.warning(
-                "opModFixedVar has unsupported DERUnitRefType %r (expected 2=%%setMaxVar, "
-                "3=%%statVarAvail, or 8=%%setMaxVA); not applied",
-                ieee_ref,
+            self._control_unsupported(
+                "opModFixedVar",
+                f"DERUnitRefType {ieee_ref!r} has no model 704 VarSetMod "
+                f"(expected 1=%setMaxW, 2=%setMaxVar, 3=%statVarAvail or 8=%setMaxVA)",
             )
-            return
+        # IEEE 2030.5-2023, DERUnitRefType: for %setMaxW, a negative value is a
+        # percent of %setMaxChargeRateW. Model 704 has no mode with that base,
+        # so a negative setpoint would be applied against the wrong one.
+        if ieee_ref == 1 and params.get("const_q_pct", 0) < 0:
+            self._control_unsupported(
+                "opModFixedVar",
+                "a negative %setMaxW setpoint is a percent of setMaxChargeRateW, "
+                "which no model 704 VarSetMod expresses",
+            )
 
         missing = _unimplemented_points(model, ("VarSetPct", "VarSetMod", "VarSetPri"))
         if missing:
@@ -1754,7 +1975,11 @@ class SunSpecModbusConnector:
                 assert watts is not None
                 pct = self._watts_as_pct_of_wmax(watts, "opModTargetW")
                 if pct is None:
-                    return
+                    self._control_unsupported(
+                        "opModTargetW",
+                        "neither model 702 WMax nor WMaxRtg is available to convert the "
+                        "watts to the percent model 704 WSetPct takes",
+                    )
                 route = "percent"
             else:
                 missing = _unimplemented_points(model, ("WSetMod", "WSet", "WSetPct"))

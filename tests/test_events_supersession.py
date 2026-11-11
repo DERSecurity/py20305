@@ -17,6 +17,16 @@ from py20305.models.sep.sep import (
 )
 
 
+def _limit(name: str, value: int = 5000):
+    """A CSIP-AUS envelope limit as the parser leaves it in ``other_element``."""
+
+    class Meta:
+        pass
+
+    Meta.name = name
+    return type("Limit", (), {"Meta": Meta, "value": value, "multiplier": 0})()
+
+
 def _make_derc(
     mrid_byte: int,
     start: int,
@@ -24,14 +34,16 @@ def _make_derc(
     status_time: int = 1000,
     current_status: int = 0,
     fixed_var: bool = False,
+    limits: tuple[str, ...] = (),
 ) -> Dercontrol1:
-    base = DercontrolBase()
+    base = DercontrolBase(other_element=[_limit(name) for name in limits])
     if fixed_var:
         base = DercontrolBase(
+            other_element=base.other_element,
             op_mod_fixed_var=FixedVarControlType(
                 ref_type=DerunitRefType(value=0),
                 value=SignedPerCent(value=50),
-            )
+            ),
         )
     return Dercontrol1(
         m_rid=MRidtype(value=bytes([mrid_byte]) * 16),
@@ -56,10 +68,13 @@ def _make_record(
     current_status: int = 0,
     fixed_var: bool = False,
     creation_time: int = 900,
+    limits: tuple[str, ...] = (),
 ) -> EventRecord:
     return EventRecord(
         mrid=bytes([mrid_byte]) * 16,
-        derc=_make_derc(mrid_byte, start, duration, status_time, current_status, fixed_var),
+        derc=_make_derc(
+            mrid_byte, start, duration, status_time, current_status, fixed_var, limits
+        ),
         program_href=program_href,
         primacy=primacy,
         state=EventState.ACTIVE,
@@ -391,6 +406,52 @@ def _random_devices(seed: int, programs: int, devices: int) -> dict[str, set[str
             f"/edev/{rng.randrange(devices)}" for _ in range(rng.choice((1, 1, 2, 3)))
         }
     return mapping
+
+
+class TestSupersessionCsipAusLimits:
+    """CSIP-AUS limits are DERControlBase modes and supersede per mode.
+
+    CSIP-AUS v1.1a section 5.2.4.1 has DERControls follow the IEEE 2030.5 event
+    rules. Rule q (IEEE 2030.5-2023 section 10.2.2.3; rule t in IEEE 2030.5-2018
+    section 10.2.3.3) supersedes an overlapping event strictly for the modes it
+    shares and leaves differing modes independent.
+    """
+
+    DEVICES = _device_map(("/derp/1", {"d1"}), ("/derp/2", {"d1"}))
+
+    def test_the_same_limit_in_a_lower_priority_event_is_superseded(self):
+        winner = _make_record(0x01, primacy=0, program_href="/derp/1", limits=("opModExpLimW",))
+        loser = _make_record(0x02, primacy=5, program_href="/derp/2", limits=("opModExpLimW",))
+
+        results = compute_supersession([winner, loser], self.DEVICES)
+
+        assert [(r.superseding_mrid, r.superseded_mrid) for r in results] == [
+            (winner.mrid, loser.mrid)
+        ]
+        assert results[0].affected_modes == {"opModExpLimW"}
+
+    def test_different_limits_do_not_supersede_each_other(self):
+        export = _make_record(0x01, primacy=0, program_href="/derp/1", limits=("opModExpLimW",))
+        imported = _make_record(0x02, primacy=5, program_href="/derp/2", limits=("opModImpLimW",))
+
+        assert compute_supersession([export, imported], self.DEVICES) == []
+
+    def test_a_shared_limit_supersedes_only_that_limit(self):
+        winner = _make_record(0x01, primacy=0, program_href="/derp/1", limits=("opModExpLimW",))
+        loser = _make_record(
+            0x02, primacy=5, program_href="/derp/2", limits=("opModExpLimW", "opModImpLimW")
+        )
+
+        results = compute_supersession([winner, loser], self.DEVICES)
+
+        assert len(results) == 1
+        assert results[0].affected_modes == {"opModExpLimW"}
+
+    def test_a_limit_and_a_base_mode_do_not_supersede_each_other(self):
+        limit = _make_record(0x01, primacy=0, program_href="/derp/1", limits=("opModExpLimW",))
+        setpoint = _make_record(0x02, primacy=5, program_href="/derp/2", fixed_var=True)
+
+        assert compute_supersession([limit, setpoint], self.DEVICES) == []
 
 
 class TestSupersessionGroupedByDevice:
