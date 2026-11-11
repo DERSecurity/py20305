@@ -726,6 +726,51 @@ class TestSunSpecUpdate:
         assert any("DERUnitRefType" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
+    async def test_update_const_q_set_max_w_maps_to_w_max_pct(self, sunspec_connector):
+        """IEEE %setMaxW (DERUnitRefType 1) is SunSpec 704 VarSetMod 0, W_MAX_PCT."""
+        params = {"const_q_mode_enable": 1, "const_q_pct": 44, "ref_type": 1}
+        await sunspec_connector.update_const_q(params)
+        model = sunspec_connector._target.models[704][0]
+        assert model.VarSetPct.cvalue == 44
+        assert model.VarSetMod.value == 0
+        model.write.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_update_const_q_zero_set_max_w_is_applied(self, sunspec_connector):
+        await sunspec_connector.update_const_q(
+            {"const_q_mode_enable": 1, "const_q_pct": 0, "ref_type": 1}
+        )
+        model = sunspec_connector._target.models[704][0]
+        assert model.VarSetMod.value == 0
+
+    @pytest.mark.asyncio
+    async def test_update_const_q_negative_set_max_w_is_declined(self, sunspec_connector, caplog):
+        """For %setMaxW a negative value is a percent of setMaxChargeRateW
+        (IEEE 2030.5-2023, DERUnitRefType). No VarSetMod has that base, so the
+        control is declined and nothing is written or enabled."""
+        model = sunspec_connector._target.models[704][0]
+        model.write.reset_mock()
+        model.VarSetEna.write.reset_mock()
+        with caplog.at_level(logging.WARNING), pytest.raises(
+            ModeNotSupportedError, match="setMaxChargeRateW"
+        ):
+            await sunspec_connector.update_const_q(
+                {"const_q_mode_enable": 1, "const_q_pct": -20, "ref_type": 1}
+            )
+        model.write.assert_not_called()
+        model.VarSetEna.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_const_q_negative_set_max_var_is_still_applied(self, sunspec_connector):
+        """The negative-value rule belongs to %setMaxW; %setMaxVar keeps its sign."""
+        await sunspec_connector.update_const_q(
+            {"const_q_mode_enable": 1, "const_q_pct": -20, "ref_type": 2}
+        )
+        model = sunspec_connector._target.models[704][0]
+        assert model.VarSetPct.cvalue == -20
+        assert model.VarSetMod.value == 1
+
+    @pytest.mark.asyncio
     async def test_update_fixed_w_enabled(self, sunspec_connector):
         # WSet is a percent of WMax (50.0 == 50%), written straight to
         # WSetPct.cvalue -- no *100 (that drove 50% to 5000% on the wire).
@@ -1531,8 +1576,8 @@ class TestSunSpecPLimWattsFallback:
     Inject falls back to the older indirect route -- watts converted to a
     percent of WMax, merged into 704 WMaxLimPct -- so no deployment loses
     inject-limit enforcement. Absorb has no fallback: model 704 has no
-    absorb-direction limit, so it is warned about rather than silently
-    swallowed."""
+    absorb-direction limit, so it is declined. Both declines raise, so the
+    server is told the control is not supported."""
 
     @staticmethod
     def _drop_register(sunspec_connector, name):
@@ -1672,61 +1717,84 @@ class TestSunSpecPLimWattsFallback:
         assert model_704.WMaxLimPct.cvalue == 25
 
     @pytest.mark.asyncio
-    async def test_fallback_skipped_when_neither_wmax_available(self, sunspec_connector, caplog):
-        """If both WMax and WMaxRtg are unavailable (None), the watts cannot be
-        turned into a percent: skip the write with a warning rather than
-        fabricate a cap or divide by zero."""
+    @pytest.mark.parametrize("missing", [None, 0])
+    async def test_fallback_declined_when_neither_wmax_available(
+        self, sunspec_connector, caplog, missing
+    ):
+        """If neither WMax nor WMaxRtg is usable, the watts cannot be turned into
+        a percent. The control is declined, so the server is told it is not
+        supported, rather than a cap fabricated or the dispatch reported as
+        applied."""
         import logging
 
         model_702 = self._drop_register(sunspec_connector, "WDisChaRteMax")
-        model_702.WMax.cvalue = None
-        model_702.WMaxRtg.cvalue = None
+        model_702.WMax.cvalue = missing
+        model_702.WMaxRtg.cvalue = missing
         model_704 = sunspec_connector._target.models[704][0]
         model_704.write.reset_mock()
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING), pytest.raises(
+            ModeNotSupportedError, match="opModMaxLimWInject"
+        ):
             await sunspec_connector.update_p_lim_inj(
                 {"p_lim_mode_enable": 1, "p_lim_watts": 4000}
             )
         model_704.write.assert_not_called()
+        model_704.WMaxLimPctEna.write.assert_not_called()
         assert any("WMaxRtg" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_absorb_without_register_warns_and_applies_nothing(
+    async def test_absorb_without_register_is_declined_and_writes_nothing(
         self, sunspec_connector, caplog
     ):
         """Model 704 has no absorb-direction limit, so there is nowhere to fall
-        back to. The connector logs once per device so the gap is visible."""
+        back to. The control is declined so the server is told it is not
+        supported, and the gap is logged for the operator."""
         import logging
 
         model_702 = self._drop_register(sunspec_connector, "WChaRteMax")
         model_704 = sunspec_connector._target.models[704][0]
         model_702.write.reset_mock()
         model_704.write.reset_mock()
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING), pytest.raises(
+            ModeNotSupportedError, match="opModMaxLimWAbsorb"
+        ):
             await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
         model_702.write.assert_not_called()
         model_704.write.assert_not_called()
         assert any("opModMaxLimWAbsorb" in rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_absorb_warning_emitted_once_per_enable_cycle(self, sunspec_connector, caplog):
-        """Two enables in a row produce one warning; clearing in
-        between resets the suppression so the next enable warns again."""
+    async def test_absorb_decline_is_logged_once_and_raised_every_time(
+        self, sunspec_connector, caplog
+    ):
+        """A head-end re-sends the control each event and needs the refusal each
+        time, while the operator needs the log line once."""
         import logging
 
         self._drop_register(sunspec_connector, "WChaRteMax")
         with caplog.at_level(logging.WARNING):
-            await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
-            await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2000})
-        first_run = sum("opModMaxLimWAbsorb" in r.message for r in caplog.records)
-        assert first_run == 1
-        caplog.clear()
-        with caplog.at_level(logging.WARNING):
-            # Clear, then re-enable -- the next enable should warn again.
+            for _ in range(2):
+                with pytest.raises(ModeNotSupportedError):
+                    await sunspec_connector.update_p_lim_abs(
+                        {"p_lim_mode_enable": 1, "p_lim_watts": 2500}
+                    )
+            # Clearing a limit that was never applied is not an error.
             await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 0})
-            await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 1500})
-        second_run = sum("opModMaxLimWAbsorb" in r.message for r in caplog.records)
-        assert second_run == 1
+        assert sum("opModMaxLimWAbsorb" in r.message for r in caplog.records) == 1
+
+    @pytest.mark.parametrize(
+        ("profile", "status"),
+        [("E2023", 251), ("E2018", 252)],
+    )
+    def test_a_declined_control_is_answered_not_supported(self, profile, status):
+        """The refusal maps to Table 31 status 251, which a 2018 server gets as 252."""
+        from py20305.events.response import response_code_for_dispatch_error
+        from py20305.server_profile import Edition, ServerProfile
+
+        error = ModeNotSupportedError("opModMaxLimWAbsorb not applied: no capability")
+        code = response_code_for_dispatch_error(error)
+        wire = ServerProfile(base=getattr(Edition, profile)).wire_response_code(code.value)
+        assert wire == status
 
 
 class TestSunSpecPLimMerge:
@@ -2856,6 +2924,42 @@ class TestConstQEndToEnd:
         assert model.VarSetPct.cvalue == 53.0
 
 
+class TestConstQSetMaxWEndToEnd:
+    """opModFixedVar with refType %setMaxW, from the 2030.5 element to the register."""
+
+    @pytest.mark.asyncio
+    async def test_a_positive_set_max_w_setpoint_is_written_as_w_max_pct(self, sunspec_connector):
+        base = DercontrolBase(
+            op_mod_fixed_var=FixedVarControlType(
+                ref_type=DerunitRefType(value=1), value=SignedPerCent(value=5300)
+            )
+        )
+        await _apply_through_contract(sunspec_connector, base)
+        model = sunspec_connector._target.models[704][0]
+        assert model.VarSetMod.value == 0
+        assert model.VarSetPct.cvalue == 53.0
+
+    @pytest.mark.asyncio
+    async def test_a_negative_set_max_w_setpoint_is_declined(self, sunspec_connector):
+        base = DercontrolBase(
+            op_mod_fixed_var=FixedVarControlType(
+                ref_type=DerunitRefType(value=1), value=SignedPerCent(value=-2000)
+            )
+        )
+        model = sunspec_connector._target.models[704][0]
+        model.write.reset_mock()
+        with pytest.raises(ModeNotSupportedError):
+            await _apply_through_contract(sunspec_connector, base)
+        model.write.assert_not_called()
+
+    def test_a_setpoint_without_a_reference_type_is_not_given_one(self):
+        """refType is required by the schema; a missing one must not read as %setMaxW."""
+        _method, params = Controls().translate(
+            "opModFixedVar", {"enabled": True, "value": {"value": 5300}}
+        )
+        assert params["ref_type"] is None
+
+
 class TestFixedWEndToEnd:
     """End-to-end (translator -> connector) coverage for opModFixedW.
 
@@ -2906,12 +3010,15 @@ class TestRateSettingCapabilityDetection:
         assert model_704.WMaxLimPct.cvalue == 60
 
     @pytest.mark.asyncio
-    async def test_absorb_is_not_written_when_the_rating_is_zero(self, sunspec_connector):
-        """Absorb has no fallback, so the only correct action is not to write."""
+    async def test_absorb_is_declined_when_the_rating_is_zero(self, sunspec_connector):
+        """Absorb has no fallback: nothing is written and the control is declined."""
         model_702 = sunspec_connector._target.models[702][0]
         self._present_but_unsupported(model_702, direction="cha")
 
-        await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 3000})
+        with pytest.raises(ModeNotSupportedError, match="opModMaxLimWAbsorb"):
+            await sunspec_connector.update_p_lim_abs(
+                {"p_lim_mode_enable": 1, "p_lim_watts": 3000}
+            )
 
         assert model_702.WChaRteMax.cvalue == 0
 

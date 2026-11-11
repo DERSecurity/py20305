@@ -602,7 +602,9 @@ def _core_params(method: str, value: Any) -> dict[str, Any]:
     if method == "update_const_q":
         return {
             "const_q_mode_enable": 1,
-            "ref_type": int(value.get("refType", 1)),
+            # refType is required by the schema. Passed as given so a control
+            # without one is declined, not read against a base nobody chose.
+            "ref_type": value.get("refType"),
             "const_q": None,
             "const_q_pct": value.get("value", 0) / 100,
         }

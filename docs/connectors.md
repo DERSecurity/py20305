@@ -83,8 +83,18 @@ is not supported (IEEE 2030.5 Table 31 status 251) and no register or enable
 point is changed. That covers a model 704 setpoint the device does not
 implement, a curve whose `yRefType` has no SunSpec reference, an
 `opModFixedVar` `refType` with no SunSpec reactive-power mode, an
-`opModTargetW` on a device with no percent base, and an `opModFreqDroop`
-`pMin` on a device without the `PMin` point or a rating.
+`opModTargetW` or `opModMaxLimWInject` on a device with no percent base
+(neither `WMax` nor `WMaxRtg`), an `opModMaxLimWAbsorb` on a device with no
+charge-rate limit, and an `opModFreqDroop` `pMin` on a device without the
+`PMin` point or a rating.
+
+An `opModFixedVar` setpoint is a percent of the base its `refType` names:
+`%setMaxW` is written with model 704 `VarSetMod` `W_MAX_PCT`, `%setMaxVar` with
+`VAR_MAX_PCT`, `%statVarAvail` with `VAR_AVAIL_PCT` and `%setMaxVA` with
+`VA_MAX_PCT`. Model 704 does not say whether `W_MAX_PCT` is a percent of `WMax`
+or of `WMaxRtg`; the device decides. IEEE 2030.5-2023 makes a negative `%setMaxW`
+value a percent of `%setMaxChargeRateW`, which no `VarSetMod` expresses, so a
+negative `%setMaxW` setpoint is declined.
 
 Curves and the frequency droop are written and adopted before the function is
 enabled, so a refused write leaves the function as it was. A curve's `yRefType`

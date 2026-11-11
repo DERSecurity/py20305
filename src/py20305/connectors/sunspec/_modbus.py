@@ -493,10 +493,6 @@ class SunSpecModbusConnector:
         # (planned WMax, baseline) while a limit is rewritten ahead of a WMax
         # increase; see _rewrite_ahead_of_wmax_increase.
         self._wmax_plan: tuple[float, float] | None = None
-        # Suppresses log noise after the first enable per device on the one
-        # combination that cannot be applied at all: opModMaxLimWAbsorb on a
-        # device implementing neither WChaRteMax nor any absorb-direction limit.
-        self._p_lim_abs_warned: bool = False
         #: Controls already reported as unsupported by this device. A
         #: head-end re-sends a control every event, and an operator needs
         #: to see the gap once, not on every dispatch.
@@ -1484,9 +1480,6 @@ class SunSpecModbusConnector:
                 if self._p_lim_slots["inj"] != (False, None):
                     self._apply_inject_pct_slot("inj", enabled, None)
             elif not enabled:
-                # Re-arm the not-applied warning so a future enable is surfaced
-                # once more rather than silently swallowed.
-                self._p_lim_abs_warned = False
                 self._set_charge_limit("abs", None)
             return
 
@@ -1656,8 +1649,8 @@ class SunSpecModbusConnector:
     def _watts_as_pct_of_wmax(self, watts: float, control: str) -> float | None:
         """Express ``watts`` as a percent of the device's max active power.
 
-        ``None`` when no base is available, in which case nothing is written and
-        the caller returns. WMax is the settable maximum; a device that does not
+        ``None`` when no base is available, in which case the caller declines
+        the control. WMax is the settable maximum; a device that does not
         implement it falls back to the nameplate WMaxRtg, which the
         scan-readiness check guarantees. That is an approximation -- it treats
         nameplate as the effective maximum -- and it holds precisely when there
@@ -1677,7 +1670,7 @@ class SunSpecModbusConnector:
         if not wmax:
             logger.warning(
                 "%s received (%s W) but neither model 702 WMax nor WMaxRtg is "
-                "available; cannot convert to a percent, ignoring",
+                "available; cannot convert to a percent",
                 control,
                 watts,
             )
@@ -1735,27 +1728,24 @@ class SunSpecModbusConnector:
 
         ``"inj"`` falls back to the indirect route: convert the watts to a
         percent of WMax and merge into 704 WMaxLimPct, which a conformant device
-        does implement. ``"abs"`` has nowhere to go -- model 704 has no
-        absorb-direction active-power limit -- so nothing is applied and a
-        per-device warning is logged the first time an operator enables it,
-        surfacing the gap rather than swallowing it.
+        does implement. It is declined when the device has neither WMax nor
+        WMaxRtg to take the percent of. ``"abs"`` has nowhere to go -- model 704
+        has no absorb-direction active-power limit -- so it is declined. Both
+        raise, so the server is told the control is not supported and not that it
+        is in force.
         """
         # Nothing reaches model 702 on either branch below.
         if slot == "inj":
             self._p_lim_w_settings[slot] = None
 
         if slot == "abs":
-            if not self._p_lim_abs_warned:
-                logger.warning(
-                    "opModMaxLimWAbsorb received (%s W) but this device declares no "
-                    "absorb-direction limiting capability -- model 702 WChaRteMax is "
-                    "unimplemented or its WChaRteMaxRtg rating is zero -- and model "
-                    "704 carries no absorb-direction active-power limit to fall back "
-                    "on; not applied",
-                    watts,
-                )
-                self._p_lim_abs_warned = True
-            return
+            self._control_unsupported(
+                "opModMaxLimWAbsorb",
+                "this device declares no absorb-direction limiting capability "
+                "(model 702 WChaRteMax is unimplemented or its WChaRteMaxRtg rating "
+                "is zero) and model 704 carries no absorb-direction active-power "
+                "limit to fall back on",
+            )
 
         # One conversion for both callers. Keeping a second copy here let the
         # two drift -- this one clamped both ends and the shared helper only the
@@ -1765,7 +1755,11 @@ class SunSpecModbusConnector:
         # to get right than two to keep in step.
         pct = self._watts_as_pct_of_wmax(watts, "opModMaxLimWInject")
         if pct is None:
-            return
+            self._control_unsupported(
+                "opModMaxLimWInject",
+                "neither model 702 WMax nor WMaxRtg is available to convert the "
+                "watts to the percent model 704 WMaxLimPct takes",
+            )
         self._apply_inject_pct_slot("inj", True, pct)
 
     def _update_pf_sync(self, params: dict[str, Any]) -> None:
@@ -1845,17 +1839,29 @@ class SunSpecModbusConnector:
         # equivalent. Reject an unmapped refType rather than silently applying
         # the percent against the wrong base, so a misconfigured server is
         # surfaced instead of quietly delivering the wrong vars.
-        #   IEEE DERUnitRefType: 2=%setMaxVar, 3=%statVarAvail, 8=%setMaxVA
-        #   SunSpec 704 VarSetMod (model_704.json): 1=VAR_MAX_PCT,
-        #     2=VAR_AVAIL_PCT, 3=VA_MAX_PCT
-        ieee_to_sunspec_var_mod = {2: 1, 3: 2, 8: 3}
+        #   IEEE DERUnitRefType: 1=%setMaxW, 2=%setMaxVar, 3=%statVarAvail,
+        #     8=%setMaxVA
+        #   SunSpec 704 VarSetMod (model_704.json): 0=W_MAX_PCT,
+        #     1=VAR_MAX_PCT, 2=VAR_AVAIL_PCT, 3=VA_MAX_PCT
+        # Model 704 describes W_MAX_PCT as a percent of maximum active power and
+        # does not say whether that is WMax or WMaxRtg; the device decides.
+        ieee_to_sunspec_var_mod = {1: 0, 2: 1, 3: 2, 8: 3}
         ieee_ref = params.get("ref_type")
         var_set_mod = ieee_to_sunspec_var_mod.get(ieee_ref) if isinstance(ieee_ref, int) else None
         if var_set_mod is None:
             self._control_unsupported(
                 "opModFixedVar",
                 f"DERUnitRefType {ieee_ref!r} has no model 704 VarSetMod "
-                f"(expected 2=%setMaxVar, 3=%statVarAvail or 8=%setMaxVA)",
+                f"(expected 1=%setMaxW, 2=%setMaxVar, 3=%statVarAvail or 8=%setMaxVA)",
+            )
+        # IEEE 2030.5-2023, DERUnitRefType: for %setMaxW, a negative value is a
+        # percent of %setMaxChargeRateW. Model 704 has no mode with that base,
+        # so a negative setpoint would be applied against the wrong one.
+        if ieee_ref == 1 and params.get("const_q_pct", 0) < 0:
+            self._control_unsupported(
+                "opModFixedVar",
+                "a negative %setMaxW setpoint is a percent of setMaxChargeRateW, "
+                "which no model 704 VarSetMod expresses",
             )
 
         missing = _unimplemented_points(model, ("VarSetPct", "VarSetMod", "VarSetPri"))
