@@ -30,9 +30,18 @@ Open an issue if you think one belongs here.
 ```bash
 git clone https://github.com/DERSecurity/py20305
 cd py20305
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+uv sync --extra dev                                 # installs the versions uv.lock pins
+source .venv/bin/activate                           # Windows: .venv\Scripts\activate
 ```
+
+`uv.lock` pins the versions CI tests against. It is not part of the package:
+`pip install py20305` still resolves the ranges in `pyproject.toml`. After
+changing a dependency in `pyproject.toml`, run `uv lock` and commit both files
+together; CI fails with `--locked` when they disagree. Dependabot proposes the
+lock updates for new upstream releases every week. A weekly workflow,
+`Latest dependencies`, installs the newest versions the ranges allow and runs
+the unit suite, so an upstream release that breaks consumers is found without
+waiting for the lock to catch up.
 
 Then:
 
