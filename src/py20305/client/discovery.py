@@ -515,9 +515,12 @@ async def discover(
     if b"csipaus" in raw_dcap:
         state.csip_aus_mode = True
         logger.info("CSIP-AUS mode detected from server dcap response")
+    # The HTTP client writes the extensions on what discovery saw, unless the
+    # caller forced the flag.
+    client.observe_csip_aus_detection(state.csip_aus_mode)
     client.csipaus_namespace = _declared_csipaus_namespace(raw_dcap)
     # Extensions named in the configuration replace what the server declares.
-    # The HTTP client's flag is set too: the serializer and the DER resource
+    # The HTTP client's flag is forced too: the serializer and the DER resource
     # manager read it to decide whether to send the CSIP-AUS elements.
     configured = client.profile.extensions
     if configured is not None:

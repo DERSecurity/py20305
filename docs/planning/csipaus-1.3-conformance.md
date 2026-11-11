@@ -44,12 +44,11 @@ local name, so limits in either namespace already apply.
   `ConsumptionTariffIntervalListSummary` mandatory, so lists from other servers
   would fail to parse; schema files are also ask-first), and lenient parsing
   (hides real schema errors from other servers).
-- **D4. Out of scope: copying the detected mode to the HTTP client.**
-  `CsipClient.connect()` leaves `Sep2Client.csip_aus_mode` False after discovery
-  detects CSIP-AUS, so a standalone client sends no extensions at all. Callers
-  (applications that embed the client, such as an interop adapter) set it
-  themselves today. It is tracked in #79, because the fix interacts
-  with callers' on/off overrides and with rediscovery.
+- **D4. The detected mode reaches the HTTP client (#79).** Discovery records
+  what it detected on `Sep2Client`, and every discovery replaces the previous
+  detection. A value the caller assigns to `Sep2Client.csip_aus_mode`, or a
+  configured `extensions` list, is kept apart from the detection and wins over
+  it, so rediscovery never overrides an explicit setting.
 
 ## Changes
 
