@@ -338,6 +338,62 @@ an empty one. The distinction matters: an empty list is a server that removed
 every event, and treating a failed fetch as one would revert every device on a
 single transient error.
 
+## Which devices a program controls
+
+A DERProgram controls the EndDevices whose function set assignments list it, and
+a device can reach one program through more than one assignment. Each poll of
+the program lists reads those assignments again. A device whose assignments no
+longer name a program stops receiving that program's controls while the other
+devices keep them, so withdrawing one device from a program does not wait for a
+full rediscovery.
+
+A device with no assignments is mapped from the DeviceCapability program list
+when the server has one, as at discovery. A device keeps its programs on a poll
+where one of its program lists could not be read, or the server did not serve it
+(404 or 204). The list that failed may be the one that names them, so the client
+does not treat the failure as a withdrawal; a list the server serves and that
+names nothing is a withdrawal.
+
+The withdrawal does not undo a control already applied to the device.
+
+## Superseded events and the modes they give up
+
+When a higher-priority event takes over some of an event's modes on a device,
+the event that took them owns them from then on, and its own end is what
+releases them. The superseded event keeps only the modes that were not taken. So
+when the superseding event ends first, the client releases those modes on the
+device at that moment, by applying the default's value or switching the mode off
+when no default names it. It does so whether or not the superseded event is
+still running, and whether or not another event is running on the device.
+
+## Default controls while an event runs
+
+IEEE 2030.5-2023 §10.10.4.2.1 manages a DER by the DefaultDERControl for each
+control mode that has no active DERControl. The client applies it that way. A
+device with an active event still receives the default's modes that no active
+event controls on that device, and does not receive the modes an event controls.
+A default that names only modes an active event controls writes nothing. When
+the event ends, the whole default is applied, as before.
+
+A mode goes to the default of the program with the lowest primacy that names it,
+so a default does not write a mode that the default of a higher-priority program
+also names. The client works this out from the programs as they stand, and
+writes a mode that has since been freed even when the same default was written
+before without it.
+
+A default that names no control mode is not applied to a device while an event
+is active on it.
+
+## A control the device cannot apply
+
+A DERControl may name modes the device's connector does not implement. The
+client applies the modes it can and skips the rest. When the connector
+implements none of the modes a control names, nothing is applied, so the client
+does not report the event as started. It answers with status 251 (Not
+Supported), or 252 for a server on the 2018 edition, where 251 is reserved. For
+a group of devices under one EndDevice, the answer is a rejection only when
+every device in the group rejects the control.
+
 ## Simulating a loss of communications
 
 `comms_loss_seconds` puts the client into loss-of-communications mode after that
