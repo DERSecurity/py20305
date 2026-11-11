@@ -22,7 +22,7 @@ from py20305.client.state import DerProgramState, DiscoveredState
 from py20305.client.timebase import ServerTimebase
 from py20305.commands import CommandOrigin
 from py20305.connectors.base import ScheduleNotification
-from py20305.connectors.control_errors import DeviceNotConfiguredError
+from py20305.connectors.control_errors import DeviceNotConfiguredError, ModeNotSupportedError
 from py20305.events.active_modes import ActiveModeTracker
 from py20305.events.comms_loss import CommsLossState
 from py20305.events.dderc import DdercTracker
@@ -1696,9 +1696,7 @@ class EventProcessor:
                 n = len(local_lfdis) if local_lfdis is not None else 1
                 target_results = results[idx : idx + n]
                 idx += n
-                failure: Exception | None = next(
-                    (r for r in target_results if isinstance(r, Exception)), None
-                )
+                failure = self._default_control_failure(target_results)
                 if failure is not None:
                     logger.warning(
                         "Event %s: DDERC dispatch to %s failed: %s",
@@ -1918,15 +1916,29 @@ class EventProcessor:
         for dev_href, lfdi in targets:
             target_results = results[idx : idx + per_target_n]
             idx += per_target_n
-            failure: Exception | None = next(
-                (r for r in target_results if isinstance(r, Exception)), None
-            )
+            failure = self._default_control_failure(target_results)
             if failure is not None:
                 logger.warning("Initial DDERC dispatch to %s failed: %s", dev_href, failure)
             else:
                 self._dderc_tracker.record_application(
                     lfdi, program_href, dderc_mrid, derp_state.primacy
                 )
+
+    @staticmethod
+    def _default_control_failure(results: Sequence[object]) -> Exception | None:
+        """Return the first failure among one device's default-control writes, or None.
+
+        A connector that implements none of the default's modes raises
+        ``ModeNotSupportedError``. Retrying cannot change that, and a default
+        has no response to reject, so it is not a failure to retry or warn about
+        on every poll: the write is treated as done and logged at debug level.
+        """
+        for result in results:
+            if isinstance(result, ModeNotSupportedError):
+                logger.debug("Default control not applied: %s", result)
+            elif isinstance(result, Exception):
+                return result
+        return None
 
     @staticmethod
     def _default_without(dderc: DefaultDercontrol, modes: frozenset[str]) -> DefaultDercontrol:
