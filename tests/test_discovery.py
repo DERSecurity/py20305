@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -19,6 +22,7 @@ from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
 from py20305.client.poll_rate import DEFAULT_POLL_RATE
 from py20305.client.state import DiscoveredState
 from py20305.client.timebase import ServerTimebase
+from py20305.events.processor import EventProcessor
 from py20305.models.sep.sep import (
     DefaultDercontrol,
     DefaultDercontrolLink,
@@ -44,6 +48,7 @@ from py20305.models.sep.sep import (
     FunctionSetAssignmentsListLink,
     MirrorUsagePointListLink,
     MRidtype,
+    PerCentControlType,
     Pintype,
     PrimacyType,
     Registration,
@@ -60,6 +65,7 @@ from py20305.models.sep.sep import (
 )
 from py20305.server_profile import Edition, ServerProfile
 from py20305.xml.serialization import NS_CSIPAUS
+from tests.test_events_processor import _make_derc
 
 
 def _make_dcap(
@@ -2392,6 +2398,146 @@ async def test_repeated_refreshes_do_not_grow_the_mapping():
 
     assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1"]
     assert state.device_mapping.device_to_programs["/edev/1"] == ["/derp/1"]
+
+
+def _two_devices_one_program(
+    *, second_device_fsas: tuple[str, ...] = ("/fsa/2",)
+) -> tuple[_MockClient, Any]:
+    """A server where /edev/1 and /edev/2 each reach /derp/1 through their own FSAs."""
+    edev1 = _make_edev("/edev/1")
+    edev1.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    edev2 = _make_edev("/edev/2", lfdi=bytes([0xBB]) * 20)
+    edev2.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/2/fsa")
+    derp = _make_derp("/derp/1", primacy=5)
+    responses: dict[str, Any] = {
+        "/dcap": _make_dcap(),
+        "/tm": _make_time(),
+        "/edev": _make_edev_list(edev1, edev2),
+        "/edev/1/fsa": _make_fsa_list(_make_fsa("/fsa/1", derp_list_href="/fsa/1/derp")),
+        "/edev/2/fsa": _make_fsa_list(
+            *(_make_fsa(href, derp_list_href=f"{href}/derp") for href in second_device_fsas)
+        ),
+        "/fsa/1/derp": _make_derp_list(derp),
+    }
+    for href in second_device_fsas:
+        responses[f"{href}/derp"] = _make_derp_list(derp)
+    return _MockClient(responses), derp
+
+
+@pytest.mark.asyncio
+async def test_refresh_derp_unmaps_a_device_withdrawn_from_a_program():
+    """A device whose assignment is withdrawn stops being a target of that program.
+
+    /derp/1 was discovered through /fsa/1, so withdrawing /edev/2's /fsa/2
+    removes no program and the whole-program prune never runs. The pair has to
+    go on its own, from both indexes, while /edev/1 keeps the program.
+    """
+    client, _ = _two_devices_one_program()
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1", "/edev/2"]
+
+    client._responses["/edev/2/fsa"] = _make_fsa_list()
+    removed_fsa_programs = await refresh_function_set_assignments(client, state)  # type: ignore[arg-type]
+    removed = await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    assert removed_fsa_programs == []
+    assert removed == []
+    assert "/derp/1" in state.der_programs
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1"]
+    assert state.device_mapping.device_to_programs["/edev/2"] == []
+    assert state.device_mapping.device_to_programs["/edev/1"] == ["/derp/1"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_derp_maps_a_withdrawn_device_again_when_it_is_reassigned():
+    """The pair comes back once the server assigns the program to the device again.
+
+    ``DeviceMapping.add`` tests membership on the device's program list, so a
+    removal that left that list stale would stop the add from restoring the pair.
+    """
+    client, derp = _two_devices_one_program()
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+    client._responses["/edev/2/fsa"] = _make_fsa_list()
+    await refresh_function_set_assignments(client, state)  # type: ignore[arg-type]
+    await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    client._responses["/edev/2/fsa"] = _make_fsa_list(
+        _make_fsa("/fsa/2", derp_list_href="/fsa/2/derp")
+    )
+    client._responses["/fsa/2/derp"] = _make_derp_list(derp)
+    await refresh_function_set_assignments(client, state)  # type: ignore[arg-type]
+    await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1", "/edev/2"]
+    assert state.device_mapping.device_to_programs["/edev/2"] == ["/derp/1"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_derp_keeps_a_device_that_reaches_the_program_through_another_fsa():
+    """Withdrawing one of two assignments that name a program leaves the device mapped."""
+    client, _ = _two_devices_one_program(second_device_fsas=("/fsa/2", "/fsa/3"))
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    client._responses["/edev/2/fsa"] = _make_fsa_list(
+        _make_fsa("/fsa/3", derp_list_href="/fsa/3/derp")
+    )
+    await refresh_function_set_assignments(client, state)  # type: ignore[arg-type]
+    await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1", "/edev/2"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_derp_keeps_the_pairs_of_a_device_whose_program_list_is_unreadable():
+    """An unreadable DERP list is not a withdrawal, so no pair of that device is dropped."""
+    client, _ = _two_devices_one_program()
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    client._responses["/fsa/2/derp"] = Sep2ProtocolError("Not found", 404)
+    await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    assert state.device_mapping.program_to_devices["/derp/1"] == ["/edev/1", "/edev/2"]
+    assert state.device_mapping.device_to_programs["/edev/2"] == ["/derp/1"]
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawn_device_is_not_sent_the_programs_control():
+    """Driven through the client's refresh sequence, then the event processor.
+
+    The write is what matters, not the mapping: a stale pair is a control
+    applied to hardware that is no longer assigned to the program.
+    """
+    client, _ = _two_devices_one_program()
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+    client._responses["/edev/2/fsa"] = _make_fsa_list()
+    await refresh_function_set_assignments(client, state)  # type: ignore[arg-type]
+    await refresh_der_programs(client, state)  # type: ignore[arg-type]
+
+    now = int(time.time())
+    state.der_programs["/derp/1"].der_controls = [
+        _make_derc(
+            0x01,
+            start=now - 10,
+            duration=3600,
+            base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=5000)),
+        )
+    ]
+    http = AsyncMock()
+    http.profile = ServerProfile(base=Edition.E2023)
+    http.post = AsyncMock(return_value=None)
+    dispatcher = AsyncMock()
+    processor = EventProcessor(http, state, dispatcher, asyncio.Event())
+
+    await processor.process_controls("/derp/1")
+    await processor.shutdown()
+
+    applied = [call.args[0] for call in dispatcher.apply_control.await_args_list]
+    assert applied == ["/edev/1"]
 
 
 @pytest.mark.asyncio
