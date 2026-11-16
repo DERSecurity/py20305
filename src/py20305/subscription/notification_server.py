@@ -85,8 +85,15 @@ class NotificationServer:
         on_notification: NotificationCallback | None = None,
         client_cert_mode: ClientCertMode = "warn",
         traffic_recorder: TrafficRecorder | None = None,
+        shutdown_timeout: float = 2.0,
     ) -> None:
         self._host = host
+        # How long stop() lets a request still being received finish. aiohttp's
+        # own default is 60 s, so one peer that stalls part way through a POST
+        # would hold the stop for a minute. A notification handler answers as
+        # soon as the body is parsed (the work runs in a background task), so a
+        # request that needs longer than this is not one worth waiting for.
+        self._shutdown_timeout = shutdown_timeout
         self._port = port
         self._tls = tls
         self._on_notification = on_notification
@@ -162,7 +169,7 @@ class NotificationServer:
         self._app = web.Application()
         self._app.router.add_post("/notify", self._handle_notify)
 
-        self._runner = web.AppRunner(self._app)
+        self._runner = web.AppRunner(self._app, shutdown_timeout=self._shutdown_timeout)
         await self._runner.setup()
 
         ssl_ctx = self._create_server_ssl_context()
