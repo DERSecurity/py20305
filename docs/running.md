@@ -83,7 +83,8 @@ server:
   `supported_modes2()` when it implements a method it cannot honor on the
   device.
 - **`extensions`** are schemas in other namespaces. `auto` detects CSIP-AUS from
-  the namespaces the server declares.
+  the namespaces the server declares, on every discovery. A list replaces
+  detection: `[]` sends no CSIP-AUS elements to a server that declares them.
 
 Inbound, the client accepts any element either edition defines and logs, at
 INFO, each element the server sends that its base does not define and which
@@ -132,6 +133,15 @@ schedule and reported to the server:
 | LogEvents, when a device raises an alarm | On the reading cycle |
 
 A device configured as a meter reports its readings only; see [Meters](#meters).
+
+If the server answers a readings POST with 400 or 404, it no longer knows the
+device's MirrorUsagePoint, for example after it restarted with a new resource
+tree. The client then POSTs the MirrorUsagePoint again in the same cycle and
+posts that cycle's readings to the new one, so nothing is lost beyond the
+refused POST. It makes one re-POST per cycle: if the re-POST fails or the
+readings are refused again, the next cycle tries again. A 403 is not retried;
+it means another client owns the MirrorUsagePoint, and the device stays
+blocked until it is restarted.
 
 `der_resource_put_policy: on_change` replaces the two DER resource rates. It
 PUTs DERCapability and DERSettings once each, at startup, and then only when

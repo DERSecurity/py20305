@@ -506,19 +506,16 @@ class TelemetryManager:
                 # ReadingType registered before readings for it are posted
                 # (Rule h.2); without it the server answers 400 (Rule h.3).
                 await self._post_mup(state, readings)
-            # Post cadence, not acquisition cadence -- see
-            # create_meter_reading_list. The planner may read sooner (a tighter
-            # consumer) or much later (a device in backoff); the next POST is
-            # the one thing we can promise. Taken after any re-POST above, whose
-            # readback may have changed post_rate.
-            next_update = int(self._timebase.now()) + state.post_rate
-            await self._post_readings(
-                state,
-                readings,
-                timestamp=acquired_at,
-                next_update_time=next_update,
-                stale=stale,
-            )
+            refused = await self._post_cycle_readings(state, readings, acquired_at, stale)
+            if refused:
+                # The server no longer knows this MUP. Create it again and post
+                # the same readings now, rather than losing this cycle's and
+                # the next one's. Only one re-POST is made: a second refusal
+                # resets the state and leaves the retry to the next cycle,
+                # as does a failed re-POST.
+                await self._post_mup(state, readings, snapshot.declared_readings)
+                if state.mup_posted:
+                    await self._post_cycle_readings(state, readings, acquired_at, stale)
 
         # A meter has no DER alarms and no DER availability.
         if state.role is not DeviceRole.DER:
@@ -529,6 +526,30 @@ class TelemetryManager:
 
         # Stage 3: DERAvailability PUT
         await self._put_der_availability(state, connector)
+
+    async def _post_cycle_readings(
+        self,
+        state: DeviceTelemetryState,
+        readings: list[Reading],
+        acquired_at: int,
+        stale: bool,
+    ) -> bool:
+        """POST one cycle's readings; return True when the server refused the MUP.
+
+        Post cadence, not acquisition cadence -- see create_meter_reading_list.
+        The planner may read sooner (a tighter consumer) or much later (a device
+        in backoff); the next POST is the one thing we can promise. The time is
+        taken here, after any re-POST of the MUP, whose readback may have
+        changed ``post_rate``.
+        """
+        next_update = int(self._timebase.now()) + state.post_rate
+        return await self._post_readings(
+            state,
+            readings,
+            timestamp=acquired_at,
+            next_update_time=next_update,
+            stale=stale,
+        )
 
     def _history_for(self, lfdi: str) -> IntervalHistory | None:
         """Return the interval history a device's readings go to.
@@ -610,8 +631,9 @@ class TelemetryManager:
         """POST MUP to server, track location and server-preferred postRate.
 
         The first POST of a device's MUP posts no readings that cycle; they
-        begin on the next one. A re-POST, made when the registered set grows,
-        is followed by that cycle's readings.
+        begin on the next one. A re-POST, made when the registered set grows or
+        when the server refused the cycle's readings with 400 or 404, is followed
+        by that cycle's readings.
 
         IEEE B.17.1: The server MAY modify postRate to indicate its preferred
         posting rate. We read back the created MUP to honour the server's rate.
@@ -971,12 +993,15 @@ class TelemetryManager:
         timestamp: int | None = None,
         next_update_time: int | None = None,
         stale: bool = False,
-    ) -> None:
+    ) -> bool:
         """POST meter readings to MUP location.
 
         ``timestamp`` is the acquisition instant in the server timebase.
         Defaults to post time only for callers that have no acquisition to
         cite, which after the poll planner is just tests.
+
+        Returns True when the server answered 400 or 404, in which case the
+        MUP state is reset and the caller may re-POST the MUP.
         """
         # Discover MUP href if not known
         if not state.mup_href:
@@ -984,7 +1009,7 @@ class TelemetryManager:
 
         if not state.mup_href:
             logger.warning("No MUP href for %s, cannot post readings", state.lfdi[:8])
-            return
+            return False
 
         reading_list = create_meter_reading_list(
             state.lfdi,
@@ -1006,7 +1031,7 @@ class TelemetryManager:
             # vehicle plugged in, say) sends nothing rather than an empty list
             # (CSIP G27: data a DER cannot provide SHALL not be sent).
             logger.debug("No readings for %s this cycle, skipping POST", state.lfdi[:8])
-            return
+            return False
         body = to_xml(reading_list, profile=self._client.profile)
 
         try:
@@ -1031,6 +1056,7 @@ class TelemetryManager:
                 logger.info("MUP %s for %s, will recreate", e.status_code, state.lfdi[:8])
                 state.mup_posted = False
                 state.mup_href = None
+                return True
             elif e.status_code == 403:
                 # A conformant server (IEEE 2030.5-2023 §10.11.3 Rule e) rejects
                 # POSTs to a MUP from any LFDI other than its creator's.
@@ -1106,6 +1132,7 @@ class TelemetryManager:
                 details={"lfdi": state.lfdi, "op": "readings_post", "error": str(e)},
                 exc_info=True,
             )
+        return False
 
     async def _post_log_event(
         self,

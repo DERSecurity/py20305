@@ -493,6 +493,9 @@ class TestGetTime:
             "offset_seconds",
             "age_seconds",
             "href",
+            "scope",
+            "fsa_href",
+            "spread_seconds",
         )
         assert [k for k in derived if result[k] is not None] == []
 
@@ -631,3 +634,151 @@ class TestGetTime:
             result = service.get_time()
         assert result["dst_active"] is False
         assert result["local_time"] == 1_500
+
+
+def _observe_fsa(
+    tb: ServerTimebase, fsa_href: str, server_time: int, *, quality: int, now: float, tick: float
+) -> None:
+    """Record a per-FSA observation at local time ``now`` and monotonic time ``tick``."""
+    with patch("time.time", return_value=now), patch("time.monotonic", return_value=tick):
+        tb.observe(server_time, fsa_href=fsa_href, quality=quality, href=f"{fsa_href}/tm")
+
+
+def _fsa_only_timebase(mock_client: MagicMock) -> ServerTimebase:
+    """Attach a timebase with no global observation, for per-FSA Time only."""
+    tb = ServerTimebase(drift_warn_seconds=0)
+    mock_client.http.timebase = tb
+    mock_client.state.time = None
+    mock_client.state.fsa_time = {}
+    return tb
+
+
+class TestGetTimeFromFsaScopes:
+    """A head-end that links Time only from its FSAs leaves no global observation."""
+
+    def test_a_global_observation_is_reported_as_global_scope(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        _with_timebase(service, mock_client, observed=1_030, now=1_000.0)
+
+        with patch("time.time", return_value=1_000.0):
+            result = service.get_time()
+
+        assert result["scope"] == "global"
+        assert result["fsa_href"] is None
+        assert result["spread_seconds"] is None
+
+    def test_a_lone_fsa_observation_answers_when_there_is_no_global_one(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        tb = _fsa_only_timebase(mock_client)
+        _observe_fsa(tb, "/fsa/1", 1_030, quality=3, now=1_000.0, tick=50.0)
+
+        with patch("time.time", return_value=1_000.0), patch("time.monotonic", return_value=50.0):
+            result = service.get_time()
+
+        assert result["source"] == "server"
+        assert result["current_time"] == 1_030
+        assert result["scope"] == "fsa"
+        assert result["fsa_href"] == "/fsa/1"
+        assert result["href"] == "/fsa/1/tm"
+        assert result["offset_seconds"] == 30.0
+        assert result["spread_seconds"] is None
+
+    def test_the_fsa_with_the_lowest_quality_value_answers(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        """IEEE 2030.5 defines lower Time.quality values as more accurate sources."""
+        tb = _fsa_only_timebase(mock_client)
+        _observe_fsa(tb, "/fsa/1", 1_100, quality=5, now=1_000.0, tick=60.0)
+        _observe_fsa(tb, "/fsa/2", 1_030, quality=3, now=1_000.0, tick=50.0)
+
+        with patch("time.time", return_value=1_000.0), patch("time.monotonic", return_value=60.0):
+            result = service.get_time()
+
+        assert result["fsa_href"] == "/fsa/2"
+        assert result["quality"] == 3
+        assert result["current_time"] == 1_030
+        assert result["spread_seconds"] == 70.0
+
+    def test_equal_quality_goes_to_the_most_recent_observation(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        tb = _fsa_only_timebase(mock_client)
+        _observe_fsa(tb, "/fsa/1", 1_030, quality=3, now=1_000.0, tick=50.0)
+        _observe_fsa(tb, "/fsa/2", 1_040, quality=3, now=1_000.0, tick=60.0)
+
+        with patch("time.time", return_value=1_000.0), patch("time.monotonic", return_value=60.0):
+            result = service.get_time()
+
+        assert result["fsa_href"] == "/fsa/2"
+
+    def test_an_aged_out_observation_yields_to_one_still_renewed(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        tb = _fsa_only_timebase(mock_client)
+        _observe_fsa(tb, "/fsa/1", 1_030, quality=3, now=1_000.0, tick=0.0)
+        _observe_fsa(tb, "/fsa/2", 1_040, quality=5, now=1_000.0, tick=9_000.0)
+
+        with (
+            patch("time.time", return_value=1_000.0),
+            patch("time.monotonic", return_value=9_001.0),
+        ):
+            result = service.get_time()
+
+        assert result["fsa_href"] == "/fsa/2"
+
+    def test_when_every_observation_has_aged_out_the_most_recent_answers(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        tb = _fsa_only_timebase(mock_client)
+        _observe_fsa(tb, "/fsa/1", 1_030, quality=3, now=1_000.0, tick=0.0)
+        _observe_fsa(tb, "/fsa/2", 1_040, quality=5, now=1_000.0, tick=100.0)
+
+        with (
+            patch("time.time", return_value=1_000.0),
+            patch("time.monotonic", return_value=100_000.0),
+        ):
+            result = service.get_time()
+
+        assert result["source"] == "server"
+        assert result["fsa_href"] == "/fsa/2"
+
+    def test_the_time_zone_fields_come_from_the_answering_fsas_time_resource(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        tb = _fsa_only_timebase(mock_client)
+        _observe_fsa(tb, "/fsa/1", 1_030, quality=3, now=1_000.0, tick=50.0)
+        mock_client.state.fsa_time = {
+            "/fsa/1": ("/fsa/1/tm", _time_resource(tz_offset=-18_000, dst_offset=0)),
+        }
+
+        with patch("time.time", return_value=1_000.0), patch("time.monotonic", return_value=50.0):
+            result = service.get_time()
+
+        assert result["tz_offset"] == -18_000
+        assert result["local_time"] == 1_030 - 18_000
+
+    def test_a_global_observation_wins_over_fsa_observations(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        tb = _fsa_only_timebase(mock_client)
+        _observe_fsa(tb, "/fsa/1", 5_000, quality=3, now=1_000.0, tick=50.0)
+        with patch("time.time", return_value=1_000.0):
+            tb.observe(1_030, quality=4, href="/tm")
+
+        with patch("time.time", return_value=1_000.0):
+            result = service.get_time()
+
+        assert result["scope"] == "global"
+        assert result["current_time"] == 1_030
+
+    def test_unavailable_with_no_observation_of_any_scope(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        _fsa_only_timebase(mock_client)
+
+        result = service.get_time()
+
+        assert result["source"] == "unavailable"
+        assert result["scope"] is None

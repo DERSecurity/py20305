@@ -47,7 +47,12 @@ pass to a monitoring system.
   (dynamic operating envelope) limits. The client writes its CSIP-AUS
   extensions in the namespace the server declares, so it works with servers on
   CSIP-AUS 1.3 (`https://csipaus.org/ns/v1.3`) and on earlier versions
-  (`https://csipaus.org/ns`).
+  (`https://csipaus.org/ns`). Once discovery detects CSIP-AUS, the HTTP client
+  writes the extensions with no further setting, and each discovery follows
+  what the server declares now. Setting `Sep2Client.csip_aus_mode` to `True` or
+  `False`, or listing `extensions` in the configuration, overrides detection.
+  `doeModesSupported` and `doeModesEnabled` default to the DOE limits the
+  connector implements.
 
 The client maps one certificate identity to one end device: it registers and
 drives that device, rather than fanning one server-side EndDevice out across

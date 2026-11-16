@@ -355,3 +355,25 @@ def implemented_modes2(connector: object) -> int:
         if getattr(connector, method, None) is not None:
             bits |= 1 << bit
     return bits
+
+
+def implemented_doe_modes(connector: object) -> int:
+    """Return the CSIP-AUS DOE control bitmap of the limits ``connector`` implements.
+
+    Bit 0 is opModExpLimW, bit 1 opModImpLimW, bit 2 opModGenLimW and bit 3
+    opModLoadLimW (the ``DOEControlType`` bitmap in ``csipaus-ext.xsd``). A limit
+    counts when the dispatcher would deliver it to the connector, so inheriting
+    the base class's no-op is not support, and a plugin-backed connector counts
+    the limits its live offer carries.
+    """
+    from py20305.connectors.dispatcher import ConnectorDispatcher
+
+    bits = 0
+    for bit, element in enumerate(DOE_ELEMENTS):
+        method, _reason = ConnectorDispatcher._control_support(
+            connector,  # type: ignore[arg-type]
+            element.method,
+        )
+        if method is not None:
+            bits |= 1 << bit
+    return bits
