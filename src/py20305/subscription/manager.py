@@ -329,20 +329,36 @@ class SubscriptionManager:
             logger.warning("Failed to cancel subscription %s", subscription_uri, exc_info=True)
             return False
 
-    async def cancel_all(self) -> None:
-        """Cancel all active subscriptions in parallel, tolerating individual errors."""
+    async def cancel_all(self, timeout: float | None = None) -> None:
+        """Cancel all active subscriptions in parallel, tolerating individual errors.
+
+        ``timeout`` bounds the whole call, in seconds; ``None`` waits for every
+        DELETE. A DELETE still unanswered when it elapses is abandoned, and its
+        subscription stays on the server, as it would after a crash. Without the bound, one
+        server that accepts the connection and never answers holds the caller
+        for the HTTP client's full read timeout, and one that cannot be reached
+        for every connection attempt and retry: 15 to 30 s of a service stop
+        spent waiting on a request whose outcome changes nothing locally.
+        """
         uris = list(self._subscriptions.keys())
         if not uris:
             return
-        results = await asyncio.gather(
-            *(self._cancel_one(uri) for uri in uris),
-            return_exceptions=True,
-        )
-        for uri, result in zip(uris, results, strict=True):
-            if isinstance(result, BaseException):
-                logger.warning("Error cancelling %s: %s", uri, result)
-        # Always clear all local state -- stale entries block re-subscription
-        self._subscriptions.clear()
+        tasks = [asyncio.ensure_future(self._cancel_one(uri)) for uri in uris]
+        try:
+            _, pending = await asyncio.wait(tasks, timeout=timeout)
+            if pending:
+                logger.warning(
+                    "Abandoned %d subscription cancellation(s) still unanswered after %.1f s",
+                    len(pending),
+                    timeout,
+                )
+        finally:
+            # Also reached when the caller is cancelled: no DELETE outlives the call.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Always clear all local state -- stale entries block re-subscription
+            self._subscriptions.clear()
 
     async def reconcile(
         self,

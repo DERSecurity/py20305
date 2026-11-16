@@ -147,6 +147,13 @@ re-POSTs it to the list. `subscription.backstop_poll_seconds` (default 900)
 sets how often a subscribed resource is still polled, in case notifications
 stop; it is never faster than the resource's pollRate.
 
+On shutdown the client DELETEs its subscriptions, all at once, and waits at
+most 2 s for the answers (`CsipClient.shutdown(subscription_cancel_timeout=...)`);
+a subscription the server has not confirmed by then stays on the server. The
+notification listener then stops, waiting at most 2 s for a notification still
+being received (`NotificationServer(shutdown_timeout=...)`). An unreachable or
+unresponsive server therefore no longer holds a stop for the HTTP timeouts.
+
 The server has the final say on the posting rate: an `EndDevice.postRate` above
 zero replaces `post_rate_seconds` for that device, which is what IEEE 2030.5
 specifies. A server exposing no MirrorUsagePointList stops the readings only —

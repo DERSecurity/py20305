@@ -311,6 +311,43 @@ class TestNotificationServerLifecycle:
         server = NotificationServer(host="127.0.0.1", port=0, tls=None)
         await server.stop()  # Should not raise
 
+    @pytest.mark.asyncio
+    async def test_stop_is_not_held_by_a_peer_that_stalls_mid_request(self):
+        """A POST whose body never arrives holds stop() for the shutdown timeout only.
+
+        aiohttp's own default would hold it for 60 s.
+        """
+        import socket
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        server = NotificationServer(
+            host="127.0.0.1",
+            port=port,
+            tls=None,
+            on_notification=AsyncMock(),
+            client_cert_mode="off",
+            shutdown_timeout=0.2,
+        )
+        await server.start()
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            # Headers promise a body; only part of it is ever sent.
+            writer.write(b"POST /notify HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n<Notif")
+            await writer.drain()
+            await asyncio.sleep(0.1)  # the handler is now waiting for the body
+
+            loop = asyncio.get_running_loop()
+            start = loop.time()
+            await server.stop()
+
+            # Each of aiohttp's two shutdown waits is bounded by the timeout.
+            assert loop.time() - start < 2.0
+            assert server.running is False
+        finally:
+            writer.close()
+
     def test_build_notification_uri(self):
         server = NotificationServer(port=10443)
         uri = server.build_notification_uri("192.168.1.100")

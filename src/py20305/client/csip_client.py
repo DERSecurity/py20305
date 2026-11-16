@@ -1995,8 +1995,15 @@ class CsipClient:
             await self._on_rediscovered()
         return True
 
-    async def shutdown(self, timeout: float = 10.0) -> None:
-        """Gracefully stop polling, event timers, and close the HTTP session."""
+    async def shutdown(
+        self, timeout: float = 10.0, *, subscription_cancel_timeout: float | None = 2.0
+    ) -> None:
+        """Gracefully stop polling, event timers, and close the HTTP session.
+
+        ``timeout`` bounds the wait for the poll tasks. ``subscription_cancel_timeout``
+        bounds the DELETEs that cancel this client's subscriptions; ``None`` waits
+        for every one. See :meth:`SubscriptionManager.cancel_all`.
+        """
         self._shutdown_event.set()
         # Before anything is torn down. An expiry firing later would call
         # clear_comm_loss_simulation() against a stopped notification server and
@@ -2008,7 +2015,7 @@ class CsipClient:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._renewal_task
         if self._subscription_manager:
-            await self._subscription_manager.cancel_all()
+            await self._subscription_manager.cancel_all(timeout=subscription_cancel_timeout)
         if self._notification_server:
             await self._notification_server.stop()
         await self._event_processor.shutdown()

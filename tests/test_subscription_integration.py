@@ -440,6 +440,34 @@ class TestLifecycle:
         assert not notification_server.running
 
     @pytest.mark.asyncio
+    async def test_shutdown_is_not_held_by_a_server_that_never_answers(
+        self,
+        client: CsipClient,
+        sub_manager: SubscriptionManager,
+        notification_server: NotificationServer,
+        mock_http: AsyncMock,
+    ):
+        """A DELETE nobody answers is abandoned by default, and the listener still stops."""
+        await notification_server.start()
+        await sub_manager.subscribe("/edev/1/sub", "/edev/1/fsa", "FSAList")
+
+        async def never_answered(_uri: str) -> int:
+            await asyncio.sleep(3600)
+            return 200
+
+        mock_http.delete = AsyncMock(side_effect=never_answered)
+
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        await client.shutdown()
+
+        # The default bound is 2 s.
+        assert loop.time() - start < 4.0
+        mock_http.delete.assert_awaited_once()
+        assert not notification_server.running
+        assert sub_manager.active_subscriptions == []
+
+    @pytest.mark.asyncio
     async def test_rediscovery_keeps_stable_subscriptions(
         self, client: CsipClient, sub_manager: SubscriptionManager, mock_http: AsyncMock
     ):
