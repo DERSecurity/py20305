@@ -325,6 +325,8 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
             notification_uri=notification_server.build_notification_uri(external_host),
             missing_location_fallback=config.server.profile().missing_location_fallback,
             renewal_method=config.subscription.renewal_method,
+            adopt_on_connect=config.subscription.adopt_existing,
+            remove_duplicates=config.subscription.remove_duplicates,
             # A renewal answered 401/404 means the server has forgotten us;
             # rediscovery re-subscribes against its current state. Wrapped to
             # drop the bool trigger_rediscovery returns, which the manager's

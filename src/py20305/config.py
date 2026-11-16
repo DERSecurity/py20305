@@ -462,6 +462,23 @@ class SubscriptionConfig(_Strict):
             "one to the list when the server answers 404 or 405."
         ),
     )
+    adopt_existing: bool = Field(
+        default=False,
+        description=(
+            "At startup, take over the subscriptions the server already holds for this "
+            "EndDevice with this client's notificationURI, instead of creating new ones. "
+            "For a client that takes over from another instance of itself with the same "
+            "certificate and notification address."
+        ),
+    )
+    remove_duplicates: bool = Field(
+        default=False,
+        description=(
+            "With adopt_existing, DELETE the further subscriptions of this client's that "
+            "the server holds for a resource it adopted. Subscriptions with another "
+            "notificationURI are never touched."
+        ),
+    )
     backstop_poll_seconds: float = Field(
         default=900.0,
         gt=0,
@@ -479,6 +496,15 @@ class SubscriptionConfig(_Strict):
             raise ValueError(
                 "subscription.enabled requires subscription.notification_external_host -- "
                 "it becomes the notificationURI the server delivers to"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _remove_duplicates_needs_adoption(self) -> SubscriptionConfig:
+        """Duplicates are found while adopting, so removal has nothing to act on alone."""
+        if self.remove_duplicates and not self.adopt_existing:
+            raise ValueError(
+                "subscription.remove_duplicates requires subscription.adopt_existing: true"
             )
         return self
 

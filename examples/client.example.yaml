@@ -192,6 +192,8 @@ connection:
 #   notification_port: 10443
 #   renewal_method: post        # or put (PUT to the subscription's own href)
 #   backstop_poll_seconds: 900  # never faster than the resource's pollRate
+#   adopt_existing: false       # take over this client's subscriptions already on the server
+#   remove_duplicates: false    # with adopt_existing, DELETE further copies of them
 
 # Read each configured device on a schedule and report it upstream: readings
 # mirrored as MirrorUsagePoints, and DERCapability, DERSettings, DERStatus and

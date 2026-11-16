@@ -776,6 +776,49 @@ class TestRunnerSubscriptionWiring:
         assert client.subscription_manager is not None
         assert client.subscription_manager._renewal_method == method
 
+    def test_the_configured_adoption_settings_reach_the_manager(self, tmp_path):
+        from py20305.cli import build_client
+
+        config = self._config(
+            tmp_path,
+            {
+                "enabled": True,
+                "notification_external_host": "dut.example.com",
+                "adopt_existing": True,
+                "remove_duplicates": True,
+            },
+        )
+        client, _ = build_client(config)
+
+        assert client.subscription_manager is not None
+        assert client.subscription_manager.adopt_on_connect is True
+        assert client.subscription_manager.remove_duplicates is True
+
+    def test_adoption_is_off_by_default(self, tmp_path):
+        from py20305.cli import build_client
+
+        config = self._config(
+            tmp_path, {"enabled": True, "notification_external_host": "dut.example.com"}
+        )
+        client, _ = build_client(config)
+
+        assert client.subscription_manager is not None
+        assert client.subscription_manager.adopt_on_connect is False
+        assert client.subscription_manager.remove_duplicates is False
+
+    def test_remove_duplicates_without_adopt_existing_is_a_config_error(self, tmp_path):
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError, match="adopt_existing"):
+            self._config(
+                tmp_path,
+                {
+                    "enabled": True,
+                    "notification_external_host": "dut.example.com",
+                    "remove_duplicates": True,
+                },
+            )
+
     def test_the_configured_backstop_poll_interval_is_used(self, tmp_path):
         """The threshold it sets is covered in test_polling."""
         from py20305.cli import build_client
