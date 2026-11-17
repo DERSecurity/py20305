@@ -570,7 +570,7 @@ class TestSunSpecUpdate:
             "pf_kof": 0.5,
             "pf_kuf": 0.5,
             "pf_olrt": 3.0,
-            "pf_pmin": 25,
+            "pf_pmin_w": 1250,  # 25% of the 5000 W rating
         }
         await sunspec_connector.update_pf(params)
         model = sunspec_connector._target.models[711][0]
@@ -706,19 +706,23 @@ class TestSunSpecUpdate:
         assert model.VarSetMod.value == 1
 
     @pytest.mark.asyncio
-    async def test_update_const_q_unsupported_ref_type_not_applied(self, sunspec_connector, caplog):
+    async def test_update_const_q_unsupported_ref_type_is_declined(
+        self, sunspec_connector, caplog
+    ):
         """An unmapped DERUnitRefType must not silently apply the percent
-        against a default (wrong) base -- warn and skip the write instead."""
+        against a default (wrong) base. It is declined, so the server is told the
+        control is not supported, and no enable is raised."""
         import logging
 
         model = sunspec_connector._target.models[704][0]
         model.write.reset_mock()
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING), pytest.raises(ModeNotSupportedError):
             # ref_type 5 (%setMaxChargeRateW) has no var-mode equivalent.
             await sunspec_connector.update_const_q(
                 {"const_q_mode_enable": 1, "const_q_pct": 44, "ref_type": 5}
             )
         model.write.assert_not_called()
+        model.VarSetEna.write.assert_not_called()
         assert any("DERUnitRefType" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
@@ -1097,8 +1101,8 @@ class TestSunSpecPLimWattsRegisters:
 
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
         assert model_702.WMax.cvalue == 5000
-        # The rate setting itself stays where the event put it.
-        assert model_702.WDisChaRteMax.cvalue == 4000
+        # The rate setting returns to its rating, the value for no limit.
+        assert model_702.WDisChaRteMax.cvalue == 5000
 
     @pytest.mark.asyncio
     async def test_wmax_baseline_captured_once_per_event(self, sunspec_connector):
@@ -1129,15 +1133,67 @@ class TestSunSpecPLimWattsRegisters:
         assert model_702.WMax.cvalue == 4500
 
     @pytest.mark.asyncio
-    async def test_clear_writes_nothing_when_nothing_was_mirrored(self, sunspec_connector):
+    async def test_clear_leaves_wmax_alone_when_nothing_was_mirrored(self, sunspec_connector):
         """No mirror, nothing to restore: a teardown that never lowered WMax
-        must not write model 702 at all."""
+        must not write WMax."""
         model_702 = sunspec_connector._target.models[702][0]
-        model_702.write.reset_mock()
+        model_702.WMax.cvalue = 4321
 
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
 
-        model_702.write.assert_not_called()
+        assert model_702.WMax.cvalue == 4321
+
+    @pytest.mark.asyncio
+    async def test_clear_returns_the_discharge_rate_to_its_rating_with_no_limit_recorded(
+        self, sunspec_connector
+    ):
+        """After a restart during an event the connector has recorded nothing,
+        and the register still holds the event's value. The clear writes the
+        rating anyway, so the event's own clear puts the register right."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WDisChaRteMax.cvalue = 1500  # left by an event before a restart
+        model_702.WDisChaRteMaxRtg.cvalue = 5000
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        assert model_702.WDisChaRteMax.cvalue == 5000
+        model_702.write.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_clear_returns_a_discharge_rate_the_device_had_below_its_rating_to_the_rating(
+        self, sunspec_connector
+    ):
+        """No limit in force means the nameplate: the device's own earlier
+        setting is not captured, since a capture is lost on restart."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WDisChaRteMax.cvalue = 3000
+        model_702.WDisChaRteMaxRtg.cvalue = 5000
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 2000})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 1000})
+        assert model_702.WDisChaRteMax.cvalue == 1000
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        assert model_702.WDisChaRteMax.cvalue == 5000
+
+    @pytest.mark.asyncio
+    async def test_a_discharge_rate_restore_that_fails_is_repeated_by_the_next_clear(
+        self, sunspec_connector
+    ):
+        model_702 = sunspec_connector._target.models[702][0]
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 2000})
+        model_702.WDisChaRteMax.cvalue = 2000
+        model_702.write.side_effect = ConnectorWriteError("write refused")
+
+        with pytest.raises(ConnectorWriteError):
+            await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        # The device did not take the refused write.
+        model_702.write.side_effect = None
+        model_702.WDisChaRteMax.cvalue = 2000
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        assert model_702.WDisChaRteMax.cvalue == 5000
 
     @pytest.mark.asyncio
     async def test_absorb_does_not_touch_wmax(self, sunspec_connector):
@@ -1163,16 +1219,197 @@ class TestSunSpecPLimWattsRegisters:
         model_704.write.assert_not_called()
         model_704.WMaxLimPctEna.write.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_any_still_drives_wmaxlimpct_independently(self, sunspec_connector):
-        """The percent-typed opModMaxLimW is unaffected by either watts-typed
-        control: it still lands on WMaxLimPct at its own value."""
-        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
-        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+    @staticmethod
+    def _effective_cap_watts(sunspec_connector):
+        """The watts the device holds from WMaxLimPct, a percent of the WMax register."""
+        model_702 = sunspec_connector._target.models[702][0]
         model_704 = sunspec_connector._target.models[704][0]
-        # 60%, not the 80% the old watts-to-percent route would have merged in.
+        return model_704.WMaxLimPct.cvalue / 100 * model_702.WMax.cvalue
+
+    @pytest.mark.asyncio
+    async def test_any_alone_is_a_percent_of_the_devices_wmax(self, sunspec_connector):
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+
+        model_704 = sunspec_connector._target.models[704][0]
         assert model_704.WMaxLimPct.cvalue == 60
         assert model_704.WMaxLimPctEna.cvalue == 1
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(3000)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("inject_first", [True, False], ids=["inject_first", "percent_first"])
+    async def test_a_percent_limit_is_a_percent_of_the_devices_own_wmax_under_an_inject_limit(
+        self, sunspec_connector, inject_first
+    ):
+        """opModMaxLimW is a percent of setMaxW (IEEE 2030.5-2023). The device's
+        WMax is 5000 W, so 60% is 3000 W however an inject limit of 4000 W,
+        which the connector mirrors onto WMax, arrives. The two do not compound:
+        the cap is the lower of 3000 W and 4000 W, in either order."""
+        inject = {"p_lim_mode_enable": 1, "p_lim_watts": 4000}
+        percent = {"p_lim_mode_enable": 1, "p_lim_w": 60}
+        if inject_first:
+            await sunspec_connector.update_p_lim_inj(inject)
+            await sunspec_connector.update_p_lim(percent)
+        else:
+            await sunspec_connector.update_p_lim(percent)
+            await sunspec_connector.update_p_lim_inj(inject)
+
+        model_702 = sunspec_connector._target.models[702][0]
+        assert model_702.WMax.cvalue == 4000
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(3000)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("inject_first", [True, False], ids=["inject_first", "percent_first"])
+    async def test_an_inject_limit_below_the_percent_limit_is_the_cap(
+        self, sunspec_connector, inject_first
+    ):
+        """60% of 5000 W is 3000 W, and an inject limit of 2000 W is lower."""
+        inject = {"p_lim_mode_enable": 1, "p_lim_watts": 2000}
+        percent = {"p_lim_mode_enable": 1, "p_lim_w": 60}
+        if inject_first:
+            await sunspec_connector.update_p_lim_inj(inject)
+            await sunspec_connector.update_p_lim(percent)
+        else:
+            await sunspec_connector.update_p_lim(percent)
+            await sunspec_connector.update_p_lim_inj(inject)
+
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(2000)
+
+    @pytest.mark.asyncio
+    async def test_a_changed_inject_limit_keeps_the_percent_limit_at_the_same_watts(
+        self, sunspec_connector
+    ):
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4500})
+
+        model_702 = sunspec_connector._target.models[702][0]
+        assert model_702.WMax.cvalue == 4500
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(3000)
+
+    @pytest.mark.asyncio
+    async def test_clearing_the_inject_limit_returns_the_percent_limit_to_the_devices_wmax(
+        self, sunspec_connector
+    ):
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        model_704 = sunspec_connector._target.models[704][0]
+        model_702 = sunspec_connector._target.models[702][0]
+        assert model_702.WMax.cvalue == 5000
+        assert model_704.WMaxLimPct.cvalue == 60
+        assert model_704.WMaxLimPctEna.cvalue == 1
+
+    @pytest.mark.asyncio
+    async def test_a_refused_percent_limit_is_not_replayed_by_a_later_inject_limit(
+        self, sunspec_connector
+    ):
+        """The device holds 60% (3000 W). A 20% update the device refuses must not
+        stay recorded, or the next inject update rewrites WMaxLimPct with it."""
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        model_704 = sunspec_connector._target.models[704][0]
+
+        model_704.write.side_effect = ConnectorWriteError("write refused")
+        with pytest.raises(ConnectorWriteError):
+            await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 20})
+        model_704.write.side_effect = None
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(3000)
+
+    @pytest.mark.asyncio
+    async def test_a_refused_percent_clear_is_not_recorded(self, sunspec_connector):
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        model_704 = sunspec_connector._target.models[704][0]
+
+        model_704.WMaxLimPctEna.write.side_effect = ConnectorWriteError("write refused")
+        with pytest.raises(ConnectorWriteError):
+            await sunspec_connector.update_p_lim({"p_lim_mode_enable": 0})
+        model_704.WMaxLimPctEna.write.side_effect = None
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+
+        assert model_704.WMaxLimPctEna.cvalue == 1
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(3000)
+
+    @staticmethod
+    def _watch_device_cap(sunspec_connector, start_pct, start_wmax):
+        """Record the cap in watts the device holds after each model 702 and 704 write."""
+        model_702 = sunspec_connector._target.models[702][0]
+        model_704 = sunspec_connector._target.models[704][0]
+        device = {"pct": start_pct, "wmax": start_wmax}
+        caps: list[float] = []
+
+        def wrote_704():
+            device["pct"] = model_704.WMaxLimPct.cvalue
+            caps.append(device["pct"] / 100 * device["wmax"])
+
+        def wrote_702():
+            device["wmax"] = model_702.WMax.cvalue
+            caps.append(device["pct"] / 100 * device["wmax"])
+
+        model_704.write.side_effect = wrote_704
+        model_702.write.side_effect = wrote_702
+        return caps
+
+    @pytest.mark.asyncio
+    async def test_raising_the_inject_limit_never_loosens_the_percent_limit(
+        self, sunspec_connector
+    ):
+        """60% of the device's 5000 W is 3000 W. Raising the mirror from 4000 W to
+        4500 W must not leave the old 75% in force over the higher WMax, which
+        would hold 3375 W until the percent is rewritten."""
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        caps = self._watch_device_cap(sunspec_connector, 75, 4000)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4500})
+
+        assert caps
+        assert max(caps) <= 3000 + 1e-6
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(3000)
+
+    @pytest.mark.asyncio
+    async def test_restoring_wmax_never_loosens_the_percent_limit(self, sunspec_connector):
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        caps = self._watch_device_cap(sunspec_connector, 75, 4000)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        assert caps
+        assert max(caps) <= 3000 + 1e-6
+        assert self._effective_cap_watts(sunspec_connector) == pytest.approx(3000)
+
+    @pytest.mark.asyncio
+    async def test_raising_the_inject_limit_never_loosens_an_active_generation_limit(
+        self, sunspec_connector
+    ):
+        """opModGenLimW is held in watts: 3000 W of the 5000 W WMax, or 75% of the
+        4000 W mirror, and the same ordering applies when the mirror rises."""
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_gen_lim({"gen_lim_mode_enable": 1, "gen_lim_w": 3000})
+        model_704 = sunspec_connector._target.models[704][0]
+        caps = self._watch_device_cap(sunspec_connector, model_704.WMaxLimPct.cvalue, 4000)
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4500})
+
+        assert caps
+        assert max(caps) <= 3000 + 1e-6
+
+    @pytest.mark.asyncio
+    async def test_a_percent_limit_cleared_under_an_inject_limit_does_not_touch_the_mirror(
+        self, sunspec_connector
+    ):
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 1, "p_lim_w": 60})
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        await sunspec_connector.update_p_lim({"p_lim_mode_enable": 0})
+
+        model_704 = sunspec_connector._target.models[704][0]
+        model_702 = sunspec_connector._target.models[702][0]
+        assert model_704.WMaxLimPctEna.cvalue == 0
+        assert model_702.WMax.cvalue == 4000
 
     @pytest.mark.asyncio
     async def test_scale_factor_bounds_the_writable_range(self, sunspec_connector):
@@ -1218,13 +1455,12 @@ class TestSunSpecPLimWattsRegisters:
         assert model_702.WDisChaRteMax.cvalue == 4000
 
     @pytest.mark.asyncio
-    async def test_clearing_restores_the_charge_rate_and_leaves_the_discharge_rate(
+    async def test_clearing_returns_both_rate_settings_to_their_ratings(
         self, sunspec_connector
     ):
-        """The rate settings have no enable bit. WChaRteMax goes to its rating
-        when the last charge limit clears; WDisChaRteMax still keeps the event's
-        value (#66). The mirrored WMax -- which the connector lowered on its own
-        initiative -- is put back."""
+        """The rate settings have no enable bit. Each goes to its rating when
+        its last limit clears. The mirrored WMax -- which the connector lowered
+        on its own initiative -- is put back."""
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
         await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 1, "p_lim_watts": 2500})
         model_702 = sunspec_connector._target.models[702][0]
@@ -1236,7 +1472,7 @@ class TestSunSpecPLimWattsRegisters:
         await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
         await sunspec_connector.update_p_lim_abs({"p_lim_mode_enable": 0})
 
-        assert model_702.WDisChaRteMax.cvalue == 4000
+        assert model_702.WDisChaRteMax.cvalue == 5000  # the rating
         assert model_702.WChaRteMax.cvalue == 5000  # the rating
         assert model_702.WMax.cvalue == 5000  # the mirror
         # Nor may the teardown reach into model 704: on the direct route that
@@ -1258,13 +1494,13 @@ class TestSunSpecPLimWattsRegisters:
         assert model_704.WMaxLimPctEna.cvalue == 1
 
     @pytest.mark.asyncio
-    async def test_enabled_without_value_leaves_the_setting_and_warns(
+    async def test_enabled_without_value_is_a_teardown_and_warns(
         self, sunspec_connector, caplog
     ):
         """An enabled-but-valueless update carries no limit to apply, so it is
-        treated as a teardown: the rate setting keeps its last written value,
-        and the mirrored WMax goes back. Leaving WMax lowered with no limit in
-        force would also contradict the fallback route, which drops its cap in
+        treated as a teardown: the rate setting returns to its rating and the
+        mirrored WMax goes back. Leaving either lowered with no limit in force
+        would also contradict the fallback route, which drops its cap in
         exactly this case."""
         import logging
 
@@ -1274,7 +1510,7 @@ class TestSunSpecPLimWattsRegisters:
         with caplog.at_level(logging.WARNING):
             await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1})
 
-        assert model_702.WDisChaRteMax.cvalue == 4000
+        assert model_702.WDisChaRteMax.cvalue == 5000
         assert model_702.WMax.cvalue == 5000
         assert any("carried no value" in r.message for r in caplog.records)
 
@@ -1365,6 +1601,34 @@ class TestSunSpecPLimWattsFallback:
         model_704 = sunspec_connector._target.models[704][0]
         assert model_704.WMaxLimPct.cvalue == 60
         assert model_704.WMaxLimPctEna.cvalue == 1
+
+    @pytest.mark.asyncio
+    async def test_clearing_inject_never_writes_a_discharge_rate_the_device_lacks(
+        self, sunspec_connector
+    ):
+        """A device that does not declare discharge-rate limiting is not written
+        to when the limit clears. Its WMax is not mirrored either, so nothing
+        reaches model 702."""
+        model_702 = self._drop_register(sunspec_connector, "WDisChaRteMax")
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        model_702.write.reset_mock()
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        model_702.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_clearing_inject_on_a_zero_discharge_rating_writes_nothing_to_model_702(
+        self, sunspec_connector
+    ):
+        model_702 = sunspec_connector._target.models[702][0]
+        model_702.WDisChaRteMaxRtg = MagicMock(value=0, cvalue=0)
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 1, "p_lim_watts": 4000})
+        model_702.write.reset_mock()
+
+        await sunspec_connector.update_p_lim_inj({"p_lim_mode_enable": 0})
+
+        model_702.write.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_clearing_fallback_inject_drives_the_enable_low(self, sunspec_connector):
@@ -2877,7 +3141,7 @@ class TestTargetWPercentFallbackNeedsABase:
     async def test_no_enable_is_raised_when_the_percent_cannot_be_formed(
         self, sunspec_connector
     ):
-        """A device with no usable percent base.
+        """A device with no usable percent base declines the control.
 
         WMaxRtg of zero clears the readiness check, which rejects only None, so
         the conversion can still fail. Discovering that after the enable had
@@ -2891,7 +3155,366 @@ class TestTargetWPercentFallbackNeedsABase:
         model_702.WMax = MagicMock(value=0, cvalue=0)
         model_702.WMaxRtg = MagicMock(value=0, cvalue=0)
 
-        await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
+        with pytest.raises(ModeNotSupportedError, match="opModTargetW"):
+            await sunspec_connector.update_target_w({"mode_enable": 1, "watts": 3000})
 
         assert model_704.WSetEna.cvalue == 0
         model_704.write.assert_not_called()
+
+
+@pytest.fixture
+def no_adoption_wait(monkeypatch):
+    """Skip the one-second poll between adoption checks."""
+    from py20305.connectors.sunspec import _modbus
+
+    monkeypatch.setattr(_modbus.time, "sleep", lambda _seconds: None)
+
+
+@pytest.mark.usefixtures("no_adoption_wait")
+class TestCurveReferenceAndReferenceVoltage:
+    """The curve's own reference, reference voltage and time constant reach the
+    device as the curve states them, rather than as fixed values."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("dept_ref", [0, 1, 2, 3])
+    async def test_volt_var_writes_the_requested_curve_reference(
+        self, sunspec_connector, dept_ref
+    ):
+        await sunspec_connector.update_qv(
+            {
+                "qv_mode_enable": 1,
+                "qv_curve_v_pts": [0.95, 1.05],
+                "qv_curve_q_pts": [0.44, -0.44],
+                "qv_deptref": dept_ref,
+            }
+        )
+
+        crv = sunspec_connector._target.models[705][0].Crv[1]
+        assert crv.DeptRef.value == dept_ref
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("dept_ref", [0, 1])
+    async def test_volt_watt_writes_the_requested_curve_reference(
+        self, sunspec_connector, dept_ref
+    ):
+        await sunspec_connector.update_pv(
+            {
+                "pv_mode_enable": 1,
+                "pv_curve_v_pts": [1.06, 1.10],
+                "pv_curve_p_pts": [1.0, 0.0],
+                "pv_deptref": dept_ref,
+            }
+        )
+
+        crv = sunspec_connector._target.models[706][0].Crv[1]
+        assert crv.DeptRef.value == dept_ref
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("dept_ref", [0, 1, 2, 3])
+    async def test_watt_var_writes_the_requested_curve_reference(
+        self, sunspec_connector, dept_ref
+    ):
+        await sunspec_connector.update_qp(
+            {
+                "qp_mode_enable": 1,
+                "qp_curve_p_pts": [0.0, 1.0],
+                "qp_curve_q_pts": [0.0, 0.44],
+                "qp_deptref": dept_ref,
+            }
+        )
+
+        crv = sunspec_connector._target.models[712][0].Crv[1]
+        assert crv.DeptRef.value == dept_ref
+
+    @pytest.mark.asyncio
+    async def test_a_curve_through_the_adapter_in_percent_of_setmaxvar_writes_var_max_pct(
+        self, sunspec_connector
+    ):
+        """End to end from the IEEE 2030.5 curve: yRefType 2 (%setMaxVar) is
+        VAR_MAX_PCT (1), where a fixed VA_MAX_PCT (3) used to be written."""
+        curve = {
+            "CurveData": [{"xvalue": 95, "yvalue": 44}, {"xvalue": 105, "yvalue": -44}],
+            "xMultiplier": 0,
+            "yMultiplier": 0,
+            "yRefType": 2,
+        }
+        method, params = Controls().translate("opModVoltVar", {"enabled": True, "value": curve})
+
+        await getattr(sunspec_connector, method)(params)
+
+        crv = sunspec_connector._target.models[705][0].Crv[1]
+        assert crv.DeptRef.value == 1
+
+    @pytest.mark.asyncio
+    async def test_a_volt_var_curve_without_vref_writes_100_percent_of_nominal(
+        self, sunspec_connector
+    ):
+        """No vRef leaves the curve points unadjusted (IEEE 2030.5-2023
+        opModVoltVar multiplies them by vRef / 10000 only when it is present), so
+        VRef is 100% of nominal and not the 0 that would collapse the curve."""
+        await sunspec_connector.update_qv(
+            {
+                "qv_mode_enable": 1,
+                "qv_vref": None,
+                "qv_curve_v_pts": [0.95, 1.05],
+                "qv_curve_q_pts": [0.44, -0.44],
+            }
+        )
+
+        crv = sunspec_connector._target.models[705][0].Crv[1]
+        assert crv.VRef.cvalue == 100.0
+
+    @pytest.mark.asyncio
+    async def test_a_volt_var_curve_with_vref_writes_it(self, sunspec_connector):
+        await sunspec_connector.update_qv(
+            {
+                "qv_mode_enable": 1,
+                "qv_vref": 102.0,
+                "qv_curve_v_pts": [0.95, 1.05],
+                "qv_curve_q_pts": [0.44, -0.44],
+            }
+        )
+
+        crv = sunspec_connector._target.models[705][0].Crv[1]
+        assert crv.VRef.cvalue == 102.0
+
+    @pytest.mark.asyncio
+    async def test_the_time_constant_reaches_the_register_in_whole_seconds(
+        self, sunspec_connector
+    ):
+        """A time constant of 6000 hundredths of a second, which the adapter turns
+        into 60.0 s, is 60 in a register that counts seconds."""
+        curve = {
+            "CurveData": [{"xvalue": 95, "yvalue": 44}, {"xvalue": 105, "yvalue": -44}],
+            "xMultiplier": 0,
+            "yMultiplier": 0,
+            "yRefType": 2,
+            "autonomousVRefEnable": True,
+            "autonomousVRefTimeConstant": 6000,
+        }
+        method, params = Controls().translate("opModVoltVar", {"enabled": True, "value": curve})
+
+        await getattr(sunspec_connector, method)(params)
+
+        crv = sunspec_connector._target.models[705][0].Crv[1]
+        assert crv.VRefAutoTms.cvalue == 60
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("seconds", [65535.4, 70000.0, -0.4])
+    async def test_a_time_constant_that_overflows_the_register_is_refused_before_any_write(
+        self, sunspec_connector, seconds
+    ):
+        model = sunspec_connector._target.models[705][0]
+        with pytest.raises(ConnectorValueError, match="autonomousVRefTimeConstant"):
+            await sunspec_connector.update_qv(
+                {
+                    "qv_mode_enable": 1,
+                    "qv_vref_olrt": seconds,
+                    "qv_curve_v_pts": [0.95, 1.05],
+                    "qv_curve_q_pts": [0.44, -0.44],
+                }
+            )
+
+        model.Crv[1].write.assert_not_called()
+        model.Ena.write.assert_not_called()
+
+
+@pytest.mark.usefixtures("no_adoption_wait")
+class TestEnableFollowsTheCurve:
+    """A curve or droop function is enabled only after its curve is written and
+    adopted, so a failed write cannot leave it enabled on the previous curve."""
+
+    @staticmethod
+    def _curve_params(method):
+        return {
+            "update_qv": {
+                "qv_mode_enable": 1,
+                "qv_curve_v_pts": [0.95, 1.05],
+                "qv_curve_q_pts": [0.44, -0.44],
+            },
+            "update_pv": {
+                "pv_mode_enable": 1,
+                "pv_curve_v_pts": [1.06, 1.10],
+                "pv_curve_p_pts": [1.0, 0.0],
+            },
+            "update_qp": {
+                "qp_mode_enable": 1,
+                "qp_curve_p_pts": [0.0, 1.0],
+                "qp_curve_q_pts": [0.0, 0.44],
+            },
+            "update_pf": {
+                "pf_mode_enable": 1,
+                "pf_dbof": 0.036,
+                "pf_dbuf": 0.036,
+                "pf_kof": 0.5,
+                "pf_kuf": 0.5,
+                "pf_olrt": 3.0,
+            },
+        }[method]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method", "model_id"),
+        [("update_qv", 705), ("update_pv", 706), ("update_qp", 712), ("update_pf", 711)],
+    )
+    async def test_a_failed_curve_write_does_not_raise_the_enable(
+        self, sunspec_connector, method, model_id
+    ):
+        model = sunspec_connector._target.models[model_id][0]
+        block = model.Ctl[1] if method == "update_pf" else model.Crv[1]
+        block.write.side_effect = ConnectorWriteError("write refused")
+
+        with pytest.raises(ConnectorWriteError):
+            await getattr(sunspec_connector, method)(self._curve_params(method))
+
+        model.Ena.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method", "model_id"),
+        [("update_qv", 705), ("update_pv", 706), ("update_qp", 712), ("update_pf", 711)],
+    )
+    async def test_a_failed_adoption_does_not_raise_the_enable(
+        self, sunspec_connector, method, model_id
+    ):
+        model = sunspec_connector._target.models[model_id][0]
+        model.AdptCrvRslt.value = 2  # the device refused the curve
+        model.AdptCtlRslt.value = 2  # the device refused the control
+
+        with pytest.raises(ConnectorWriteError):
+            await getattr(sunspec_connector, method)(self._curve_params(method))
+
+        model.Ena.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method", "model_id"),
+        [("update_qv", 705), ("update_pv", 706), ("update_qp", 712), ("update_pf", 711)],
+    )
+    async def test_the_enable_is_raised_after_the_curve_is_adopted(
+        self, sunspec_connector, method, model_id
+    ):
+        model = sunspec_connector._target.models[model_id][0]
+        order: list[str] = []
+        block = model.Ctl[1] if method == "update_pf" else model.Crv[1]
+        block.write.side_effect = lambda: order.append("write")
+        model.Ena.write.side_effect = lambda: order.append("enable")
+        adopt = model.AdptCtlReq if method == "update_pf" else model.AdptCrvReq
+        adopt.write.side_effect = lambda: order.append("adopt")
+
+        await getattr(sunspec_connector, method)(self._curve_params(method))
+
+        assert order == ["write", "adopt", "enable"]
+        assert model.Ena.cvalue == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method", "model_id", "key"),
+        [
+            ("update_qv", 705, "qv_mode_enable"),
+            ("update_pv", 706, "pv_mode_enable"),
+            ("update_qp", 712, "qp_mode_enable"),
+            ("update_pf", 711, "pf_mode_enable"),
+        ],
+    )
+    async def test_disabling_lowers_the_enable_without_writing_a_curve(
+        self, sunspec_connector, method, model_id, key
+    ):
+        model = sunspec_connector._target.models[model_id][0]
+        block = model.Ctl[1] if method == "update_pf" else model.Crv[1]
+
+        await getattr(sunspec_connector, method)({key: 0})
+
+        assert model.Ena.cvalue == 0
+        model.Ena.write.assert_called_once()
+        block.write.assert_not_called()
+
+
+@pytest.mark.usefixtures("no_adoption_wait")
+class TestDroopMinimumPower:
+    """opModFreqDroop pMin is watts in IEEE 2030.5 and an int16 percent of the
+    rating in model 711 PMin."""
+
+    @staticmethod
+    def _droop(**extra):
+        return {
+            "pf_mode_enable": 1,
+            "pf_dbof": 0.036,
+            "pf_dbuf": 0.036,
+            "pf_kof": 0.5,
+            "pf_kuf": 0.5,
+            "pf_olrt": 3.0,
+        } | extra
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("watts", "percent"),
+        [(1250, 25), (0, 0), (-2500, -50), (5000, 100), (-5000, -100), (1251, 25)],
+    )
+    async def test_pmin_is_written_as_a_percent_of_the_rating(
+        self, sunspec_connector, watts, percent
+    ):
+        """The fixture rating is 5000 W."""
+        await sunspec_connector.update_pf(self._droop(pf_pmin_w=watts))
+
+        ctl = sunspec_connector._target.models[711][0].Ctl[1]
+        assert ctl.PMin.cvalue == percent
+
+    @pytest.mark.asyncio
+    async def test_a_droop_without_pmin_leaves_pmin_alone(self, sunspec_connector):
+        ctl = sunspec_connector._target.models[711][0].Ctl[1]
+        ctl.PMin.cvalue = 7
+
+        await sunspec_connector.update_pf(self._droop())
+
+        assert ctl.PMin.cvalue == 7
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("watts", [5020, -5020, 5100, -5100])
+    async def test_a_pmin_beyond_the_rating_is_refused_before_any_write(
+        self, sunspec_connector, watts
+    ):
+        model = sunspec_connector._target.models[711][0]
+        with pytest.raises(ConnectorValueError, match="pMin"):
+            await sunspec_connector.update_pf(self._droop(pf_pmin_w=watts))
+
+        model.Ctl[1].write.assert_not_called()
+        model.Ena.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_device_without_pmin_declines_the_droop(self, sunspec_connector):
+        model = sunspec_connector._target.models[711][0]
+        model.Ctl[1].PMin = MagicMock(value=None, cvalue=None)
+
+        with pytest.raises(ModeNotSupportedError, match="opModFreqDroop"):
+            await sunspec_connector.update_pf(self._droop(pf_pmin_w=1250))
+
+        model.Ctl[1].write.assert_not_called()
+        model.Ena.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_device_without_a_rating_declines_the_droop(self, sunspec_connector):
+        model = sunspec_connector._target.models[711][0]
+        sunspec_connector._target.models[702][0].WMaxRtg = MagicMock(value=0, cvalue=0)
+
+        with pytest.raises(ModeNotSupportedError, match="opModFreqDroop"):
+            await sunspec_connector.update_pf(self._droop(pf_pmin_w=1250))
+
+        model.Ena.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pmin_through_the_adapter_is_a_percent_of_the_rating(self, sunspec_connector):
+        droop = {
+            "dBOF": 36,
+            "dBUF": 36,
+            "kOF": 40,
+            "kUF": 40,
+            "openLoopTms": 500,
+            "pMin": {"value": 25, "multiplier": 2},
+        }
+        method, params = Controls().translate("opModFreqDroop", {"enabled": True, "value": droop})
+
+        await getattr(sunspec_connector, method)(params)
+
+        ctl = sunspec_connector._target.models[711][0].Ctl[1]
+        assert ctl.PMin.cvalue == 50  # 2500 W of 5000 W
