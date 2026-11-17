@@ -118,6 +118,7 @@ class SubscriptionManager:
         server_2018_compat: bool | None = None,
         adopt_on_connect: bool = False,
         remove_duplicates: bool = False,
+        unsubscribe_on_close: bool = True,
     ) -> None:
         """
         Args:
@@ -131,6 +132,9 @@ class SubscriptionManager:
                 it connects, before it creates subscriptions.
             remove_duplicates: When the client adopts, DELETE the further
                 subscriptions of ours it finds for the same resource.
+            unsubscribe_on_close: Have the client DELETE its subscriptions when
+                it shuts down. Turn off for an instance that hands over to
+                another instance with the same identity, which adopts them.
 
         Raises:
             ValueError: ``renewal_method`` is not ``post`` or ``put``, or
@@ -142,6 +146,7 @@ class SubscriptionManager:
             raise ValueError("remove_duplicates requires adopt_on_connect")
         self.adopt_on_connect = adopt_on_connect
         self.remove_duplicates = remove_duplicates
+        self.unsubscribe_on_close = unsubscribe_on_close
         self._renewal_method = renewal_method
         self._client = client
         self._notification_uri = notification_uri
@@ -670,8 +675,11 @@ class SubscriptionManager:
         failure or a malformed body), the failure is reported and nothing
         changes; the client then subscribes as it would without adoption.
 
-        An adopted subscription's last renewal time is unknown, so it is
-        recorded as due, and the renewal task renews it on its first pass.
+        An adopted subscription's last renewal time is unknown. Under the
+        ``put`` renewal method it is renewed at once, at its own href. Under
+        ``post`` it is recorded as due and the renewal task renews it on its
+        first pass: a re-POST to a server that does not apply the renewal rule
+        would create the duplicate adoption avoids.
         """
         from py20305.diagnostics import report
         from py20305.models.sep.sep import SubscriptionList
@@ -709,6 +717,7 @@ class SubscriptionManager:
                     hrefs.append(sub.href)
 
         extras: list[str] = []
+        adopted_hrefs: list[str] = []
         for resource, hrefs in ours.items():
             local = self._find_active_for_resource(resource)
             if local is not None and local.unmanaged:
@@ -722,6 +731,7 @@ class SubscriptionManager:
                 local.subscription_uri = keep
                 local.sub_list_href = sub_list_href
                 self._subscriptions[keep] = local
+                adopted_hrefs.append(keep)
                 result.adopted += 1
             else:
                 keep = hrefs[0]
@@ -735,6 +745,7 @@ class SubscriptionManager:
                     is_list_subscription=resource_type.endswith("List"),
                     sub_list_href=sub_list_href,
                 )
+                adopted_hrefs.append(keep)
                 result.adopted += 1
                 logger.info("Adopted subscription %s for %s", keep, resource)
             extras.extend(h for h in hrefs if h != keep)
@@ -756,6 +767,9 @@ class SubscriptionManager:
                 "Found %d duplicate subscription(s) of ours on the server; left in place",
                 len(extras),
             )
+
+        if self._renewal_method == "put" and adopted_hrefs:
+            await asyncio.gather(*(self.renew(h) for h in adopted_hrefs), return_exceptions=True)
 
         logger.info(
             "Subscription adoption: adopted=%d duplicates=%d removed=%d remove_errors=%d",

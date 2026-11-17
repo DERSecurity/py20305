@@ -2029,13 +2029,21 @@ class CsipClient:
         return True
 
     async def shutdown(
-        self, timeout: float = 10.0, *, subscription_cancel_timeout: float | None = 2.0
+        self,
+        timeout: float = 10.0,
+        *,
+        subscription_cancel_timeout: float | None = 2.0,
+        unsubscribe: bool | None = None,
     ) -> None:
         """Gracefully stop polling, event timers, and close the HTTP session.
 
         ``timeout`` bounds the wait for the poll tasks. ``subscription_cancel_timeout``
         bounds the DELETEs that cancel this client's subscriptions; ``None`` waits
         for every one. See :meth:`SubscriptionManager.cancel_all`.
+
+        ``unsubscribe`` decides whether those DELETEs are sent; ``None`` uses the
+        subscription manager's ``unsubscribe_on_close``. Pass False when another
+        instance with the same identity takes over and adopts the subscriptions.
         """
         self._shutdown_event.set()
         # Before anything is torn down. An expiry firing later would call
@@ -2048,7 +2056,15 @@ class CsipClient:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._renewal_task
         if self._subscription_manager:
-            await self._subscription_manager.cancel_all(timeout=subscription_cancel_timeout)
+            if unsubscribe is None:
+                unsubscribe = self._subscription_manager.unsubscribe_on_close
+            if unsubscribe:
+                await self._subscription_manager.cancel_all(timeout=subscription_cancel_timeout)
+            else:
+                logger.info(
+                    "Leaving %d subscription(s) on the server at shutdown",
+                    len(self._subscription_manager.active_subscriptions),
+                )
         if self._notification_server:
             await self._notification_server.stop()
         await self._event_processor.shutdown()

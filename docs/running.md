@@ -163,16 +163,24 @@ not treat that POST as a renewal (IEEE 2030.5-2023 §8.9.3.4) keeps both, and
 each notification arrives once per set. With adoption, the client reads every
 page of its EndDevice's SubscriptionList when it connects, takes over each
 subscription whose notificationURI is its own and whose resource it would
-subscribe to, and POSTs only for the resources left. An adopted subscription is
-renewed on the renewal task's first pass, since its last renewal time is
-unknown. `subscription.remove_duplicates: true` also DELETEs the further
+subscribe to, and POSTs only for the resources left. An adopted subscription's
+last renewal time is unknown: with `renewal_method: put` it is renewed at once;
+with `post` it is renewed on the renewal task's first pass, because a re-POST to
+a server that does not treat it as a renewal would create another copy.
+`subscription.remove_duplicates: true` also DELETEs the further
 subscriptions of its own it finds for a resource it adopted. A subscription
 with any other notificationURI is never adopted or removed. If the server does
 not return its SubscriptionList, the client logs a warning and subscribes as it
-would without adoption. An instance that is then stopped normally still DELETEs
-its subscriptions, which are the ones the other instance adopted; the other
-instance's SubscriptionList check, at the list's pollRate, creates them again.
-Embedding code can call `CsipClient.adopt_subscriptions()` itself.
+would without adoption. Embedding code can call
+`CsipClient.adopt_subscriptions()` itself.
+
+`subscription.unsubscribe_on_close: false` is the other half of a handover: the
+instance that stops leaves its subscriptions on the server for the instance
+that adopts them, instead of DELETEing them at shutdown. The default, `true`,
+DELETEs them as described above. If an instance that hands over does DELETE
+them, the adopting instance's SubscriptionList check creates them again at the
+list's pollRate, and notifications sent in between are lost. Embedding code can
+decide per stop with `CsipClient.shutdown(unsubscribe=False)`.
 
 The server has the final say on the posting rate: an `EndDevice.postRate` above
 zero replaces `post_rate_seconds` for that device, which is what IEEE 2030.5

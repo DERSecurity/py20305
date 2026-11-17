@@ -805,6 +805,23 @@ class TestRunnerSubscriptionWiring:
         assert client.subscription_manager is not None
         assert client.subscription_manager.adopt_on_connect is False
         assert client.subscription_manager.remove_duplicates is False
+        assert client.subscription_manager.unsubscribe_on_close is True
+
+    def test_the_configured_unsubscribe_on_close_reaches_the_manager(self, tmp_path):
+        from py20305.cli import build_client
+
+        config = self._config(
+            tmp_path,
+            {
+                "enabled": True,
+                "notification_external_host": "dut.example.com",
+                "unsubscribe_on_close": False,
+            },
+        )
+        client, _ = build_client(config)
+
+        assert client.subscription_manager is not None
+        assert client.subscription_manager.unsubscribe_on_close is False
 
     def test_remove_duplicates_without_adopt_existing_is_a_config_error(self, tmp_path):
         import pydantic

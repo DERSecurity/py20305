@@ -327,6 +327,7 @@ def build_client(config: ClientConfig) -> tuple[CsipClient, str]:
             renewal_method=config.subscription.renewal_method,
             adopt_on_connect=config.subscription.adopt_existing,
             remove_duplicates=config.subscription.remove_duplicates,
+            unsubscribe_on_close=config.subscription.unsubscribe_on_close,
             # A renewal answered 401/404 means the server has forgotten us;
             # rediscovery re-subscribes against its current state. Wrapped to
             # drop the bool trigger_rediscovery returns, which the manager's

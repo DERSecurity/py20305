@@ -285,24 +285,40 @@ class TestAdoptExisting:
         assert result.listed is False
         assert fake.posts == [(FSA, OURS)]
 
-    async def test_an_adopted_subscription_is_renewed_at_its_own_href(self, aiohttp_server):
+    async def test_put_renewal_renews_an_adopted_subscription_at_once(self, aiohttp_server):
         fake = FakeSubscriptionServer([("/edev/1/sub/1", FSA, OURS)])
         base_url = await _serve(aiohttp_server, fake)
 
         async with Sep2Client(base_url) as http:
             mgr = SubscriptionManager(http, OURS, renewal_method="put")
             await mgr.adopt_existing(SUB_LIST, DESIRED)
-            renewed = await mgr.renew("/edev/1/sub/1")
 
-        assert renewed is True
         assert fake.puts == ["/edev/1/sub/1"]
         assert fake.posts == []
+
+    async def test_post_renewal_leaves_an_adopted_subscription_for_the_renewal_task(
+        self, aiohttp_server
+    ):
+        # A re-POST to a server that does not apply the renewal rule would
+        # create the duplicate that adoption avoids.
+        fake = FakeSubscriptionServer([("/edev/1/sub/1", FSA, OURS)])
+        base_url = await _serve(aiohttp_server, fake)
+
+        async with Sep2Client(base_url) as http:
+            mgr = SubscriptionManager(http, OURS, renewal_method="post")
+            await mgr.adopt_existing(SUB_LIST, DESIRED)
+
+        assert fake.posts == []
+        assert fake.puts == []
 
 
 class TestManagerSettings:
     def test_remove_duplicates_without_adoption_is_rejected(self):
         with pytest.raises(ValueError, match="remove_duplicates"):
             SubscriptionManager(AsyncMock(), OURS, remove_duplicates=True)
+
+    def test_unsubscribe_on_close_is_on_by_default(self):
+        assert SubscriptionManager(AsyncMock(), OURS).unsubscribe_on_close is True
 
 
 def _edev_state() -> EndDeviceState:
@@ -380,3 +396,47 @@ class TestConnect:
             assert sorted(fake.subscriptions) == ["/edev/1/sub/100"]
         finally:
             await client.shutdown(subscription_cancel_timeout=0)
+
+
+class TestShutdown:
+    async def test_shutdown_deletes_subscriptions_by_default(self, aiohttp_server):
+        fake = FakeSubscriptionServer([])
+        base_url = await _serve(aiohttp_server, fake)
+
+        client = await _connect(base_url, {})
+        await client.shutdown()
+
+        assert fake.posts == [(FSA, OURS)]
+        assert fake.deletes == ["/edev/1/sub/100"]
+        assert fake.subscriptions == {}
+
+    async def test_unsubscribe_on_close_off_leaves_subscriptions_on_the_server(
+        self, aiohttp_server
+    ):
+        fake = FakeSubscriptionServer([("/edev/1/sub/1", FSA, OURS)])
+        base_url = await _serve(aiohttp_server, fake)
+
+        client = await _connect(base_url, {"adopt_on_connect": True, "unsubscribe_on_close": False})
+        await client.shutdown()
+
+        assert fake.deletes == []
+        assert sorted(fake.subscriptions) == ["/edev/1/sub/1"]
+
+    async def test_shutdown_unsubscribe_false_overrides_the_manager_default(self, aiohttp_server):
+        fake = FakeSubscriptionServer([])
+        base_url = await _serve(aiohttp_server, fake)
+
+        client = await _connect(base_url, {})
+        await client.shutdown(unsubscribe=False)
+
+        assert fake.deletes == []
+        assert sorted(fake.subscriptions) == ["/edev/1/sub/100"]
+
+    async def test_shutdown_unsubscribe_true_overrides_the_manager_setting(self, aiohttp_server):
+        fake = FakeSubscriptionServer([])
+        base_url = await _serve(aiohttp_server, fake)
+
+        client = await _connect(base_url, {"unsubscribe_on_close": False})
+        await client.shutdown(unsubscribe=True)
+
+        assert fake.deletes == ["/edev/1/sub/100"]

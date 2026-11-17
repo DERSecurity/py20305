@@ -479,6 +479,14 @@ class SubscriptionConfig(_Strict):
             "notificationURI are never touched."
         ),
     )
+    unsubscribe_on_close: bool = Field(
+        default=True,
+        description=(
+            "DELETE this client's subscriptions when it shuts down. Set false for an "
+            "instance that hands over to another instance with the same certificate and "
+            "notification address, which adopts them (adopt_existing)."
+        ),
+    )
     backstop_poll_seconds: float = Field(
         default=900.0,
         gt=0,
