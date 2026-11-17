@@ -14,6 +14,10 @@ from dataclasses import dataclass
 class _DdercEntry:
     mrid: bytes
     primacy: int
+    #: The control modes the writes of this default carried, or None when the
+    #: caller did not say. A default can be written without the modes an event
+    #: held at the time, so the mRID alone does not say what the device has.
+    modes: frozenset[str] | None = None
 
 
 class DdercTracker:
@@ -36,7 +40,14 @@ class DdercTracker:
             return True
         return primacy <= existing.primacy
 
-    def should_apply_initial(self, lfdi: bytes, derp_path: str, mrid: bytes, primacy: int) -> bool:
+    def should_apply_initial(
+        self,
+        lfdi: bytes,
+        derp_path: str,
+        mrid: bytes,
+        primacy: int,
+        modes: frozenset[str] | None = None,
+    ) -> bool:
         """Check if initial DDERC should be applied for this (lfdi, derp_path).
 
         Used at startup/rediscovery. Blocks application when:
@@ -48,6 +59,12 @@ class DdercTracker:
         A DDERC update on the same program (different mrid) is allowed through
         even at the same primacy: fresh defaults from the utility replace the
         ones it previously published.
+
+        ``modes`` is what this write would carry. The same default is written
+        again when that includes a mode no earlier write of it carried, which is
+        what happens when a mode an event was holding is released. Without it,
+        or when the earlier writes did not record their modes, only the mRID
+        decides.
         """
         # Cross-program check: if any other program already applied a
         # higher-priority DDERC to the same device, block this one.
@@ -61,12 +78,37 @@ class DdercTracker:
             return True
         if primacy < existing.primacy:
             return True
-        # Same primacy: re-dispatch only when DDERC content has changed.
-        return primacy == existing.primacy and mrid != existing.mrid
+        # Same primacy: re-dispatch when the DDERC content has changed, or when
+        # this write carries a mode the earlier writes of it did not.
+        if primacy != existing.primacy:
+            return False
+        if mrid != existing.mrid:
+            return True
+        return modes is not None and existing.modes is not None and not modes <= existing.modes
 
-    def record_application(self, lfdi: bytes, derp_path: str, mrid: bytes, primacy: int) -> None:
-        """Record that DDERC was applied for this (lfdi, derp_path)."""
-        self._applied[(lfdi, derp_path)] = _DdercEntry(mrid=mrid, primacy=primacy)
+    def record_application(
+        self,
+        lfdi: bytes,
+        derp_path: str,
+        mrid: bytes,
+        primacy: int,
+        modes: frozenset[str] | None = None,
+    ) -> None:
+        """Record that DDERC was applied for this (lfdi, derp_path).
+
+        ``modes`` are the control modes the write carried. Writes of one default
+        add up: a later write of the same mRID keeps the modes the earlier ones
+        carried.
+        """
+        existing = self._applied.get((lfdi, derp_path))
+        if (
+            existing is not None
+            and existing.mrid == mrid
+            and existing.modes is not None
+            and modes is not None
+        ):
+            modes = existing.modes | modes
+        self._applied[(lfdi, derp_path)] = _DdercEntry(mrid=mrid, primacy=primacy, modes=modes)
 
     def clear_devices(self, lfdis: set[bytes]) -> None:
         """Clear all tracking state for a set of devices across all programs.

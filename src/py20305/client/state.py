@@ -157,6 +157,23 @@ class DeviceMapping:
         programs.append(program_href)
         self.program_to_devices.setdefault(program_href, []).append(device_href)
 
+    def remove_pair(self, program_href: str, device_href: str) -> None:
+        """Drop one program <-> device relationship, leaving both entities in place.
+
+        Both indexes change together. :meth:`add` tests membership on
+        ``device_to_programs``, so removing the pair from ``program_to_devices``
+        alone would make a later ``add`` believe the pair still exists and never
+        restore it. Removing a pair that is not there does nothing.
+        """
+        programs = self.device_to_programs.get(device_href)
+        if programs is not None:
+            with contextlib.suppress(ValueError):
+                programs.remove(program_href)
+        devices = self.program_to_devices.get(program_href)
+        if devices is not None:
+            with contextlib.suppress(ValueError):
+                devices.remove(device_href)
+
     def remove_program(self, program_href: str) -> None:
         """Remove a program and its device associations."""
         devices = self.program_to_devices.pop(program_href, [])

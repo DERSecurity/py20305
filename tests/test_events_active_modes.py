@@ -55,3 +55,53 @@ class TestActiveModeTracker:
         r2 = tracker.unregister("d2", b"\x01" * 16)
         assert r1 == frozenset({"x"})
         assert r2 == frozenset({"y"})
+
+
+class TestRelease:
+    def test_release_removes_only_the_named_modes(self):
+        tracker = ActiveModeTracker()
+        tracker.register("d1", b"\x01" * 16, frozenset({"x", "y"}))
+
+        tracker.release("d1", b"\x01" * 16, frozenset({"x"}))
+
+        assert tracker.covered("d1") == frozenset({"y"})
+        assert tracker.unregister("d1", b"\x01" * 16) == frozenset({"y"})
+
+    def test_release_of_every_mode_drops_the_registration(self):
+        tracker = ActiveModeTracker()
+        tracker.register("d1", b"\x01" * 16, frozenset({"x"}))
+
+        tracker.release("d1", b"\x01" * 16, frozenset({"x", "unregistered"}))
+
+        assert tracker.covered("d1") == frozenset()
+        assert tracker.unregister("d1", b"\x01" * 16) == frozenset()
+
+    def test_a_released_mode_is_released_by_the_other_event_when_it_ends(self):
+        """Event A: X. Event B: X. A releases X, so B's end releases it."""
+        tracker = ActiveModeTracker()
+        tracker.register("d1", b"\x01" * 16, frozenset({"x"}))
+        tracker.register("d1", b"\x02" * 16, frozenset({"x"}))
+
+        tracker.release("d1", b"\x01" * 16, frozenset({"x"}))
+
+        assert tracker.unregister("d1", b"\x02" * 16) == frozenset({"x"})
+
+    def test_release_leaves_other_events_and_devices_alone(self):
+        tracker = ActiveModeTracker()
+        tracker.register("d1", b"\x01" * 16, frozenset({"x"}))
+        tracker.register("d1", b"\x02" * 16, frozenset({"x"}))
+        tracker.register("d2", b"\x01" * 16, frozenset({"x"}))
+
+        tracker.release("d1", b"\x01" * 16, frozenset({"x"}))
+
+        assert tracker.covered_among("d1", frozenset({b"\x02" * 16})) == frozenset({"x"})
+        assert tracker.covered_among("d2", frozenset({b"\x01" * 16})) == frozenset({"x"})
+
+    def test_release_for_an_unknown_device_or_event_does_nothing(self):
+        tracker = ActiveModeTracker()
+        tracker.register("d1", b"\x01" * 16, frozenset({"x"}))
+
+        tracker.release("unknown", b"\x01" * 16, frozenset({"x"}))
+        tracker.release("d1", b"\x99" * 16, frozenset({"x"}))
+
+        assert tracker.covered("d1") == frozenset({"x"})

@@ -154,3 +154,37 @@ class TestDdercTrackerRecordAndClear:
         assert t.should_apply_initial(lfdi_a, "/derp/1", b"\xaa" * 16, primacy=0)
         assert t.should_apply_initial(lfdi_b, "/derp/1", b"\xbb" * 16, primacy=0)
         assert not t.should_apply_initial(lfdi_c, "/derp/1", b"\xcc" * 16, primacy=0)
+
+
+class TestInitialModes:
+    """The same default is written again when it carries a mode the earlier writes did not."""
+
+    LFDI = b"\x01" * 20
+    MRID = b"\xaa" * 16
+
+    def test_a_freed_mode_is_written_again(self):
+        t = DdercTracker()
+        t.record_application(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"a"}))
+        assert t.should_apply_initial(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"a", "b"}))
+
+    def test_modes_already_written_are_not_written_again(self):
+        t = DdercTracker()
+        t.record_application(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"a", "b"}))
+        assert not t.should_apply_initial(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"a"}))
+
+    def test_earlier_writes_of_one_default_add_up(self):
+        t = DdercTracker()
+        t.record_application(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"a"}))
+        t.record_application(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"b"}))
+        assert not t.should_apply_initial(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"a", "b"}))
+
+    def test_a_new_mrid_replaces_the_recorded_modes(self):
+        t = DdercTracker()
+        t.record_application(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"a", "b"}))
+        t.record_application(self.LFDI, "/derp/1", b"\xbb" * 16, 5, frozenset({"a"}))
+        assert t.should_apply_initial(self.LFDI, "/derp/1", b"\xbb" * 16, 5, frozenset({"b"}))
+
+    def test_without_recorded_modes_only_the_mrid_decides(self):
+        t = DdercTracker()
+        t.record_application(self.LFDI, "/derp/1", self.MRID, 5)
+        assert not t.should_apply_initial(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"a"}))
