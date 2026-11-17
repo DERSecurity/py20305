@@ -168,7 +168,8 @@ Project website: <https://open-satori.org>
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+uv sync --extra dev             # installs the versions uv.lock pins
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pytest tests -q                 # unit tests, no network
 ruff check src tests examples scripts
 mypy

@@ -1,0 +1,33 @@
+name: Latest dependencies
+
+# CI installs the versions uv.lock pins. A consumer installs the newest versions
+# the ranges in pyproject.toml allow. This workflow tests that set once a week,
+# so an upstream release that breaks the library is found here before a user
+# reports it, and before Dependabot's lock update reaches it.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor and the ceiling of the supported range.
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Deliberately not from the lock: this resolves the ranges the way pip
+      # does for a consumer.
+      - run: pip install --upgrade -e ".[dev]"
+      - run: pip list
+      - run: pytest tests -q
