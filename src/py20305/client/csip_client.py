@@ -43,6 +43,7 @@ from py20305.events.tariff import TariffProcessor
 from py20305.observers import Observers
 from py20305.server_profile import ServerProfile, profile_for_constructor
 from py20305.subscription.manager import (
+    AdoptionResult,
     StoredNotification,
     SubscriptionManager,
 )
@@ -519,6 +520,8 @@ class CsipClient:
             if self._subscription_manager.active_subscriptions:
                 valid, removed = await self._subscription_manager.validate_restored_subscriptions()
                 logger.info("Subscription validation: %d valid, %d removed", valid, removed)
+            if self._subscription_manager.adopt_on_connect:
+                await self.adopt_subscriptions()
             await self._auto_subscribe()
             self._update_poll_suppression()
             if self._subscription_manager.active_subscriptions:
@@ -527,6 +530,36 @@ class CsipClient:
                         self._shutdown_event, interval_seconds=self._renewal_interval_seconds
                     )
                 )
+
+    async def adopt_subscriptions(
+        self, *, remove_duplicates: bool | None = None
+    ) -> AdoptionResult | None:
+        """Take over the subscriptions the server already holds for this client.
+
+        Calls :meth:`SubscriptionManager.adopt_existing` with this client's
+        SubscriptionList and the resources it subscribes to. ``connect()`` calls
+        this before creating subscriptions when the manager was built with
+        ``adopt_on_connect``. ``remove_duplicates`` defaults to the manager's
+        setting.
+
+        Returns None when no subscription manager is attached or discovery has
+        found no SubscriptionListLink.
+        """
+        mgr = self._subscription_manager
+        if mgr is None:
+            return None
+        sub_list_href = self._find_agg_sub_href()
+        if sub_list_href is None:
+            return None
+        if remove_duplicates is None:
+            remove_duplicates = mgr.remove_duplicates
+        result = await mgr.adopt_existing(
+            sub_list_href,
+            self._compute_desired_subscriptions(),
+            remove_duplicates=remove_duplicates,
+        )
+        self._update_poll_suppression()
+        return result
 
     async def run(self) -> None:
         """Start polling and block until shutdown is signaled."""
@@ -1996,13 +2029,21 @@ class CsipClient:
         return True
 
     async def shutdown(
-        self, timeout: float = 10.0, *, subscription_cancel_timeout: float | None = 2.0
+        self,
+        timeout: float = 10.0,
+        *,
+        subscription_cancel_timeout: float | None = 2.0,
+        unsubscribe: bool | None = None,
     ) -> None:
         """Gracefully stop polling, event timers, and close the HTTP session.
 
         ``timeout`` bounds the wait for the poll tasks. ``subscription_cancel_timeout``
         bounds the DELETEs that cancel this client's subscriptions; ``None`` waits
         for every one. See :meth:`SubscriptionManager.cancel_all`.
+
+        ``unsubscribe`` decides whether those DELETEs are sent; ``None`` uses the
+        subscription manager's ``unsubscribe_on_close``. Pass False when another
+        instance with the same identity takes over and adopts the subscriptions.
         """
         self._shutdown_event.set()
         # Before anything is torn down. An expiry firing later would call
@@ -2015,7 +2056,15 @@ class CsipClient:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._renewal_task
         if self._subscription_manager:
-            await self._subscription_manager.cancel_all(timeout=subscription_cancel_timeout)
+            if unsubscribe is None:
+                unsubscribe = self._subscription_manager.unsubscribe_on_close
+            if unsubscribe:
+                await self._subscription_manager.cancel_all(timeout=subscription_cancel_timeout)
+            else:
+                logger.info(
+                    "Leaving %d subscription(s) on the server at shutdown",
+                    len(self._subscription_manager.active_subscriptions),
+                )
         if self._notification_server:
             await self._notification_server.stop()
         await self._event_processor.shutdown()

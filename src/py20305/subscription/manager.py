@@ -82,6 +82,23 @@ class ReconcileResult:
     create_errors: int = 0
 
 
+@dataclass
+class AdoptionResult:
+    """Summary of :meth:`SubscriptionManager.adopt_existing`."""
+
+    #: True when the server returned its SubscriptionList. False means nothing
+    #: was adopted and the client subscribes as it would without adoption.
+    listed: bool = False
+    #: Server subscriptions taken into local state.
+    adopted: int = 0
+    #: Further subscriptions of ours found for a resource already adopted or tracked.
+    duplicates: int = 0
+    #: Duplicates DELETEd from the server.
+    removed: int = 0
+    #: Duplicates whose DELETE failed. They stay on the server.
+    remove_errors: int = 0
+
+
 class SubscriptionManager:
     """Create, cancel, and track IEEE 2030.5 subscriptions.
 
@@ -99,6 +116,9 @@ class SubscriptionManager:
         on_subscription_lost: Callable[[], Awaitable[None]] | None = None,
         renewal_method: RenewalMethod = "post",
         server_2018_compat: bool | None = None,
+        adopt_on_connect: bool = False,
+        remove_duplicates: bool = False,
+        unsubscribe_on_close: bool = True,
     ) -> None:
         """
         Args:
@@ -108,12 +128,25 @@ class SubscriptionManager:
                 workaround for a non-conforming server and is off by default.
             renewal_method: ``post`` re-POSTs a subscription to its list to
                 renew it; ``put`` PUTs it to its own href (see :meth:`renew`).
+            adopt_on_connect: Have the client call :meth:`adopt_existing` when
+                it connects, before it creates subscriptions.
+            remove_duplicates: When the client adopts, DELETE the further
+                subscriptions of ours it finds for the same resource.
+            unsubscribe_on_close: Have the client DELETE its subscriptions when
+                it shuts down. Turn off for an instance that hands over to
+                another instance with the same identity, which adopts them.
 
         Raises:
-            ValueError: ``renewal_method`` is not ``post`` or ``put``.
+            ValueError: ``renewal_method`` is not ``post`` or ``put``, or
+                ``remove_duplicates`` is set without ``adopt_on_connect``.
         """
         if renewal_method not in get_args(RenewalMethod):
             raise ValueError(f"renewal_method must be 'post' or 'put', got {renewal_method!r}")
+        if remove_duplicates and not adopt_on_connect:
+            raise ValueError("remove_duplicates requires adopt_on_connect")
+        self.adopt_on_connect = adopt_on_connect
+        self.remove_duplicates = remove_duplicates
+        self.unsubscribe_on_close = unsubscribe_on_close
         self._renewal_method = renewal_method
         self._client = client
         self._notification_uri = notification_uri
@@ -602,6 +635,150 @@ class SubscriptionManager:
         if dropped:
             logger.info("Reconcile dropped %d stale subscription(s) absent from server", dropped)
         return re_established
+
+    async def adopt_existing(
+        self,
+        sub_list_href: str,
+        desired: set[tuple[str, str]],
+        *,
+        remove_duplicates: bool = False,
+    ) -> AdoptionResult:
+        """Take over subscriptions the server already holds for this client.
+
+        For a client that takes over from another instance of itself: both use
+        the same certificate, so the same EndDevice and SubscriptionList, and
+        the same notificationURI. Without adoption the new instance POSTs a new
+        subscription for each resource, and a server that does not treat that
+        POST as a renewal keeps both, so every notification arrives twice.
+
+        GETs every page of the SubscriptionList at ``sub_list_href`` (IEEE
+        2030.5-2023 Annex A.2.7.1: GET is Mandatory). A listed Subscription is
+        ours when its notificationURI equals this manager's and its
+        subscribedResource is one of ``desired`` (``(subscribed_resource,
+        resource_type)`` tuples, as for :meth:`reconcile`). Both are compared
+        as exact strings. For each such resource the first listed subscription
+        is adopted, unless one of them is already tracked locally, in which case
+        that one is kept. A subscription without an href is skipped: it cannot
+        be renewed or cancelled. The adopted subscription keeps its href, and
+        :meth:`subscribe` then finds it and makes no POST for that resource.
+
+        IEEE 2030.5-2023 §8.9.3.4 treats a second Subscription to the same
+        resource from the same client as a renewal, so a server that follows
+        it holds no duplicates. The others are what ``remove_duplicates`` is
+        for: it DELETEs the further subscriptions of ours for an adopted or
+        tracked resource (Annex A.2.7.2: DELETE is Mandatory).
+
+        Never touched: a subscription with another notificationURI, and one of
+        ours for a resource not in ``desired``.
+
+        When the SubscriptionList cannot be read (an HTTP error, a transport
+        failure or a malformed body), the failure is reported and nothing
+        changes; the client then subscribes as it would without adoption.
+
+        An adopted subscription's last renewal time is unknown. Under the
+        ``put`` renewal method it is renewed at once, at its own href. Under
+        ``post`` it is recorded as due and the renewal task renews it on its
+        first pass: a re-POST to a server that does not apply the renewal rule
+        would create the duplicate adoption avoids.
+        """
+        from py20305.diagnostics import report
+        from py20305.models.sep.sep import SubscriptionList
+
+        result = AdoptionResult()
+        try:
+            pages = await self._client.get_list(sub_list_href, SubscriptionList)
+        except Exception as exc:  # adoption is optional: any failure falls back to POSTing
+            status = getattr(exc, "status_code", None)
+            report(
+                "warnings",
+                (
+                    f"Cannot read the SubscriptionList at {sub_list_href} to adopt "
+                    f"existing subscriptions ({exc}); creating subscriptions instead"
+                ),
+                source="subscription",
+                dedup_key=f"sub_adopt_get:{sub_list_href}",
+                details={"sub_list_href": sub_list_href, "status": status},
+            )
+            return result
+        result.listed = True
+
+        desired_types = dict(desired)
+        # subscribedResource -> hrefs of our subscriptions to it, in server order.
+        ours: dict[str, list[str]] = {}
+        for page in pages:
+            for sub in page.subscription or []:
+                resource = sub.subscribed_resource
+                if sub.notification_uri != self._notification_uri:
+                    continue
+                if not resource or resource not in desired_types or not sub.href:
+                    continue
+                hrefs = ours.setdefault(resource, [])
+                if sub.href not in hrefs:
+                    hrefs.append(sub.href)
+
+        extras: list[str] = []
+        adopted_hrefs: list[str] = []
+        for resource, hrefs in ours.items():
+            local = self._find_active_for_resource(resource)
+            if local is not None and local.unmanaged:
+                continue  # tracked under a synthetic URI; the server's hrefs cannot be matched
+            if local is not None and local.subscription_uri in hrefs:
+                keep = local.subscription_uri
+            elif local is not None:
+                # Tracked under an href the server no longer lists: re-key it.
+                keep = hrefs[0]
+                self._subscriptions.pop(local.subscription_uri, None)
+                local.subscription_uri = keep
+                local.sub_list_href = sub_list_href
+                self._subscriptions[keep] = local
+                adopted_hrefs.append(keep)
+                result.adopted += 1
+            else:
+                keep = hrefs[0]
+                resource_type = desired_types[resource]
+                self._subscriptions[keep] = SubscriptionState(
+                    subscription_uri=keep,
+                    subscribed_resource=resource,
+                    notification_uri=self._notification_uri,
+                    resource_type=resource_type,
+                    created_at=0.0,
+                    is_list_subscription=resource_type.endswith("List"),
+                    sub_list_href=sub_list_href,
+                )
+                adopted_hrefs.append(keep)
+                result.adopted += 1
+                logger.info("Adopted subscription %s for %s", keep, resource)
+            extras.extend(h for h in hrefs if h != keep)
+
+        result.duplicates = len(extras)
+        if extras and remove_duplicates:
+            outcomes = await asyncio.gather(
+                *(self._client.delete(href) for href in extras), return_exceptions=True
+            )
+            for href, outcome in zip(extras, outcomes, strict=True):
+                if isinstance(outcome, BaseException):
+                    result.remove_errors += 1
+                    logger.warning("Failed to remove duplicate subscription %s: %s", href, outcome)
+                else:
+                    result.removed += 1
+                    logger.info("Removed duplicate subscription %s", href)
+        elif extras:
+            logger.info(
+                "Found %d duplicate subscription(s) of ours on the server; left in place",
+                len(extras),
+            )
+
+        if self._renewal_method == "put" and adopted_hrefs:
+            await asyncio.gather(*(self.renew(h) for h in adopted_hrefs), return_exceptions=True)
+
+        logger.info(
+            "Subscription adoption: adopted=%d duplicates=%d removed=%d remove_errors=%d",
+            result.adopted,
+            result.duplicates,
+            result.removed,
+            result.remove_errors,
+        )
+        return result
 
     def record_notification(self, notification: StoredNotification) -> None:
         """Append a notification to the bounded store."""

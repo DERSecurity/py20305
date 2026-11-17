@@ -1,6 +1,7 @@
 """Subscription/notification subsystem for IEEE 2030.5."""
 
 from py20305.subscription.manager import (
+    AdoptionResult,
     ReconcileResult,
     StoredNotification,
     SubscriptionManager,
@@ -13,6 +14,7 @@ from py20305.subscription.notification_server import (
 )
 
 __all__ = [
+    "AdoptionResult",
     "NotificationServer",
     "ReconcileResult",
     "StoredNotification",
