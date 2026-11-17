@@ -120,11 +120,12 @@ def _extension_mode_names(base: DercontrolBase) -> list[str]:
 def get_active_mode_names(base: DercontrolBase) -> frozenset[str]:
     """Return the set of active mode names from a DercontrolBase.
 
-    Field names for the base modes (``op_mod_fixed_w``) and element names for
+    Field names for the base modes (``op_mod_fixed_w``), including the
+    DERControlType2 modes (``op_mod_max_lim_winject``), and element names for
     the CSIP-AUS limits (``opModExpLimW``).
     """
     names: list[str] = []
-    for field_name in _FIELD_TO_BIT:
+    for field_name in (*_FIELD_TO_BIT, *_FIELD_TO_BIT2):
         val = getattr(base, field_name, None)
         if val is not None:
             names.append(field_name)

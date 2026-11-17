@@ -22,7 +22,7 @@ from py20305.commands import (
     NullCommandObserver,
 )
 from py20305.connectors.base import BaseConnector, ScheduleNotification
-from py20305.connectors.control_errors import DeviceNotConfiguredError
+from py20305.connectors.control_errors import DeviceNotConfiguredError, ModeNotSupportedError
 from py20305.connectors.device_telemetry import DeviceTelemetryEmitter
 from py20305.connectors.errors import ConnectorError
 from py20305.connectors.modes import (
@@ -358,6 +358,12 @@ class ConnectorDispatcher:
                 device and origin throughout, as :class:`CommandGate` requires,
                 no mode was written.
             DeviceNotConfiguredError: the device is configured as a meter.
+            ModeNotSupportedError: the control translates to at least one mode
+                and the connector implements none of them, so nothing was
+                applied. A control that applies at least one mode is not
+                refused for the modes the connector leaves out. The event
+                processor reports the device as rejected with Table 31 status
+                251 (252 for a 2018 server) rather than as started.
         """
         self._refuse_meter(self._lfdi_resolver(device_href))
         connector = await self._resolve_connector(device_href)
@@ -383,6 +389,7 @@ class ConnectorDispatcher:
         Raises:
             CommandNotPermittedError: as for :meth:`apply_control`.
             DeviceNotConfiguredError: the device is configured as a meter.
+            ModeNotSupportedError: as for :meth:`apply_control`.
         """
         self._refuse_meter(lfdi)
         connector = await self._resolve_connector_by_lfdi(lfdi)
@@ -416,6 +423,7 @@ class ConnectorDispatcher:
         )
 
         refused: list[str] = []
+        unimplemented: list[str] = []
         for method_name, params in translations:
             method, reason = self._control_support(connector, method_name)
             if method is not None:
@@ -437,12 +445,14 @@ class ConnectorDispatcher:
                 # one. Nothing an operator can do, so it does not belong in a
                 # warnings surface -- and a control carrying it alongside modes
                 # the connector does implement is normal traffic, not a fault.
+                unimplemented.append(method_name)
                 logger.debug(
                     "  %s does not implement %s; skipped",
                     connector.connector_name,
                     method_name,
                 )
             else:
+                unimplemented.append(method_name)
                 self._report_unimplemented_mode(
                     connector, lfdi=lfdi, device_href=device_href, method_name=method_name
                 )
@@ -455,6 +465,7 @@ class ConnectorDispatcher:
                 f"{origin} may not command {label}: another interface holds the "
                 f"command role, so {', '.join(refused)} was not applied"
             )
+        self._require_an_implemented_mode(connector, label, translations, unimplemented)
 
     async def _apply_one(
         self,
@@ -726,6 +737,7 @@ class ConnectorDispatcher:
         dderc_mrid = dderc.m_rid.value
         translations = translate_default_controls(dderc, curves)
         logger.debug("Applying DDERC fallback to %s (%d mode(s))", label, len(translations))
+        unimplemented: list[str] = []
         for method_name, params in translations:
             method, reason = self._control_support(connector, method_name)
             if method is not None:
@@ -740,19 +752,45 @@ class ConnectorDispatcher:
                     cause_mrid=cause_mrid,
                 )
             elif reason == BY_DESIGN:
-                # This connector has no register for the mode and never claimed
-                # one. Nothing an operator can do, so it does not belong in a
-                # warnings surface -- and a control carrying it alongside modes
-                # the connector does implement is normal traffic, not a fault.
+                # Same reasoning as for a DERControl above.
+                unimplemented.append(method_name)
                 logger.debug(
                     "  %s does not implement %s; skipped",
                     connector.connector_name,
                     method_name,
                 )
             else:
+                unimplemented.append(method_name)
                 self._report_unimplemented_mode(
                     connector, lfdi=lfdi, device_href=device_href, method_name=method_name
                 )
+        self._require_an_implemented_mode(connector, label, translations, unimplemented)
+
+    @staticmethod
+    def _require_an_implemented_mode(
+        connector: BaseConnector,
+        label: str,
+        translations: list[tuple[str, dict[str, Any]]],
+        unimplemented: list[str],
+    ) -> None:
+        """Raise when a control had modes to apply and the connector took none.
+
+        IEEE 2030.5-2023 §10.10.4.2.1 lets a client "reject or partially act
+        upon" a control for its capabilities. Partial action is a control with
+        at least one applied mode, and that stays a success. A control that
+        applied nothing has not started, and completing normally would have the
+        server told it is in force. ``ModeNotSupportedError`` maps to Table 31
+        status 251, or 252 for a 2018 server.
+
+        A control that translates to no mode at all is left alone: it names
+        nothing the connector could have implemented.
+        """
+        if translations and len(unimplemented) == len(translations):
+            names = ", ".join(name.removeprefix("update_") for name in unimplemented)
+            raise ModeNotSupportedError(
+                f"{connector.connector_name} for {label} implements none of the modes in "
+                f"this control, so nothing was applied: {names}"
+            )
 
     async def relay_schedule_notification(
         self,

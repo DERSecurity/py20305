@@ -185,3 +185,37 @@ class TestDeviceMappingIsASet:
 
         assert "/derp/1" not in mapping.program_to_devices
         assert mapping.device_to_programs["/edev/1"] == []
+
+
+def test_device_mapping_remove_pair_updates_both_indexes():
+    mapping = DeviceMapping()
+    mapping.add("/derp/1", "/edev/1")
+    mapping.add("/derp/1", "/edev/2")
+    mapping.add("/derp/2", "/edev/2")
+
+    mapping.remove_pair("/derp/1", "/edev/2")
+
+    assert mapping.program_to_devices == {"/derp/1": ["/edev/1"], "/derp/2": ["/edev/2"]}
+    assert mapping.device_to_programs == {"/edev/1": ["/derp/1"], "/edev/2": ["/derp/2"]}
+
+
+def test_device_mapping_add_restores_a_removed_pair():
+    mapping = DeviceMapping()
+    mapping.add("/derp/1", "/edev/1")
+    mapping.remove_pair("/derp/1", "/edev/1")
+
+    mapping.add("/derp/1", "/edev/1")
+
+    assert mapping.program_to_devices["/derp/1"] == ["/edev/1"]
+    assert mapping.device_to_programs["/edev/1"] == ["/derp/1"]
+
+
+def test_device_mapping_remove_pair_ignores_a_pair_that_is_not_mapped():
+    mapping = DeviceMapping()
+    mapping.add("/derp/1", "/edev/1")
+
+    mapping.remove_pair("/derp/1", "/edev/9")
+    mapping.remove_pair("/derp/9", "/edev/1")
+
+    assert mapping.program_to_devices == {"/derp/1": ["/edev/1"]}
+    assert mapping.device_to_programs == {"/edev/1": ["/derp/1"]}

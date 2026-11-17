@@ -316,8 +316,8 @@ async def test_inject_also_writes_wmax_on_the_wire(modbus):
 
 async def test_wmax_is_restored_when_inject_clears(modbus):
     """On the wire, where pysunspec2's dirty-point tracking is real: clearing
-    inject puts WMax back to the device's own value and leaves the rate setting
-    where the event put it."""
+    inject puts WMax back to the device's own value and the rate setting back
+    to its rating."""
     connector = await _resolve(modbus.registry())
     wmax = point_address(modbus.image, 702, "WMax")
     discharge = point_address(modbus.image, 702, "WDisChaRteMax")
@@ -327,7 +327,7 @@ async def test_wmax_is_restored_when_inject_clears(modbus):
 
     await connector.update_op_mod_max_lim_w_inject({"enabled": False})
     assert modbus.server.registers[wmax] == 10000
-    assert modbus.server.registers[discharge] == 4000
+    assert modbus.server.registers[discharge] == 10000
 
 
 async def test_discharge_rate_is_read_back(modbus):

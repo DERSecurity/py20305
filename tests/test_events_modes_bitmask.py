@@ -84,6 +84,16 @@ class TestGetActiveModeNames:
         assert "op_mod_energize" in names
         assert len(names) == 2
 
+    def test_a_derc_control_type_2_mode_is_named(self):
+        from py20305.models.sep.sep import PowerOfTenMultiplierType, UnsignedActivePowerControlType
+
+        base = DercontrolBase(
+            op_mod_max_lim_winject=UnsignedActivePowerControlType(
+                multiplier=PowerOfTenMultiplierType(value=0), value=1000
+            )
+        )
+        assert get_active_mode_names(base) == frozenset({"op_mod_max_lim_winject"})
+
     def test_a_csipaus_limit_is_named_whether_typed_or_generic(self):
         from xsdata.formats.dataclass.models.generics import AnyElement
 
