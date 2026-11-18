@@ -8,9 +8,10 @@ use the DERCapability and DERSettings element names, status uses the
 DERStatus types, and controls arrive as ``update_<element>`` calls.
 
 A DER is read through models 701 to 705 (and 706, 712 and 713 where the
-device has them). A meter is read through models 201 to 204, 211 to 214 or
-220; set its ``role`` to ``site_meter`` or ``der_meter``, and ``power_sign``
-when the meter's sign of real power is known.
+device has them), and its state of charge through model 713, 124 or 802. A
+meter is read through models 201 to 204, 211 to 214 or 220; set its ``role``
+to ``site_meter`` or ``der_meter``, and ``power_sign`` when the meter's sign of
+real power is known.
 
 Needs the ``sunspec`` extra (``pip install py20305[sunspec]``).
 """
@@ -102,7 +103,14 @@ class SunSpecConnector(BaseConnector):
         return convert.settings(await self._core.fetch_configuration())
 
     async def fetch_status(self) -> dict[str, Any]:
-        return convert.status(await self._core.fetch_status())
+        status = convert.status(await self._core.fetch_status())
+        # The state of charge comes from the last monitoring read, which reads
+        # the storage models; IEEE 2030.5 PerCent is hundredths of a percent.
+        soc = self._core.last_state_of_charge
+        if soc is not None:
+            percent, when = soc
+            status["stateOfChargeStatus"] = {"dateTime": when, "value": round(percent * 100)}
+        return status
 
     def supported_modes2(self) -> int | None:
         """Return the DERControlType2 bits this device can apply.

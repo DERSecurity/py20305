@@ -7,6 +7,7 @@ to verify Modbus register writes and adopt polling.
 from __future__ import annotations
 
 import logging
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -331,6 +332,94 @@ class TestSunSpecFetch:
 
         assert storage.read.call_count > attempts
         assert result["WHAvail"] == 9800
+
+    @staticmethod
+    def _storage(**points: float | None) -> MagicMock:
+        """Return a storage model whose points read as given; a point given as None is unset."""
+        model = MagicMock()
+        for name, value in points.items():
+            setattr(model, name, MagicMock(cvalue=value))
+        return model
+
+    @pytest.mark.asyncio
+    async def test_state_of_charge_is_read_from_model_713(self, sunspec_connector):
+        sunspec_connector._target.models[713] = [self._storage(SoC=62.5, WHAvail=6200)]
+        sunspec_connector._target.models[124] = [self._storage(ChaState=10.0)]
+
+        result = await sunspec_connector.fetch_monitoring()
+
+        assert result["SoC"] == 62.5
+        # Model 124 is not read when model 713 gave a value.
+        sunspec_connector._target.models[124][0].read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_state_of_charge_falls_back_to_model_124_then_model_802(self, sunspec_connector):
+        sunspec_connector._target.models[713] = [self._storage(SoC=None, WHAvail=None)]
+        sunspec_connector._target.models[124] = [self._storage(ChaState=None)]
+        sunspec_connector._target.models[802] = [self._storage(SoC=71.0)]
+        assert (await sunspec_connector.fetch_monitoring())["SoC"] == 71.0
+
+        sunspec_connector._target.models[124] = [self._storage(ChaState=40.0)]
+        assert (await sunspec_connector.fetch_monitoring())["SoC"] == 40.0
+
+    @pytest.mark.asyncio
+    async def test_state_of_charge_falls_back_to_energy_available_over_the_rating(
+        self, sunspec_connector
+    ):
+        sunspec_connector._target.models[713] = [self._storage(SoC=None, WHAvail=2500, WHRtg=10000)]
+
+        assert (await sunspec_connector.fetch_monitoring())["SoC"] == 25.0
+
+    @pytest.mark.asyncio
+    async def test_no_state_of_charge_without_a_source(self, sunspec_connector):
+        result = await sunspec_connector.fetch_monitoring()
+        assert "SoC" not in result
+        assert sunspec_connector.last_state_of_charge is None
+
+        sunspec_connector._target.models[713] = [self._storage(SoC=None, WHAvail=2500, WHRtg=0)]
+        assert "SoC" not in await sunspec_connector.fetch_monitoring()
+
+    @pytest.mark.asyncio
+    async def test_a_state_of_charge_outside_0_to_100_is_not_used(self, sunspec_connector):
+        sunspec_connector._target.models[713] = [self._storage(SoC=150.0, WHAvail=None)]
+        sunspec_connector._target.models[802] = [self._storage(SoC=55.0)]
+
+        assert (await sunspec_connector.fetch_monitoring())["SoC"] == 55.0
+
+    @pytest.mark.asyncio
+    async def test_a_failed_model_802_read_is_not_retried_until_the_interval_passes(
+        self, sunspec_connector
+    ):
+        from py20305.connectors.sunspec import _modbus
+
+        battery = self._storage(SoC=55.0)
+        battery.read = MagicMock(side_effect=ConnectionError("timed out"))
+        sunspec_connector._target.models[802] = [battery]
+        clock = [1000.0]
+
+        with patch.object(_modbus.time, "monotonic", side_effect=lambda: clock[0]):
+            assert "SoC" not in await sunspec_connector.fetch_monitoring()
+            attempts = battery.read.call_count
+
+            clock[0] += _modbus._STORAGE_RETRY_SECONDS - 1
+            await sunspec_connector.fetch_monitoring()
+            assert battery.read.call_count == attempts
+
+            battery.read.side_effect = None
+            clock[0] += 2
+            result = await sunspec_connector.fetch_monitoring()
+
+        assert result["SoC"] == 55.0
+
+    @pytest.mark.asyncio
+    async def test_the_last_state_of_charge_is_kept_with_its_read_time(self, sunspec_connector):
+        sunspec_connector._target.models[713] = [self._storage(SoC=62.5, WHAvail=None)]
+
+        await sunspec_connector.fetch_monitoring()
+
+        percent, when = sunspec_connector.last_state_of_charge
+        assert percent == 62.5
+        assert abs(when - time.time()) < 5
 
     def test_lock_rebinds_when_event_loop_changes(self, sunspec_connector):
         """A connector reused across event loops must NOT raise the

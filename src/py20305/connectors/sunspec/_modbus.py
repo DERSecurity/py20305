@@ -58,6 +58,11 @@ _MB_READBACK_DELAY = 0.5
 # otherwise cost a reconnect handshake on every cycle.
 _STORAGE_RETRY_SECONDS = 600.0
 
+#: Where a state of charge is read after model 713 ``SoC``, in order: the basic
+#: storage control model (124) and the lithium-ion battery model (802). Each is
+#: read only when no earlier source gave a value.
+_STATE_OF_CHARGE_POINTS = ((124, "ChaState"), (802, "SoC"))
+
 # Modbus protocol exception codes (MODBUS Application Protocol, 7 Exception
 # Responses) the server device emits when a request is malformed or it can't
 # satisfy the read. We treat the following as PERMANENT for the lifetime of
@@ -97,6 +102,19 @@ def _is_permanent_modbus_error(exc: BaseException) -> bool:
     on retry. See ``_PERMANENT_MODBUS_CODES`` for the codes."""
     match = _MODBUS_EXCEPTION_RE.search(str(exc))
     return match is not None and int(match.group(1)) in _PERMANENT_MODBUS_CODES
+
+
+def _finite(value: Any) -> float | None:
+    """Return ``value`` as a finite float, or None for anything else."""
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _percent(value: Any) -> float | None:
+    """Return ``value`` as a percentage from 0 to 100, or None for anything else."""
+    number = _finite(value)
+    return number if number is not None and 0 <= number <= 100 else None
 
 
 def _cvalue_or_none(model: Any, attr: str) -> Any:
@@ -476,6 +494,11 @@ class SunSpecModbusConnector:
         #: Monotonic time before which monitoring skips model 713 (see
         #: _STORAGE_RETRY_SECONDS).
         self._storage_retry_at = 0.0
+        #: Monotonic time before which monitoring skips model 124 or 802, by model id.
+        self._soc_retry_at: dict[int, float] = {}
+        #: The state of charge the last monitoring read gave, in percent, and the
+        #: Unix time it was read. None when that read gave none.
+        self.last_state_of_charge: tuple[float, int] | None = None
 
         if transport == "tcp":
             self._target = ss_client.SunSpecModbusClientDeviceTCP(
@@ -819,6 +842,7 @@ class SunSpecModbusConnector:
     # ------------------------------------------------------------------
 
     def _fetch_monitoring_sync(self) -> dict[str, Any]:
+        self.last_state_of_charge = None
         default = {"W": None, "Var": None, "Hz": None, "V": None, "PF": None, "VA": None, "A": None}
         if self._meter_model_id is not None:
             try:
@@ -874,6 +898,7 @@ class SunSpecModbusConnector:
 
         # Checked against the scanned models first, so a device without storage
         # costs no Modbus read, and skipped for a while after a failed read.
+        storage = None
         if self._target.models.get(713) and time.monotonic() >= self._storage_retry_at:
             try:
                 storage = self._get_model(713)
@@ -883,7 +908,49 @@ class SunSpecModbusConnector:
             wh_avail = _cvalue_or_none(storage, "WHAvail") if storage is not None else None
             if wh_avail is not None:
                 result["WHAvail"] = wh_avail
+
+        soc = self._state_of_charge(storage)
+        self.last_state_of_charge = None if soc is None else (soc, int(time.time()))
+        if soc is not None:
+            result["SoC"] = soc
         return result
+
+    def _state_of_charge(self, storage: Any) -> float | None:
+        """Return the state of charge in percent, or None.
+
+        ``storage`` is model 713 as just read, or None. The sources, in order:
+        model 713 ``SoC``, model 124 ``ChaState``, model 802 ``SoC``, and model
+        713 ``WHAvail`` over ``WHRtg``. Model 124 or 802 is read only when no
+        earlier source gave a value. A value outside 0 to 100 is not used.
+        """
+        soc = _percent(_cvalue_or_none(storage, "SoC")) if storage is not None else None
+        for model_id, point in _STATE_OF_CHARGE_POINTS:
+            if soc is not None:
+                return soc
+            model = self._read_optional_model(model_id)
+            soc = _percent(_cvalue_or_none(model, point)) if model is not None else None
+        if soc is None and storage is not None:
+            rating = _finite(_cvalue_or_none(storage, "WHRtg"))
+            available = _finite(_cvalue_or_none(storage, "WHAvail"))
+            if rating is not None and rating > 0 and available is not None:
+                soc = _percent(100.0 * available / rating)
+        return soc
+
+    def _read_optional_model(self, model_id: int) -> Any:
+        """Read a model the device may not have, or return None.
+
+        A device without the model costs no Modbus read. After a failed read the
+        model is skipped for ``_STORAGE_RETRY_SECONDS``.
+        """
+        if not self._target.models.get(model_id):
+            return None
+        if time.monotonic() < self._soc_retry_at.get(model_id, 0.0):
+            return None
+        try:
+            return self._get_model(model_id)
+        except ConnectorConnectionError:
+            self._soc_retry_at[model_id] = time.monotonic() + _STORAGE_RETRY_SECONDS
+            return None
 
     def _fetch_nameplate_sync(self) -> dict[str, Any]:
         model = self._get_model(702)
