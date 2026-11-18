@@ -448,8 +448,8 @@ that describes what actually happened and the right code reaches the server.
 
 Every control that reaches a device goes through one funnel, whether it came from
 a translated DERControl, a default-control fallback, a comms-loss clear, or a
-caller naming a control directly. Two seams hang off that funnel, and both are
-optional: omit them and the dispatcher behaves as though neither existed.
+caller naming a control directly. Three seams hang off that funnel, and all are
+optional: omit them and the dispatcher behaves as though none existed.
 
 A device configured as a meter never reaches the funnel. A control or a named
 operation addressed to it raises `DeviceNotConfiguredError`, which the event
@@ -552,6 +552,56 @@ resolver cannot name a device for has no rule to apply -- an href that resolves
 to a connector but not to an LFDI. Those writes proceed, and say so at debug
 level. Denying them would fail closed by accident rather than by decision, and
 would drop writes that worked before the gate existed.
+
+### Taking a write before the connector
+
+A host application can take some writes itself instead of letting the connector
+apply them, for example to decide the final setpoint in its own logic.
+`CommandIntercept` is how the dispatcher offers them. Implement an async
+`intercept(write)` and pass it as `command_intercept`:
+
+```python
+from py20305.commands import InterceptedWrite
+
+
+class ExportLimitsToPlanner:
+    async def intercept(self, write: InterceptedWrite) -> bool:
+        if write.control != "op_mod_exp_lim_w":
+            return False                      # the connector applies it
+        await self.planner.submit(write.lfdi, write.params)
+        return True                           # the planner owns it now
+
+
+dispatcher = ConnectorDispatcher(
+    registry, lfdi_resolver=resolve_lfdi, command_intercept=ExportLimitsToPlanner()
+)
+```
+
+Each write is offered after the command gate permits it, and only when the write
+names a device by LFDI. Only controls the connector implements are offered, so
+the intercept sees the same writes the connector would. An `InterceptedWrite`
+carries:
+
+- `lfdi`, `control` (the connector method without `update_`, or `clear_control`
+  for a connector's own clear), `params` (a copy) and `origin`.
+- `kind`, the apply path: `control` for a DERControl, `default_control` for a
+  DefaultDERControl, `clear` for a write that withdraws a mode (the clear on a
+  loss of communications and the disabling of the modes an ended event set;
+  `origin` tells them apart), and `operation` for a call to `apply_operation`.
+- `applied_mrid` and `cause_mrid`, as the write history keeps them.
+
+The return value decides what happens next:
+
+- `True`: the intercept took the write. The connector is not called, the
+  command observer records nothing and no device write is reported to telemetry.
+  The write history keeps the write with outcome `intercepted`. The caller sees
+  success, so an event is reported to the server as applied.
+- `False`: the connector applies the write as it would with no intercept.
+- An exception: the write history keeps the write with outcome `failed`, and the
+  exception reaches the caller as a connector failure does.
+
+Taking a write makes the application responsible for it. The dispatcher reports
+the write as applied whether or not the application ever writes it to the device.
 
 ### What counts as an implemented control
 
