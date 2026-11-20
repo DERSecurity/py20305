@@ -98,6 +98,18 @@ class _Intercept:
         return self.take
 
 
+class _NestedMutating(_Intercept):
+    """Appends to a list nested in the offered params, then takes or declines the write."""
+
+    async def intercept(self, write: InterceptedWrite) -> bool:
+        write.params["curve"]["points"].append(99)
+        return self.take
+
+
+def _nested_params() -> dict[str, Any]:
+    return {"enabled": True, "curve": {"points": [1, 2]}}
+
+
 class _DenyAll:
     def __init__(self) -> None:
         self.asked: list[tuple[str, str]] = []
@@ -370,6 +382,17 @@ class TestATakenWrite:
 
         assert [row["params"] for row in history.query()] == [{"enabled": False}] * 2
 
+    async def test_changing_nested_offered_params_changes_nothing_recorded(
+        self, history: WriteHistory
+    ) -> None:
+        dispatcher = _dispatcher(_FixedW(), _NestedMutating(take=True), history=history)
+        params = _nested_params()
+
+        await dispatcher.apply_operation(LFDI, "op_mod_fixed_w", params, origin=APP_ORIGIN)
+
+        assert params == _nested_params()
+        assert [row["params"] for row in history.query()] == [_nested_params()]
+
 
 class TestADeclinedWrite:
     """False: the write is applied as it would be with no intercept."""
@@ -392,6 +415,18 @@ class TestADeclinedWrite:
         observer.record_command.assert_called_once()
         telemetry.record_write.assert_called_once()
         assert [row["outcome"] for row in history.query()] == ["applied"]
+
+    async def test_changing_nested_offered_params_changes_nothing_applied(
+        self, history: WriteHistory
+    ) -> None:
+        connector = _FixedW()
+        dispatcher = _dispatcher(connector, _NestedMutating(take=False), history=history)
+        params = _nested_params()
+
+        await dispatcher.apply_operation(LFDI, "op_mod_fixed_w", params, origin=APP_ORIGIN)
+
+        assert connector.seen == [_nested_params()]
+        assert [row["params"] for row in history.query()] == [_nested_params()]
 
 
 class TestARefusedWrite:

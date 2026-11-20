@@ -8,6 +8,7 @@ modes translation layer.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
 from collections.abc import Callable
@@ -665,7 +666,7 @@ class ConnectorDispatcher:
         write = InterceptedWrite(
             lfdi=lfdi,
             control=control,
-            params=dict(params),
+            params=copy.deepcopy(params),
             origin=origin,
             kind=kind,
             applied_mrid=applied_mrid,

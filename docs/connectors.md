@@ -583,7 +583,7 @@ the intercept sees the same writes the connector would. An `InterceptedWrite`
 carries:
 
 - `lfdi`, `control` (the connector method without `update_`, or `clear_control`
-  for a connector's own clear), `params` (a copy) and `origin`.
+  for a connector's own clear), `params` (a deep copy) and `origin`.
 - `kind`, the apply path: `control` for a DERControl, `default_control` for a
   DefaultDERControl, `clear` for a write that withdraws a mode (the clear on a
   loss of communications and the disabling of the modes an ended event set;

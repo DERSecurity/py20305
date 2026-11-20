@@ -224,8 +224,8 @@ class InterceptedWrite:
     #: The connector operation without the ``update_`` prefix, e.g.
     #: ``op_mod_max_lim_w``, or ``clear_control`` for a connector's own clear.
     control: str
-    #: What the connector would receive. A copy, so changing it changes nothing
-    #: the dispatcher applies or records.
+    #: What the connector would receive. A deep copy, so changing it, or any value
+    #: nested in it, changes nothing the dispatcher applies or records.
     params: dict[str, Any]
     #: Where the command entered: one of :class:`CommandOrigin`, or the
     #: application's own origin.
