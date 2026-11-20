@@ -12,7 +12,7 @@ own:
 | Part | What it keeps | Fed by |
 |---|---|---|
 | `events` | Every event's lifecycle (scheduled, active with which devices, how it ended), the control's description and settings, and every DERControlResponse posted or failed | The event processor |
-| `writes` | Every control written to a device: applied, failed, or refused by the command gate, with the mRID of the control and of the event that caused it | The dispatcher |
+| `writes` | Every control written to a device: applied, failed, refused by the command gate, or taken by a command intercept, with the mRID of the control and of the event that caused it | The dispatcher |
 | `intervals` | Each device's readings integrated into fixed intervals: real and reactive energy, coverage, and curtailed energy | The telemetry cycle |
 | `site_intervals` | The site meter's readings, integrated the same way into a series of their own | The telemetry cycle |
 
@@ -123,8 +123,10 @@ Times are on the server's timebase, as everywhere else in the event path.
 
 ### Device writes
 
-One row per write, including writes that failed and writes the command gate
-refused. `applied_mrid` is the control or default control written;
+One row per write, including writes that failed, writes the command gate
+refused and writes a command intercept took (outcome `intercepted`; see
+[Connecting devices](connectors.md#taking-a-write-before-the-connector)).
+`applied_mrid` is the control or default control written;
 `cause_mrid` is the event whose start or end caused it. Querying by an event's
 mRID matches either, so it returns the event's own writes and the fallback
 writes made when it ended.
