@@ -687,7 +687,7 @@ class EventProcessor:
         pending = (
             set(devices)
             if devices is not None
-            else set(record.device_windows) - record.started_devices
+            else set(record.device_windows) - record.started_devices - record.ended_devices
         )
         groups: dict[int, set[str]] = {}
         for device in pending:
@@ -764,15 +764,28 @@ class EventProcessor:
             logger.info("Event %s: comms-loss active -- opting out (late discovery)", mrid_short)
             await self._opt_out_event(record, from_state=None)
             return
+        # A device whose own window has already ended (its duration offset
+        # ended it early) received the event after it expired there: it is
+        # ignored on that device and answered EXPIRED (IEEE 2030.5-2023
+        # §10.2.2.3 rule j), and the others go on.
+        now = self._event_now(record)
+        expired = {d for d, (_, end) in record.device_windows.items() if end <= now}
+        record.ended_devices |= expired
         logger.info("Event %s: late discovery (already active), posting ACK", mrid_short)
-        await self._post_response(record.derc, ResponseCode.ACKNOWLEDGED, record.program_href)
+        await self._post_response(
+            record.derc,
+            ResponseCode.ACKNOWLEDGED,
+            record.program_href,
+            exclude_devices=expired or None,
+        )
+        if expired:
+            await self._post_response_for_devices(record.derc, ResponseCode.EXPIRED, expired)
         if self._closed:
             return
 
         # Devices whose own window has started run the event now; the others
         # start at their own start (IEEE 2030.5-2023 §10.2.3.2.2).
-        now = self._event_now(record)
-        started = [d for d, (start, _) in record.device_windows.items() if start <= now]
+        started = [d for d, (start, end) in record.device_windows.items() if start <= now < end]
         due = self._due_devices(record, started, now, first=True)
         if due is not None:
             record.started_devices |= due
@@ -840,10 +853,25 @@ class EventProcessor:
                 )
                 self._fallback_due[record.mrid] = int(time.time()) + wind_down
                 self._timer_mgr.schedule_delayed_callback(
-                    record, wind_down, self._cancel_fallback, "wind-down"
+                    record, wind_down, self._wind_down, "wind-down"
                 )
             else:
                 await self._cancel_fallback(record)
+
+    async def _wind_down(self, record: EventRecord) -> None:
+        """Wind-down timer callback: fall back after a cancellation, then save the shared state.
+
+        Counted as event work, so :meth:`release_devices` waits for its
+        default-control writes before it saves and hands the devices over.
+        """
+        with self._working():
+            # No longer due once it runs: a snapshot saved from here on must not
+            # have the next process run the fallback again.
+            self._fallback_due.pop(record.mrid, None)
+            try:
+                await self._cancel_fallback(record)
+            finally:
+                self._persist()
 
     async def _cancel_fallback(self, record: EventRecord) -> None:
         """Fall back to the default after a cancellation, on the devices still running it.
@@ -2053,7 +2081,7 @@ class EventProcessor:
                 self._timer_mgr.schedule_delayed_callback(
                     record,
                     max(0, int(fallback_at) - int(time.time())),
-                    self._cancel_fallback,
+                    self._wind_down,
                     "wind-down",
                 )
         else:

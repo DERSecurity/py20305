@@ -182,7 +182,9 @@ The successive-event rule (§10.2.2.3 rule m.1) applies on each device: a later
 event starts on a device at the earlier event's effective end on that device.
 An event first received after its effective start on a device, with its
 specified end still ahead, starts on that device at the current time plus the
-absolute value of the device's start offset (rule k).
+absolute value of the device's start offset (rule k). On a device whose
+own window has already ended, the event is ignored and answered EXPIRED
+(rule j), while the other devices run it.
 
 With a shared event state store, the offsets are claimed per event and device
 through `claim_offsets(mrid, device, offsets)`, first writer wins, so a

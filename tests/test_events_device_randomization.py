@@ -46,17 +46,27 @@ def _now() -> int:
     return int(time.time())
 
 
-def _derc(mrid: int, start: int, *, randomize_start: int | None = None) -> Dercontrol1:
+def _derc(
+    mrid: int,
+    start: int,
+    *,
+    duration: int = 3600,
+    randomize_start: int | None = None,
+    randomize_duration: int | None = None,
+) -> Dercontrol1:
     return Dercontrol1(
         m_rid=MRidtype(value=bytes([mrid]) * 16),
         creation_time=TimeType(value=1),
         event_status=EventStatus(
             current_status=0, date_time=TimeType(value=1), potentially_superseded=False
         ),
-        interval=DateTimeInterval(duration=3600, start=TimeType(value=start)),
+        interval=DateTimeInterval(duration=duration, start=TimeType(value=start)),
         dercontrol_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=5000)),
         randomize_start=(
             OneHourRangeType(value=randomize_start) if randomize_start is not None else None
+        ),
+        randomize_duration=(
+            OneHourRangeType(value=randomize_duration) if randomize_duration is not None else None
         ),
         reply_to="/rsps",
         response_required=b"\x03",
@@ -221,6 +231,23 @@ class TestPerDeviceRandomization:
             assert dispatcher.controls == [DEV_1, DEV_2]
             active = [lfdi for lfdi, status in _statuses(http) if status == ResponseCode.ACTIVE]
             assert active == [LFDI_1, LFDI_2]
+        finally:
+            await proc.shutdown()
+
+    async def test_a_late_event_ignores_a_device_whose_window_already_ended(self, draws: list[int]):
+        draws.extend([0, 200])
+        dispatcher = RecordingDispatcher()
+        http = _http()
+        derc = _derc(1, _now() - 200, duration=100, randomize_duration=200)
+        proc = EventProcessor(http, _state([derc]), dispatcher, asyncio.Event())
+        try:
+            await proc.process_controls("/derp/1")
+
+            assert dispatcher.controls == [DEV_2]
+            statuses = _statuses(http)
+            assert (LFDI_1, int(ResponseCode.EXPIRED)) in statuses
+            assert [s for lfdi, s in statuses if lfdi == LFDI_1] == [ResponseCode.EXPIRED]
+            assert (LFDI_2, int(ResponseCode.ACTIVE)) in statuses
         finally:
             await proc.shutdown()
 

@@ -172,18 +172,18 @@ def _record(
     )
 
 
-def _sub_list(*entries: tuple[str, str]) -> list[SubscriptionList]:
-    """Return one SubscriptionList page holding ``(href, resource)`` entries."""
+def _sub_list(*entries: tuple[str, ...]) -> list[SubscriptionList]:
+    """Return one SubscriptionList page of ``(href, resource[, notificationURI])`` entries."""
     subs = [
         Subscription(
-            href=href,
-            subscribed_resource=resource,
+            href=entry[0],
+            subscribed_resource=entry[1],
             encoding=0,
             level="+S1",
             limit=1,
-            notification_uri=NOTIFY,
+            notification_uri=entry[2] if len(entry) > 2 else NOTIFY,
         )
-        for href, resource in entries
+        for entry in entries
     ]
     return [SubscriptionList(subscription=subs, all=len(subs), results=len(subs))]
 
@@ -243,6 +243,26 @@ class TestManagerThatDoesNotMaintainTheSet:
         http.delete.assert_not_awaited()
         http.put.assert_not_awaited()
         assert [s.subscription_uri for s in store.values()] == ["/edev/1/sub/4"]
+
+
+class TestOtherClientsSubscriptions:
+    async def test_reconciliation_never_rekeys_to_another_clients_subscription(
+        self, store: SubscriptionStore
+    ):
+        other = "https://other.example.com/notify"
+        listed = _sub_list(
+            ("/edev/1/sub/1", "/edev/1/fsa"), ("/edev/1/sub/9", "/edev/1/fsa", other)
+        )
+        http = _http()
+        http.get_list = AsyncMock(return_value=listed)
+        mgr = SubscriptionManager(http, NOTIFY, store=store)
+
+        await mgr.adopt_existing(SUB_LIST, {("/edev/1/fsa", "FSAList")})
+        await mgr.reconcile_with_server(SUB_LIST, reestablish_missing=False)
+        await mgr.cancel_all()
+
+        deleted = [call.args[0] for call in http.delete.await_args_list]
+        assert deleted == ["/edev/1/sub/1"]
 
 
 class TestSharedReconciliation:

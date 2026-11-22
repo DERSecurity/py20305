@@ -644,6 +644,9 @@ class SubscriptionManager:
         Re-subscription of the (still-desired) resource is handled by
         ``_auto_subscribe`` after rediscovery, as a normal new subscription.
 
+        Only subscriptions with this manager's notificationURI count, as for
+        :meth:`adopt_existing`.
+
         One-way: server-side subscriptions we don't track are left untouched. Per
         IEEE 2030.5 this is meant to run at the SubscriptionList ``pollRate``
         (default 900s); the SubscriptionList isn't itself subscribed, so §8.9.3.4
@@ -691,6 +694,11 @@ class SubscriptionManager:
         for page in pages:
             for sub in page.subscription or []:
                 if not sub.subscribed_resource:
+                    continue
+                # Only our own subscriptions, as adoption counts them: another
+                # client's subscription to the same resource is not ours to
+                # re-key to, renew or DELETE.
+                if sub.notification_uri != self._notification_uri:
                     continue
                 server_resources.add(sub.subscribed_resource)
                 if sub.href:

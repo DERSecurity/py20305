@@ -892,12 +892,15 @@ class TestReconcileWithServer:
 
     @staticmethod
     def _page(resource_to_href):
-        """Build a SubscriptionList page from a {subscribed_resource: href} map."""
+        """Build a SubscriptionList page of our subscriptions from a {resource: href} map."""
         from types import SimpleNamespace
 
         return SimpleNamespace(
             subscription=[
-                SimpleNamespace(subscribed_resource=r, href=h) for r, h in resource_to_href.items()
+                SimpleNamespace(
+                    subscribed_resource=r, href=h, notification_uri="https://h:10443/notify"
+                )
+                for r, h in resource_to_href.items()
             ]
         )
 

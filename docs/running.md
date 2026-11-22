@@ -374,7 +374,9 @@ end at different moments rather than as one block, and each device's ACTIVE
 and COMPLETED Responses are posted at its own start and end. An event received
 after its start begins on each device at the current time plus that device's
 start offset (§10.2.2.3 rule k), and a successive event starts on each device
-where the earlier one ended on it (rule m).
+where the earlier one ended on it (rule m). A device whose own randomized
+window has already ended when the event arrives is not dispatched and is
+answered EXPIRED (rule j).
 
 Removal is acted on only when the list was fetched completely. A DERControl
 fetch that fails or does not parse leaves the client holding no list rather than

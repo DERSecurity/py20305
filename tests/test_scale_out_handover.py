@@ -499,7 +499,54 @@ class BlockingDispatcher(RecordingDispatcher):
         await super().apply_control(device_href, derc, curves)
 
 
+class BlockingDefaultDispatcher(RecordingDispatcher):
+    """A dispatcher whose default-control writes wait until ``release`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def apply_default_control(self, device_href, dderc, curves, **kw) -> None:  # type: ignore[override]
+        self.entered.set()
+        await self.release.wait()
+        await super().apply_default_control(device_href, dderc, curves, **kw)
+
+
 class TestHandoverEdgeCases:
+    async def test_release_waits_for_a_cancellation_fallback_in_flight(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            EventProcessor, "_cancellation_wind_down", staticmethod(lambda _record: 1)
+        )
+        store = MemoryEventStateStore()
+        dispatcher = BlockingDefaultDispatcher()
+        derc = _derc(1, _now() - 5)
+        a = _processor(_state("/edev/1", b"\x01" * 20, [derc]), store, dispatcher)
+        try:
+            await a.process_controls("/derp/1")
+            cancelled = _derc(1, _now() - 5)
+            cancelled.event_status.current_status = 2  # type: ignore[union-attr]
+            a._state.der_programs["/derp/1"].der_controls = [cancelled]
+            await a.process_controls("/derp/1")
+            await asyncio.wait_for(dispatcher.entered.wait(), 5)
+
+            release = asyncio.ensure_future(a.release_devices(["/edev/1"]))
+            await asyncio.sleep(0.05)
+            assert not release.done()
+
+            dispatcher.release.set()
+            await release
+
+            assert dispatcher.defaults == ["/edev/1"]
+            snapshot = store.load_device("/edev/1")
+            assert snapshot is not None
+            assert [e["fallback_at"] for e in snapshot["events"]] == [None]
+        finally:
+            dispatcher.release.set()
+            await a.shutdown()
+
     async def test_a_released_device_keeps_a_pending_default_fallback_delay(
         self, monkeypatch: pytest.MonkeyPatch
     ):
