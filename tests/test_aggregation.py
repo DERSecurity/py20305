@@ -543,6 +543,24 @@ class TestClient:
             )
         client._http.post.assert_not_awaited()
 
+    @pytest.mark.parametrize(
+        "lfdi",
+        [MEMBER_A[:-2], MEMBER_A + "00", MEMBER_A[:-1] + "g", " " + MEMBER_A[:-1], ""],
+        ids=["short", "overlong", "not-hex", "spaced", "empty"],
+    )
+    async def test_an_lfdi_that_is_not_40_hex_characters_is_refused_before_any_request(
+        self, lfdi
+    ):
+        client = CsipClient("https://example.com")
+        client._http.get_list = AsyncMock()  # type: ignore[method-assign]
+        client._http.post = AsyncMock()  # type: ignore[method-assign]
+        with pytest.raises(ValueError, match="40 hexadecimal characters"):
+            await client.register_aggregated_device(
+                aggregated_device_list_href="/edev/3/adev", lfdi=lfdi
+            )
+        client._http.get_list.assert_not_awaited()
+        client._http.post.assert_not_awaited()
+
     async def test_a_process_without_own_enddevice_duties_does_not_register(self):
         client = CsipClient("https://example.com")
         client._own_end_device = False

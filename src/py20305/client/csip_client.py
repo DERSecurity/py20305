@@ -536,7 +536,14 @@ class CsipClient:
         )
         from py20305.security.identity import compute_sfdi
 
-        lfdi_bytes = bytes.fromhex(lfdi)
+        # An LFDI is 160 bits: 40 hex characters. A shorter or longer string
+        # would register a different identity.
+        try:
+            lfdi_bytes = bytes.fromhex(lfdi)
+        except ValueError:
+            raise ValueError(f"lfdi must be 40 hexadecimal characters, got {lfdi!r}") from None
+        if len(lfdi_bytes) != 20 or len(lfdi) != 40:
+            raise ValueError(f"lfdi must be 40 hexadecimal characters, got {lfdi!r}")
         sfdi = compute_sfdi(lfdi)
         if device_category is not None and not 0 <= device_category < 2**32:
             raise ValueError("device_category must be between 0 and 4294967295 (32-bit bitmap)")
