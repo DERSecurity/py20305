@@ -30,7 +30,10 @@ A filter is any callable that takes an EndDevice href and its LFDI (40
 lowercase hex characters) and returns whether this process acts for it.
 `DeviceSet` accepts the EndDevices named by href or by LFDI, and the host can
 `add` and `discard` entries as it moves devices. The client reads the filter at
-each discovery.
+each discovery. After adding a device, call `take_over_devices` (see [Move
+devices from one process to another](#move-devices-from-one-process-to-another)):
+a rediscovery alone does not apply an event that is already running to a
+device that joins it.
 
 An EndDevice the filter rejects is not fetched below the EndDeviceList. Its
 SubscriptionListLink is still recorded, so a process that does not act for the
@@ -147,15 +150,18 @@ client keeps in it, for each EndDevice it acts for:
   start and duration, whether the control was applied to the device or
   rejected there, whether a higher-priority event superseded it there, and
   whether it was opted out during a loss of communications;
-- the DefaultDERControl last applied to the device;
+- the DefaultDERControl last applied to the device, and the time a delayed
+  default-control fallback after a cancellation is due;
 - the loss-of-communications resume boundary, before which recovered events
   are not resumed;
 - each Response posted for the device, recorded as it is posted.
 
 It also keeps the randomization offsets of each event, so an event whose
 DERProgram serves devices of several processes starts and ends at the same
-moment in all of them. Values are JSON types, so a store can write them to a
-database as they are.
+moment in all of them. The offsets stored are the final ones: a successive
+event whose start follows its predecessor's end (IEEE 2030.5 §10.2.2.3 rule
+m) stores the adjusted start. Values are JSON types, so a store can write them
+to a database as they are.
 
 The store's concurrency rules are in its docstring. In short: a device's
 snapshot has one writer, the process acting for it; `claim_offsets` must be
@@ -163,7 +169,12 @@ compare-and-set across processes; `record_response` only appends.
 
 Each process detects a loss of communications on its own, from its own
 requests to the server. The shared state carries what the detection did to a
-device (events opted out, the resume boundary), not the detection itself.
+device (events opted out, the resume boundary), not the detection itself. A
+process that takes a device over applies these to that device only: a new
+event is skipped as inside the opted-out window only when every device of its
+DERProgram came with a boundary after the event's start, and an event opted
+out on the incoming device stays running on the devices the process already
+had.
 
 ## Move devices from one process to another
 
@@ -179,24 +190,40 @@ b_devices.add(hrefs=moving)
 await client_b.take_over_devices(moving)
 ```
 
-`release_devices` saves the devices' snapshots, forgets the events that
-concern only them without posting a Response or writing to a device, and
-rediscovers without them. The subscriptions stay as they are.
+`release_devices` stops new event work for the devices at once, waits for
+work already running for them to finish (an activation, a control write, a
+Response), saves their snapshots, forgets the events that concern only them
+without posting a Response or writing to a device, and rediscovers without
+them. The subscriptions stay as they are. If a snapshot cannot be saved, it
+raises and the devices stay with process A; put them back in A's device
+filter, or call it again. Call it from host code, not from a dispatcher or
+another event callback, which it would wait for.
 
 `take_over_devices` loads the snapshots, rediscovers so the devices' programs
 and controls are read from the server again, and then:
 
 - carries on each event the previous process handled, with its timing, and
-  posts no Response that was already posted for the device;
+  posts no Response that was already posted for the device, whether or not a
+  snapshot was saved;
 - applies a running event to a device that was neither told it started nor
   told it was rejected, as when the previous process stopped in the middle of
-  an activation;
+  an activation or the device joins a DERProgram whose event already runs in
+  process B, and posts the device's ACKNOWLEDGED and ACTIVE Responses;
+- carries on an event for the incoming device even when process B holds it
+  as superseded on its own devices;
 - starts the activation and completion timers of the events it loaded,
   after the devices are mapped, so an event due while no process acted for
-  the device starts once, on the device;
+  the device starts once, on the device; an event whose end passed meanwhile
+  is not applied, and a running one completes at once;
+- keeps the delay of a default-control fallback that was waiting out a
+  cancellation;
 - handles a control the server added or changed while no process acted for
   the device, or while the take-over ran: the rediscovery fetches it, and a
   notification that arrives during the rediscovery is left to it.
+
+It returns False, and resumes nothing, when no rediscovery pass that started
+after the call completed, or when the rediscovery did not find every device.
+Call it again to complete the take-over.
 
 A process that stops without `release_devices`, by crashing, leaves the last
 snapshot it saved. Snapshots are saved after each pass over a program's

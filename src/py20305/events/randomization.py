@@ -28,7 +28,14 @@ class RandomizationCache:
         self._expiry: dict[bytes, int] = {}
         self._claim = claim
 
-    def get_offsets(self, event: RandomizableEvent, start: int, duration: int) -> tuple[int, int]:
+    def get_offsets(
+        self,
+        event: RandomizableEvent,
+        start: int,
+        duration: int,
+        *,
+        start_offset: int | None = None,
+    ) -> tuple[int, int]:
         """Return (start_offset, duration_offset) for the given randomizable event.
 
         Works for any ``RandomizableEvent`` (DERControl, TimeTariffInterval, ...)
@@ -36,12 +43,17 @@ class RandomizationCache:
         ``randomize_duration`` fields. Offsets are cached per mRID. Range is
         [0, abs(value)] with sign preserved from the randomization field. Zero
         randomization fields produce zero offsets.
+
+        ``start_offset``, when given, replaces the drawn start offset of an
+        event not cached yet, before the offsets are claimed: a successive
+        event's start follows its predecessor's end.
         """
         mrid = event.m_rid.value
         if mrid in self._cache:
             return self._cache[mrid]
 
-        start_offset = self._compute_offset(event.randomize_start)
+        if start_offset is None:
+            start_offset = self._compute_offset(event.randomize_start)
         dur_offset = self._compute_offset(event.randomize_duration)
         if self._claim is not None:
             start_offset, dur_offset = self._claim(mrid, (start_offset, dur_offset))

@@ -302,6 +302,10 @@ class CsipClient:
         self._on_device_removed = on_device_removed
         #: The exception that ended the last failed rediscovery pass, or None.
         self._rediscovery_error: Exception | None = None
+        #: Rediscovery passes started, and the number of the last one that
+        #: completed. take_over_devices checks a pass started after it did.
+        self._rediscovery_passes = 0
+        self._last_completed_pass = 0
         #: The hrefs this process acted for when the running rediscovery began.
         #: A lifecycle notification during the rediscovery is matched against it.
         self._scope_before_rediscovery: set[str] = set()
@@ -2107,6 +2111,8 @@ class CsipClient:
             while True:
                 self._rediscovery_pending = False
                 passes += 1
+                self._rediscovery_passes += 1
+                this_pass = self._rediscovery_passes
                 logger.info("Rediscovery: resetting polls (preserving event processor)")
                 await self._scheduler.cancel_all()
                 self._scheduler = self._new_scheduler()
@@ -2217,6 +2223,7 @@ class CsipClient:
                         await self._event_processor.process_controls(href)
                     self._start_polls()
                     self._rediscovery_error = None
+                    self._last_completed_pass = this_pass
                     logger.info("Rediscovery complete")
                 except Exception as exc:
                     # Re-arm the scheduler so the connectivity heartbeat (and polls)
@@ -2292,18 +2299,26 @@ class CsipClient:
         the devices is found by the rediscovery, as is one a notification
         reports while it runs.
 
-        Returns False when the rediscovery failed or did not find every device;
-        call it again to complete the take-over.
+        Returns False when no rediscovery pass that started after this call
+        completed, or the rediscovery did not find every device; nothing is
+        resumed then, and the call can be made again to complete the take-over.
         Without an event state store the devices are rediscovered and treated
         as new, as a fresh client would treat them.
         """
         hrefs = list(device_hrefs)
+        started_before = self._rediscovery_passes
         self._event_processor.load_devices(hrefs)
         await self.trigger_rediscovery()
         # A rediscovery already running coalesces this one into a further pass;
         # wait for that pass, so the devices are mapped before they are resumed.
         async with self._rediscovery_lock:
             pass
+        if self._last_completed_pass <= started_before:
+            logger.warning(
+                "Take-over incomplete: the rediscovery failed; running events are not "
+                "applied to the EndDevices taken over yet"
+            )
+            return False
         if not all(href in self._state.end_devices for href in hrefs):
             logger.warning(
                 "Take-over incomplete: not every EndDevice taken over was discovered; "
@@ -2317,12 +2332,17 @@ class CsipClient:
         """Stop acting for EndDevices another process will take over.
 
         The host first makes this client's device filter reject the devices.
-        This saves their event state to the shared event state store, forgets
-        the events that concern only them without a Response or a write to a
-        device, and rediscovers without them. Subscriptions stay as they are.
-        Returns what :meth:`trigger_rediscovery` returns.
+        This stops new event work for them, waits for work already running for
+        them to finish, saves their event state to the shared event state
+        store, forgets the events that concern only them without a Response or
+        a write to a device, and rediscovers without them. Subscriptions stay
+        as they are. Returns what :meth:`trigger_rediscovery` returns.
+
+        Raises the store's error when their event state cannot be saved. The
+        devices then stay with this process; the host puts them back in its
+        device filter, or calls this again.
         """
-        self._event_processor.release_devices(device_hrefs)
+        await self._event_processor.release_devices(device_hrefs)
         return await self.trigger_rediscovery()
 
     async def shutdown(
