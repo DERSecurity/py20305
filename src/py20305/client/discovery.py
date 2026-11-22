@@ -1098,7 +1098,7 @@ async def refresh_aggregations(
     subscription suppresses the EndDeviceList poll. ``last_read`` maps an
     EndDevice href to the monotonic time of its last read here; an EndDevice
     with no entry is due. A read that fails keeps the previous members and
-    priority.
+    priority. A read that an EndDeviceList refresh overtook is dropped.
     """
     fallback = state.poll_rates.get("edev") or DEFAULT_POLL_RATE
     for edev_href, edev_state in list(state.end_devices.items()):
@@ -1112,8 +1112,18 @@ async def refresh_aggregations(
         # One second of slack, so a tick that wakes just early still reads.
         if previous is not None and now - previous < rate - 1:
             continue
-        edev_state.aggregation = await read_aggregation(client, edev_state.device, info)
+        device = edev_state.device
+        fresh = await read_aggregation(client, device, info)
         last_read[edev_href] = now
+        # An EndDeviceList refresh or a rediscovery may have replaced the
+        # EndDevice or its aggregation while this read was in flight. Its data
+        # is newer, so this read is dropped.
+        if (
+            state.end_devices.get(edev_href) is edev_state
+            and edev_state.device is device
+            and edev_state.aggregation is info
+        ):
+            edev_state.aggregation = fresh
 
 
 async def refresh_function_set_assignments(

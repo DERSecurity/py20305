@@ -150,8 +150,9 @@ async def read_aggregation(
 
     Follows Annex C.3: the AggregatedDeviceList when the EndDevice links one,
     then the AggregationPriority when the distribution is Priority. A list or a
-    priority that cannot be read (the server does not serve it, the request
-    times out or the connection fails) or does not parse is logged, so one
+    priority that cannot be read (the server does not serve it, including a
+    list whose first page is 404 or 204, the request times out or the
+    connection fails) or does not parse is logged, so one
     EndDevice's aggregation never stops discovery of the others. When
     ``previous`` read the same resource, its members or priority are kept;
     otherwise that part is left empty.
@@ -175,6 +176,13 @@ async def read_aggregation(
                 members, poll_rate = previous.members, previous.list_poll_rate
                 poll_disabled = previous.list_poll_disabled
         else:
+            if not pages:
+                # The paged reader answers a first-page 404 or 204 with no
+                # pages, where a served list, even an empty one, has a page.
+                logger.warning("AggregatedDeviceList at %s was not served", list_href)
+                if previous is not None and previous.aggregated_device_list_href == list_href:
+                    members, poll_rate = previous.members, previous.list_poll_rate
+                    poll_disabled = previous.list_poll_disabled
             read: list[AggregatedDeviceInfo] = []
             for index, page in enumerate(pages):
                 if index == 0:
@@ -183,7 +191,8 @@ async def read_aggregation(
                     poll_rate = normalize_poll_rate(page.poll_rate, resource_key="adev")
                     poll_disabled = poll_rate is None
                 read.extend(_member(device) for device in page.aggregated_device)
-            members = tuple(read)
+            if pages:
+                members = tuple(read)
 
     priority: tuple[str, ...] = ()
     if distribution == PRIORITY:

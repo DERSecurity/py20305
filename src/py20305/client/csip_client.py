@@ -1325,6 +1325,8 @@ class CsipClient:
         await refresh_aggregations(
             self._http, self._state, self._aggregation_reads, time.monotonic()
         )
+        # A read can change a list's pollRate, and so the poll's interval.
+        self._schedule_aggregation_poll()
 
     def _subscribed_fsa_hrefs(self) -> set[str]:
         """FSA list hrefs with an active subscription -- rule (r): don't poll them."""

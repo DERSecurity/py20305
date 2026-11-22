@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from aiohttp import web
 
 from py20305.client.aggregation import (
     AggregatedDeviceInfo,
@@ -24,6 +26,7 @@ from py20305.client.discovery import (
     refresh_end_device_lists,
 )
 from py20305.client.errors import Sep2ConnectionError, Sep2ProtocolError, Sep2RedirectError
+from py20305.client.http import Sep2Client
 from py20305.client.state import DiscoveredState, EndDeviceState
 from py20305.client.timebase import ServerTimebase
 from py20305.models.sep.sep import (
@@ -46,6 +49,7 @@ from py20305.models.sep.sep import (
     TimeType,
 )
 from py20305.server_profile import Edition, ServerProfile
+from py20305.xml.serialization import to_xml
 
 AGG = bytes.fromhex("a9" * 20)
 MEMBER_A = "bff864bdf8f9eb91a9ec03e7f66ecf2844fe968e"
@@ -352,6 +356,99 @@ class TestAggregationPoll:
             assert "adev" not in client._scheduler.suppressed_keys
         finally:
             await client._scheduler.cancel_all()
+
+    async def test_an_aggregation_poll_applies_a_changed_list_poll_rate(self):
+        client = CsipClient("https://example.com")
+        info = AggregationInfo(1, aggregated_device_list_href="/a/adev")
+        client.state.end_devices["/a"] = EndDeviceState(
+            device=_edev(distribution=1, adev=True, href="/a"),
+            href="/a",
+            lfdi=AGG,
+            aggregation=info,
+        )
+        try:
+            client._schedule_aggregation_poll()
+            assert client._scheduler._intervals["adev"] == 900
+            client._http.get_list = AsyncMock(  # type: ignore[method-assign]
+                return_value=[_adev_list(poll_rate=60)]
+            )
+            await client._do_poll_aggregations()
+            assert client._scheduler._intervals["adev"] == 60
+        finally:
+            await client._scheduler.cancel_all()
+
+
+_PREVIOUS = AggregationInfo(
+    distribution=1,
+    members=(AggregatedDeviceInfo(MEMBER_A, 1, True, "/edev/3/adev/0", 0),),
+    aggregated_device_list_href="/edev/3/adev",
+    list_poll_rate=300,
+)
+
+
+class TestPagedReader:
+    """Reads through the real paged list reader against a served list."""
+
+    async def _read(self, aiohttp_server: Any, handler: Any) -> AggregationInfo | None:
+        app = web.Application()
+        app.router.add_get("/edev/3/adev", handler)
+        server = await aiohttp_server(app)
+        base_url = str(server.make_url("")).rstrip("/")
+        async with Sep2Client(base_url) as client:
+            edev = _edev(distribution=1, adev=True)
+            return await read_aggregation(client, edev, _PREVIOUS)
+
+    async def test_a_first_page_404_keeps_the_previous_members(self, aiohttp_server):
+        async def handler(request: web.Request) -> web.Response:
+            return web.Response(status=404, body=b"not found")
+
+        info = await self._read(aiohttp_server, handler)
+        assert info is not None
+        assert info.members == _PREVIOUS.members
+        assert info.list_poll_rate == 300
+
+    async def test_a_served_empty_list_clears_the_members(self, aiohttp_server):
+        async def handler(request: web.Request) -> web.Response:
+            body = to_xml(_adev_list(poll_rate=120))
+            return web.Response(body=body, content_type="application/sep+xml")
+
+        info = await self._read(aiohttp_server, handler)
+        assert info is not None
+        assert info.members == ()
+        assert info.list_poll_rate == 120
+
+
+class _GatedClient(_Client):
+    """A _Client whose GET of one path waits until ``release`` is set."""
+
+    def __init__(self, responses: dict[str, Any], gated: str) -> None:
+        super().__init__(responses)
+        self.gated = gated
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def get(self, path: str, model_type: type) -> Any:
+        if path.split("?")[0] == self.gated:
+            self.started.set()
+            await self.release.wait()
+        return await super().get(path, model_type)
+
+
+class TestOverlappingRefresh:
+    async def test_an_aggregation_poll_read_overtaken_by_a_refresh_is_dropped(self):
+        info = AggregationInfo(1, aggregated_device_list_href="/a/adev", list_poll_rate=300)
+        state = _state_with(("/a", info))
+        client = _GatedClient({"/a/adev": _adev_list(_member(MEMBER_A, 1))}, gated="/a/adev")
+        task = asyncio.create_task(
+            refresh_aggregations(client, state, {}, now=0.0)  # type: ignore[arg-type]
+        )
+        await client.started.wait()
+        # An EndDeviceList refresh replaces the aggregation while the read waits.
+        newer = AggregationInfo(3, aggregated_device_list_href="/a/adev", list_poll_rate=300)
+        state.end_devices["/a"].aggregation = newer
+        client.release.set()
+        await task
+        assert state.end_devices["/a"].aggregation is newer
 
 
 def _discovery_client(edev: EndDevice1, **extra: Any) -> _Client:
