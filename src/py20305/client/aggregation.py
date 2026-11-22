@@ -32,7 +32,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
+from py20305.client.errors import Sep2ConnectionError, Sep2PayloadError, Sep2ProtocolError
 from py20305.client.poll_rate import normalize_poll_rate
 from py20305.models.sep.sep import AggregatedDeviceList, AggregationPriority
 
@@ -40,6 +40,12 @@ if TYPE_CHECKING:
     from py20305.client.http import Sep2Client
 
 logger = logging.getLogger(__name__)
+
+#: The failures that leave one aggregation resource unread without stopping
+#: discovery: a refused or unparsable response, and a timeout or lost connection.
+#: A redirect and a request-limiter failure still propagate, so the caller
+#: rediscovers or backs off as for any other resource.
+_READ_FAILURES = (Sep2ProtocolError, Sep2PayloadError, Sep2ConnectionError)
 
 #: The AggregationDistributionType value for Priority (IEEE 2030.5-2023 Annex B.24).
 PRIORITY = 3
@@ -72,7 +78,8 @@ class AggregationInfo:
     ``priority`` holds the AggregationPriority's LFDIs, highest first; it is
     read only for a Priority distribution. ``list_poll_rate`` is the
     AggregatedDeviceList's ``pollRate`` in seconds, or None when the list was
-    not read.
+    not read or its ``pollRate`` disables polling. ``list_poll_disabled`` is
+    True when the list's ``pollRate`` is 0 or less, which disables polling.
     """
 
     distribution: int | None
@@ -81,6 +88,7 @@ class AggregationInfo:
     aggregated_device_list_href: str | None = None
     aggregation_priority_href: str | None = None
     list_poll_rate: int | None = None
+    list_poll_disabled: bool = False
 
     @property
     def enabled_members(self) -> tuple[str, ...]:
@@ -135,14 +143,18 @@ def _member(device: Any) -> AggregatedDeviceInfo:
     )
 
 
-async def read_aggregation(client: Sep2Client, end_device: Any) -> AggregationInfo | None:
+async def read_aggregation(
+    client: Sep2Client, end_device: Any, previous: AggregationInfo | None = None
+) -> AggregationInfo | None:
     """Read the aggregation an EndDevice describes, or return None when it describes none.
 
     Follows Annex C.3: the AggregatedDeviceList when the EndDevice links one,
     then the AggregationPriority when the distribution is Priority. A list or a
-    priority the server does not serve (404 or 204), cannot be read, or does
-    not parse is logged and left empty, so one EndDevice's aggregation never
-    stops discovery of the others.
+    priority that cannot be read (the server does not serve it, the request
+    times out or the connection fails) or does not parse is logged, so one
+    EndDevice's aggregation never stops discovery of the others. When
+    ``previous`` read the same resource, its members or priority are kept;
+    otherwise that part is left empty.
     """
     if not is_aggregation(end_device):
         return None
@@ -151,18 +163,27 @@ async def read_aggregation(client: Sep2Client, end_device: Any) -> AggregationIn
     list_href = _href(getattr(end_device, "aggregated_device_list_link", None))
     priority_href = _href(getattr(end_device, "aggregation_priority_link", None))
 
-    members: list[AggregatedDeviceInfo] = []
+    members: tuple[AggregatedDeviceInfo, ...] = ()
     poll_rate: int | None = None
+    poll_disabled = False
     if list_href:
         try:
             pages = await client.get_list(list_href, AggregatedDeviceList)
-        except (Sep2ProtocolError, Sep2PayloadError) as exc:
+        except _READ_FAILURES as exc:
             logger.warning("AggregatedDeviceList at %s could not be read: %s", list_href, exc)
-            pages = []
-        for page in pages:
-            if poll_rate is None:
-                poll_rate = normalize_poll_rate(page.poll_rate, resource_key="adev")
-            members.extend(_member(device) for device in page.aggregated_device)
+            if previous is not None and previous.aggregated_device_list_href == list_href:
+                members, poll_rate = previous.members, previous.list_poll_rate
+                poll_disabled = previous.list_poll_disabled
+        else:
+            read: list[AggregatedDeviceInfo] = []
+            for index, page in enumerate(pages):
+                if index == 0:
+                    # The first page's pollRate stands, including one that
+                    # disables polling (normalized to None).
+                    poll_rate = normalize_poll_rate(page.poll_rate, resource_key="adev")
+                    poll_disabled = poll_rate is None
+                read.extend(_member(device) for device in page.aggregated_device)
+            members = tuple(read)
 
     priority: tuple[str, ...] = ()
     if distribution == PRIORITY:
@@ -175,10 +196,12 @@ async def read_aggregation(client: Sep2Client, end_device: Any) -> AggregationIn
             try:
                 order = await client.get(priority_href, AggregationPriority)
                 priority = tuple(bytes(data.l_fdi).hex() for data in order.priority_data)
-            except (Sep2ProtocolError, Sep2PayloadError) as exc:
+            except _READ_FAILURES as exc:
                 logger.warning(
                     "AggregationPriority at %s could not be read: %s", priority_href, exc
                 )
+                if previous is not None and previous.aggregation_priority_href == priority_href:
+                    priority = previous.priority
     elif priority_href is not None:
         # Annex B.24: the AggregationPriority SHALL NOT be present otherwise.
         logger.info(
@@ -187,18 +210,32 @@ async def read_aggregation(client: Sep2Client, end_device: Any) -> AggregationIn
         )
     return AggregationInfo(
         distribution=distribution,
-        members=tuple(members),
+        members=members,
         priority=priority,
         aggregated_device_list_href=list_href,
         aggregation_priority_href=priority_href,
         list_poll_rate=poll_rate,
+        list_poll_disabled=poll_disabled,
     )
+
+
+def aggregation_poll_rate(info: AggregationInfo, fallback: int) -> int | None:
+    """Return how often to read ``info`` again, in seconds, or None to not poll it.
+
+    The AggregatedDeviceList's own ``pollRate`` decides; a list whose
+    ``pollRate`` disables polling is not polled. An aggregation with no list
+    readable yet, or with only a priority, uses ``fallback``.
+    """
+    if info.aggregated_device_list_href is not None and info.list_poll_disabled:
+        return None
+    return info.list_poll_rate or fallback
 
 
 __all__ = [
     "PRIORITY",
     "AggregatedDeviceInfo",
     "AggregationInfo",
+    "aggregation_poll_rate",
     "distribution_of",
     "is_aggregation",
     "read_aggregation",

@@ -35,12 +35,20 @@ Discovery reads, for each EndDevice it walks that carries a non-zero
 It does not read an AggregationPriority for any other distribution, since the
 standard says one SHALL NOT be present, and logs that the server links one. A
 Priority distribution with no AggregationPriorityLink is logged as a warning.
-A list or a priority the server does not serve, cannot be read or does not
-parse is logged and left empty; the rest of discovery goes on.
+A list or a priority that cannot be read (the server does not serve it, the
+request times out or the connection fails) or does not parse is logged, and
+the rest of discovery goes on. On a first read that part is left empty; on a
+later read the members or the priority from the previous read are kept. A
+redirect still starts rediscovery, as for any resource.
 
-The reads are repeated each time the EndDeviceList is refreshed, so a changed
-distribution or priority, and a member the server marks `enabled` false before
-removing it (§8.7.3.1), are seen at the EndDeviceList's poll rate.
+The reads are repeated each time the EndDeviceList is refreshed, and also on
+a poll of their own at the AggregatedDeviceList's `pollRate` (the first
+page's). That poll is never suppressed by a subscription, so a changed
+priority, and a member the server marks `enabled` false before removing it
+(§8.7.3.1), are seen while a subscription to the EndDeviceList suppresses its
+poll. A list whose `pollRate` disables polling is read again only with the
+EndDeviceList. An aggregation with no list is read again at the
+EndDeviceList's poll rate.
 
 The result is an `AggregationInfo` on the EndDevice's state:
 

@@ -14,7 +14,9 @@ from typing import TYPE_CHECKING, Any
 from py20305.audit import AuditEmitter
 from py20305.client.discovery import (
     _extract_href,
+    aggregations_poll_interval,
     discover,
+    refresh_aggregations,
     refresh_der_controls,
     refresh_der_controls_for_program,
     refresh_der_programs,
@@ -236,6 +238,8 @@ class CsipClient:
         self._reconcile_interval_seconds = reconcile_interval_seconds
         self._renewal_interval_seconds = renewal_interval_seconds
         self._scheduler = self._new_scheduler()
+        # Monotonic time each aggregation EndDevice was last read by the "adev" poll.
+        self._aggregation_reads: dict[str, float] = {}
         self._shutdown_event = asyncio.Event()
         self._rediscovery_lock = asyncio.Lock()
         self._state_ready = asyncio.Event()
@@ -735,6 +739,8 @@ class CsipClient:
         fsa_rate = rates.get("fsa")
         if fsa_rate is not None:
             self._scheduler.schedule("fsa", fsa_rate, self._poll_fsa)
+
+        self._schedule_aggregation_poll()
 
         derp_rate = rates.get("derp")
         if derp_rate is not None:
@@ -1293,6 +1299,32 @@ class CsipClient:
             "Polling edev: refreshing end device lists for %d devices", len(self._state.end_devices)
         )
         await refresh_end_device_lists(self._http, self._state)
+        # A refresh can add or remove an aggregation or change its list's pollRate.
+        self._schedule_aggregation_poll()
+
+    def _schedule_aggregation_poll(self) -> None:
+        """Schedule the "adev" poll at the shortest aggregation poll interval.
+
+        The AggregatedDeviceList and AggregationPriority are never subscribed,
+        so this poll is never suppressed: an aggregation stays current while a
+        subscription suppresses the EndDeviceList poll. Each run reads only the
+        aggregations whose own interval has elapsed.
+        """
+        interval = aggregations_poll_interval(self._state)
+        if interval is None:
+            return
+        if "adev" in self._scheduler.active_keys:
+            self._scheduler.set_interval("adev", interval)
+        else:
+            self._scheduler.schedule("adev", interval, self._poll_aggregations)
+
+    async def _poll_aggregations(self) -> None:
+        await self._poll_with_404_recovery(self._do_poll_aggregations)
+
+    async def _do_poll_aggregations(self) -> None:
+        await refresh_aggregations(
+            self._http, self._state, self._aggregation_reads, time.monotonic()
+        )
 
     def _subscribed_fsa_hrefs(self) -> set[str]:
         """FSA list hrefs with an active subscription -- rule (r): don't poll them."""

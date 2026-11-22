@@ -11,13 +11,19 @@ import pytest
 from py20305.client.aggregation import (
     AggregatedDeviceInfo,
     AggregationInfo,
+    aggregation_poll_rate,
     distribution_of,
     is_aggregation,
     read_aggregation,
 )
 from py20305.client.csip_client import CsipClient
-from py20305.client.discovery import discover, refresh_end_device_lists
-from py20305.client.errors import Sep2ProtocolError
+from py20305.client.discovery import (
+    aggregations_poll_interval,
+    discover,
+    refresh_aggregations,
+    refresh_end_device_lists,
+)
+from py20305.client.errors import Sep2ConnectionError, Sep2ProtocolError, Sep2RedirectError
 from py20305.client.state import DiscoveredState, EndDeviceState
 from py20305.client.timebase import ServerTimebase
 from py20305.models.sep.sep import (
@@ -202,6 +208,150 @@ class TestReadAggregation:
     def test_an_unspecified_distribution_alone_is_no_aggregation(self):
         assert is_aggregation(_edev(distribution=0)) is False
         assert is_aggregation(_edev(distribution=0, adev=True)) is True
+
+
+class TestReadFailures:
+    async def test_a_list_timeout_leaves_the_members_empty_without_raising(self):
+        client = _Client({"/edev/3/adev": Sep2ConnectionError("timed out")})
+        info = await read_aggregation(client, _edev(distribution=1, adev=True))  # type: ignore[arg-type]
+        assert info is not None
+        assert info.members == ()
+
+    async def test_a_priority_timeout_keeps_the_members_and_leaves_the_order_empty(self):
+        client = _Client(
+            {
+                "/edev/3/adev": _adev_list(_member(MEMBER_A, 1)),
+                "/edev/3/aggp": Sep2ConnectionError("timed out"),
+            }
+        )
+        edev = _edev(distribution=3, adev=True, aggp=True)
+        info = await read_aggregation(client, edev)  # type: ignore[arg-type]
+        assert info is not None
+        assert info.enabled_members == (MEMBER_A,)
+        assert info.priority == ()
+
+    async def test_a_redirect_still_propagates(self):
+        client = _Client({"/edev/3/adev": Sep2RedirectError("moved", "/new")})
+        with pytest.raises(Sep2RedirectError):
+            await read_aggregation(client, _edev(distribution=1, adev=True))  # type: ignore[arg-type]
+
+    async def test_a_failed_read_keeps_the_previous_members_and_priority(self):
+        previous = AggregationInfo(
+            distribution=3,
+            members=(AggregatedDeviceInfo(MEMBER_A, 1, True, "/edev/3/adev/0", 0),),
+            priority=(MEMBER_A,),
+            aggregated_device_list_href="/edev/3/adev",
+            aggregation_priority_href="/edev/3/aggp",
+            list_poll_rate=300,
+        )
+        client = _Client(
+            {
+                "/edev/3/adev": Sep2ConnectionError("timed out"),
+                "/edev/3/aggp": Sep2ProtocolError(500, "/edev/3/aggp"),
+            }
+        )
+        edev = _edev(distribution=3, adev=True, aggp=True)
+        info = await read_aggregation(client, edev, previous)  # type: ignore[arg-type]
+        assert info is not None
+        assert info.members == previous.members
+        assert info.priority == (MEMBER_A,)
+        assert info.list_poll_rate == 300
+
+    async def test_a_discovery_with_an_aggregation_timeout_still_finds_the_enddevice(self):
+        client = _discovery_client(
+            _edev(distribution=1, adev=True), **{"/edev/3/adev": Sep2ConnectionError("timed out")}
+        )
+        state = DiscoveredState()
+        await discover(client, state)  # type: ignore[arg-type]
+        aggregation = state.end_devices["/edev/3"].aggregation
+        assert aggregation is not None
+        assert aggregation.members == ()
+
+
+class TestListPollRate:
+    async def test_a_first_page_that_disables_polling_is_not_overwritten_by_a_later_page(self):
+        pages = [_adev_list(_member(MEMBER_A, 1), poll_rate=0), _adev_list(poll_rate=300)]
+        client = _Client({"/edev/3/adev": pages})
+        info = await read_aggregation(client, _edev(distribution=1, adev=True))  # type: ignore[arg-type]
+        assert info is not None
+        assert info.list_poll_rate is None
+        assert info.list_poll_disabled is True
+        assert aggregation_poll_rate(info, 900) is None
+
+    async def test_the_first_page_poll_rate_is_used(self):
+        pages = [_adev_list(poll_rate=120), _adev_list(poll_rate=600)]
+        client = _Client({"/edev/3/adev": pages})
+        info = await read_aggregation(client, _edev(distribution=1, adev=True))  # type: ignore[arg-type]
+        assert info is not None
+        assert info.list_poll_rate == 120
+        assert aggregation_poll_rate(info, 900) == 120
+
+    def test_an_aggregation_without_a_list_polls_at_the_fallback_rate(self):
+        assert aggregation_poll_rate(AggregationInfo(distribution=3), 900) == 900
+
+
+def _state_with(*infos: tuple[str, AggregationInfo | None]) -> DiscoveredState:
+    state = DiscoveredState()
+    for href, info in infos:
+        edev = _edev(distribution=1, adev=True, href=href)
+        state.end_devices[href] = EndDeviceState(
+            device=edev, href=href, lfdi=AGG, aggregation=info
+        )
+    return state
+
+
+class TestAggregationPoll:
+    def test_the_poll_interval_is_the_shortest_list_poll_rate(self):
+        fast = AggregationInfo(1, aggregated_device_list_href="/a/adev", list_poll_rate=60)
+        slow = AggregationInfo(1, aggregated_device_list_href="/b/adev", list_poll_rate=600)
+        assert aggregations_poll_interval(_state_with(("/a", fast), ("/b", slow))) == 60
+
+    def test_no_aggregation_means_no_poll(self):
+        assert aggregations_poll_interval(_state_with(("/a", None))) is None
+
+    async def test_only_due_aggregations_are_read_again(self):
+        info = AggregationInfo(1, aggregated_device_list_href="/a/adev", list_poll_rate=300)
+        state = _state_with(("/a", info), ("/b", info))
+        client = _Client(
+            {
+                "/a/adev": _adev_list(_member(MEMBER_A, 1)),
+                "/b/adev": _adev_list(_member(MEMBER_B, 2)),
+            }
+        )
+        last_read = {"/a": 1000.0, "/b": 800.0}
+        await refresh_aggregations(client, state, last_read, now=1100.0)  # type: ignore[arg-type]
+        assert client.calls == ["/b/adev"]
+        assert last_read == {"/a": 1000.0, "/b": 1100.0}
+        refreshed = state.end_devices["/b"].aggregation
+        assert refreshed is not None
+        assert refreshed.enabled_members == (MEMBER_B,)
+
+    async def test_a_list_whose_poll_rate_disables_polling_is_not_read(self):
+        info = AggregationInfo(
+            1, aggregated_device_list_href="/a/adev", list_poll_disabled=True
+        )
+        client = _Client({})
+        await refresh_aggregations(client, _state_with(("/a", info)), {}, now=0.0)  # type: ignore[arg-type]
+        assert client.calls == []
+
+    async def test_the_client_schedules_an_unsuppressed_aggregation_poll(self):
+        client = CsipClient("https://example.com")
+        info = AggregationInfo(1, aggregated_device_list_href="/a/adev", list_poll_rate=120)
+        client.state.end_devices["/a"] = EndDeviceState(
+            device=_edev(distribution=1, adev=True, href="/a"),
+            href="/a",
+            lfdi=AGG,
+            aggregation=info,
+        )
+        try:
+            client._schedule_aggregation_poll()
+            assert "adev" in client._scheduler.active_keys
+            assert client._scheduler._intervals["adev"] == 120
+            # An EndDeviceList subscription suppresses the edev poll, never this one.
+            client._scheduler.suppress("edev")
+            assert "adev" not in client._scheduler.suppressed_keys
+        finally:
+            await client._scheduler.cancel_all()
 
 
 def _discovery_client(edev: EndDevice1, **extra: Any) -> _Client:

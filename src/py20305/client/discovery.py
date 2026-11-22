@@ -11,7 +11,7 @@ from typing import Any
 
 from lxml import etree
 
-from py20305.client.aggregation import read_aggregation
+from py20305.client.aggregation import aggregation_poll_rate, read_aggregation
 from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
 from py20305.client.http import Sep2Client
 from py20305.client.poll_rate import DEFAULT_POLL_RATE, normalize_poll_rate
@@ -1068,10 +1068,52 @@ async def refresh_end_device_lists(client: Sep2Client, state: DiscoveredState) -
                 state.end_devices[edev_href].lfdi = edev.l_fdi or b""
                 # The distribution, members and priority may change (§8.7.3.1:
                 # a member is disabled before it is removed).
-                state.end_devices[edev_href].aggregation = await read_aggregation(client, edev)
+                edev_state = state.end_devices[edev_href]
+                edev_state.aggregation = await read_aggregation(
+                    client, edev, edev_state.aggregation
+                )
 
     register_device_prefixes(client, state)
     logger.debug("Refreshed EndDevice list with %d devices", len(state.end_devices))
+
+
+def aggregations_poll_interval(state: DiscoveredState) -> int | None:
+    """Return the shortest poll interval of the discovered aggregations, or None."""
+    fallback = state.poll_rates.get("edev") or DEFAULT_POLL_RATE
+    rates = [
+        rate
+        for edev_state in state.end_devices.values()
+        if edev_state.aggregation is not None
+        and (rate := aggregation_poll_rate(edev_state.aggregation, fallback)) is not None
+    ]
+    return min(rates) if rates else None
+
+
+async def refresh_aggregations(
+    client: Sep2Client, state: DiscoveredState, last_read: dict[str, float], now: float
+) -> None:
+    """Read again each aggregation whose poll interval has elapsed.
+
+    This runs on its own schedule, so an aggregation stays current while a
+    subscription suppresses the EndDeviceList poll. ``last_read`` maps an
+    EndDevice href to the monotonic time of its last read here; an EndDevice
+    with no entry is due. A read that fails keeps the previous members and
+    priority.
+    """
+    fallback = state.poll_rates.get("edev") or DEFAULT_POLL_RATE
+    for edev_href, edev_state in list(state.end_devices.items()):
+        info = edev_state.aggregation
+        if info is None:
+            continue
+        rate = aggregation_poll_rate(info, fallback)
+        if rate is None:
+            continue
+        previous = last_read.get(edev_href)
+        # One second of slack, so a tick that wakes just early still reads.
+        if previous is not None and now - previous < rate - 1:
+            continue
+        edev_state.aggregation = await read_aggregation(client, edev_state.device, info)
+        last_read[edev_href] = now
 
 
 async def refresh_function_set_assignments(
