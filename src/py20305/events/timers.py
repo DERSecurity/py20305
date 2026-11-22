@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 ACTIVATION_LEAD = 0
 COMPLETION_LEAD = 0
 
+#: States in which an activation or completion timer no longer fires.
+_ENDED_STATES = frozenset({EventState.CANCELLED, EventState.SUPERSEDED, EventState.COMPLETED})
+
 
 def _local_now() -> int:
     """Default timer clock: local wall time."""
@@ -58,10 +61,10 @@ class EventTimerManager:
             max(delay, 0),
         )
         task = asyncio.create_task(
-            self._wait_and_fire(record, target, callback, "activation", now_fn),
+            self._wait_and_fire(record, target, callback, "activation", now_fn, _ENDED_STATES),
             name=f"activation-{record.mrid.hex()[:8]}",
         )
-        self._tasks.setdefault(record.mrid, []).append(task)
+        self._track(record.mrid, task)
 
     def schedule_completion(
         self,
@@ -83,10 +86,10 @@ class EventTimerManager:
             max(delay, 0),
         )
         task = asyncio.create_task(
-            self._wait_and_fire(record, target, callback, "completion", now_fn),
+            self._wait_and_fire(record, target, callback, "completion", now_fn, _ENDED_STATES),
             name=f"completion-{record.mrid.hex()[:8]}",
         )
-        self._tasks.setdefault(record.mrid, []).append(task)
+        self._track(record.mrid, task)
 
     def schedule_delayed_callback(
         self,
@@ -95,7 +98,12 @@ class EventTimerManager:
         callback: Callable[[EventRecord], Awaitable[None]],
         label: str = "delayed",
     ) -> None:
-        """Schedule a callback to fire after a fixed delay from now."""
+        """Schedule a callback to fire after a fixed delay from now.
+
+        Fires whatever the event's state: the one caller, the wind-down before
+        a cancelled event's default-control fallback, runs for an event that is
+        already CANCELLED.
+        """
         target = int(time.time()) + delay_seconds
         logger.debug(
             "Scheduling %s callback for %s in %ds",
@@ -106,13 +114,27 @@ class EventTimerManager:
         task = asyncio.create_task(
             # Delayed callbacks are elapsed-time semantics (target anchored to
             # local now above), so they deliberately stay on the local clock.
-            self._wait_and_fire(record, target, callback, label, _local_now),
+            self._wait_and_fire(record, target, callback, label, _local_now, frozenset()),
             name=f"{label}-{record.mrid.hex()[:8]}",
         )
-        self._tasks.setdefault(record.mrid, []).append(task)
+        self._track(record.mrid, task)
+
+    def _track(self, mrid: bytes, task: asyncio.Task[None]) -> None:
+        """Keep ``task`` under ``mrid`` until it finishes or is cancelled."""
+        self._tasks.setdefault(mrid, []).append(task)
+
+        def _untrack(finished: asyncio.Task[None]) -> None:
+            tasks = self._tasks.get(mrid)
+            if tasks is None or finished not in tasks:
+                return
+            tasks.remove(finished)
+            if not tasks:
+                del self._tasks[mrid]
+
+        task.add_done_callback(_untrack)
 
     def has_pending(self, mrid: bytes) -> bool:
-        """Return True if any timers are pending for the given mRID."""
+        """Return True if a timer for the given mRID has not finished yet."""
         return mrid in self._tasks
 
     def cancel(self, mrid: bytes) -> None:
@@ -147,8 +169,12 @@ class EventTimerManager:
         callback: Callable[[EventRecord], Awaitable[None]],
         label: str,
         now_fn: Callable[[], int],
+        skip_states: frozenset[EventState],
     ) -> None:
         """Adaptive sleep until target time, then fire callback if still valid.
+
+        The callback is skipped when the event has reached one of
+        ``skip_states`` by then.
 
         ``remaining`` is recomputed against ``now_fn`` on every tick, so a
         server-timebase offset update mid-sleep re-aims the firing instant
@@ -180,8 +206,8 @@ class EventTimerManager:
             if self._shutdown.is_set():
                 return
 
-            # Check state before firing -- skip if cancelled/superseded
-            if record.state in (EventState.CANCELLED, EventState.SUPERSEDED, EventState.COMPLETED):
+            # Check state before firing -- skip if the event has ended
+            if record.state in skip_states:
                 logger.debug(
                     "Skipping %s timer for %s: state=%s",
                     label,

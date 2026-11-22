@@ -430,23 +430,9 @@ class TestWritesNameTheirCause:
         site = Site(state)
         await site.processor.process_controls("/derp/1")
 
-        # The wind-down timer counts whole seconds; the callback it was handed
-        # is fired here instead of waiting on the clock.
-        scheduled: list[Any] = []
-        with (
-            patch.object(
-                processor_mod.EventProcessor, "_cancellation_wind_down", staticmethod(lambda _r: 5)
-            ),
-            patch.object(
-                site.processor._timer_mgr,
-                "schedule_delayed_callback",
-                side_effect=lambda record, _delay, callback, _label: scheduled.append(
-                    (record, callback)
-                ),
-            ),
-            patch.object(
-                site.processor._timer_mgr, "has_pending", side_effect=lambda _m: bool(scheduled)
-            ),
+        # A one-second wind-down, run by the real timer.
+        with patch.object(
+            processor_mod.EventProcessor, "_cancellation_wind_down", staticmethod(lambda _r: 1)
         ):
             state.der_programs["/derp/1"].der_controls = [
                 _derc(0x01, start=now - 10, current_status=2)
@@ -455,8 +441,10 @@ class TestWritesNameTheirCause:
             assert not [w for w in site.forwarder.writes() if w["origin"] == "dderc_reapply"], (
                 "the default waits for the wind-down"
             )
-            ((record, callback),) = scheduled
-            await callback(record)
+            for _ in range(60):
+                if not site.processor._timer_mgr.has_pending(bytes([0x01]) * 16):
+                    break
+                await asyncio.sleep(0.05)
 
         fallback = next(w for w in site.forwarder.writes()[1:] if w.get("cause_mrid") == HEX_1)
         assert fallback["origin"] == CommandOrigin.DDERC_REAPPLY
