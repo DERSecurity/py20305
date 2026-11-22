@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import time
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
 from aiohttp import web
+from lxml import etree
 
 NS = "urn:ieee:std:2030.5:ns"
+#: Parses request bodies without resolving entities or reaching the network.
+SAFE_PARSER = etree.XMLParser(resolve_entities=False, no_network=True)
 SEP_XML = "application/sep+xml"
 SUB_LIST = "/edev/0/sub"
 NOTIFY = "https://host.example.com:10443/notify"
@@ -178,7 +180,7 @@ class FakeTreeServer:
     async def _post(self, request: web.Request) -> web.Response:
         path = request.path
         self.requests.append(("POST", path))
-        root = ET.fromstring(await request.read())
+        root = etree.fromstring(await request.read(), parser=SAFE_PARSER)
         if path == "/rsps":
             lfdi = (root.findtext(f"{{{NS}}}endDeviceLFDI") or "").lower()
             mrid = (root.findtext(f"{{{NS}}}subject") or "").upper()

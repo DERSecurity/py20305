@@ -9,11 +9,11 @@ The SubscriptionList pages it serves are written out by hand.
 
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
+from lxml import etree
 
 from py20305.client.csip_client import CsipClient
 from py20305.client.http import Sep2Client
@@ -21,6 +21,8 @@ from py20305.client.state import EndDeviceState
 from py20305.subscription.manager import SubscriptionManager
 
 NS = "urn:ieee:std:2030.5:ns"
+#: Parses request bodies without resolving entities or reaching the network.
+SAFE_PARSER = etree.XMLParser(resolve_entities=False, no_network=True)
 OURS = "https://client.example.com:10443/notify"
 OTHER = "https://other.example.com:10443/notify"
 SUB_LIST = "/edev/1/sub"
@@ -84,7 +86,7 @@ class FakeSubscriptionServer:
         return web.Response(body=self._page(start, limit), content_type="application/sep+xml")
 
     async def _post(self, request: web.Request) -> web.Response:
-        root = ET.fromstring(await request.read())
+        root = etree.fromstring(await request.read(), parser=SAFE_PARSER)
         resource = root.findtext(f"{{{NS}}}subscribedResource") or ""
         uri = root.findtext(f"{{{NS}}}notificationURI") or ""
         self.posts.append((resource, uri))
