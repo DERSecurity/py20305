@@ -293,15 +293,17 @@ class TelemetryCoordinator:
         for target in targets:
             if self._started.get(target, True):
                 continue
-            if target == skipped:
+            role = self._roles.get(target, _DER_ROLE)
+            mirror_lfdi = self._mirror_lfdi(role)
+            # A site meter mirrored under the client's own EndDevice posts
+            # under the own LFDI too.
+            if skipped is not None and skipped in (target, mirror_lfdi):
                 logger.info(
-                    "not starting telemetry for %s: this client process does not do "
-                    "own-EndDevice work",
+                    "not starting telemetry for %s: it posts under the client's own "
+                    "EndDevice, and this client process does not do own-EndDevice work",
                     target[:8],
                 )
                 continue
-            role = self._roles.get(target, _DER_ROLE)
-            mirror_lfdi = self._mirror_lfdi(role)
             # The rate of the EndDevice the readings are posted under.
             post_rate = self._device_post_rate(mirror_lfdi or target)
             if self._telemetry is not None:

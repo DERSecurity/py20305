@@ -44,15 +44,15 @@ class SubscriptionStore(Protocol):
     every change it makes to a record, so a store that copies on read loses
     nothing.
 
-    Concurrency: the library takes no lock across processes. The host decides
-    which process creates, renews and cancels subscriptions at a given moment.
-    The simplest arrangement is the one the client supports directly: one
-    process has the client's own-EndDevice duties, and only it renews,
-    reconciles and cancels the set; the others only add subscriptions for
-    resources nobody has subscribed to yet. Two processes that subscribe to the
-    same resource at the same moment can both POST. A store can prevent that by
-    making ``put`` of a second active record for the same resource fail, but the
-    library does not require it.
+    Concurrency: the library takes no lock across processes. One manager
+    maintains the set: only it renews, reconciles and cancels subscriptions.
+    Every other manager is built with ``maintains_set=False``, which a client
+    without own-EndDevice work sets when the manager is attached, and only adds
+    subscriptions for resources nobody has subscribed to yet. A manager re-reads
+    a record after each await before writing it back, so a cancellation or
+    removal written in the meantime is kept. Two processes that subscribe to the
+    same resource at the same moment can both POST, because the lookup, the POST
+    and the ``put`` are not one atomic step; see the guide for how to avoid it.
     """
 
     def get(self, subscription_uri: str) -> SubscriptionState | None:
@@ -111,6 +111,7 @@ def subscription_record(state: SubscriptionState) -> dict[str, Any]:
         "is_list_subscription": state.is_list_subscription,
         "unmanaged": state.unmanaged,
         "sub_list_href": state.sub_list_href,
+        "resubscribe_suppressed": state.resubscribe_suppressed,
     }
 
 
@@ -128,4 +129,5 @@ def subscription_from_record(entry: dict[str, Any]) -> SubscriptionState:
         is_list_subscription=entry.get("is_list_subscription", False),
         unmanaged=entry.get("unmanaged", False),
         sub_list_href=entry.get("sub_list_href"),
+        resubscribe_suppressed=entry.get("resubscribe_suppressed", False),
     )

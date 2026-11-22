@@ -58,6 +58,10 @@ class SubscriptionState:
     #: The SubscriptionList the subscription was POSTed to. The server may give
     #: the subscription an href outside it, so it is kept rather than derived.
     sub_list_href: str | None = None
+    #: Set on a subscription the server cancelled with status 1. No manager
+    #: sharing the store subscribes to its resource again until a reconnect
+    #: clears it (see :meth:`SubscriptionManager.suppress_resubscribe`).
+    resubscribe_suppressed: bool = False
 
 
 @dataclass
@@ -122,6 +126,7 @@ class SubscriptionManager:
         remove_duplicates: bool = False,
         unsubscribe_on_close: bool = True,
         store: SubscriptionStore | None = None,
+        maintains_set: bool = True,
     ) -> None:
         """
         Args:
@@ -142,6 +147,14 @@ class SubscriptionManager:
                 this process. Give several managers for one client the same
                 store to share one subscription set; see
                 :class:`~py20305.subscription.store.SubscriptionStore`.
+            maintains_set: Whether this manager renews, reconciles and cancels
+                the subscription set. False for every manager but one when
+                several share a store. ``CsipClient.attach_subscriptions`` sets
+                it to False in a client without own-EndDevice work. A manager
+                that does not maintain the set still creates subscriptions for
+                resources nobody has subscribed to, and records the ones it
+                adopts, but it sends no renewal and no DELETE and removes no
+                record another manager may need, whatever it is asked to do.
 
         Raises:
             ValueError: ``renewal_method`` is not ``post`` or ``put``, or
@@ -154,6 +167,9 @@ class SubscriptionManager:
         self.adopt_on_connect = adopt_on_connect
         self.remove_duplicates = remove_duplicates
         self.unsubscribe_on_close = unsubscribe_on_close
+        #: Whether this manager renews, reconciles and cancels the subscription
+        #: set; see the ``maintains_set`` argument.
+        self.maintains_set = maintains_set
         self._renewal_method = renewal_method
         self._client = client
         self._notification_uri = notification_uri
@@ -196,22 +212,57 @@ class SubscriptionManager:
         """Mark a resource as server-cancelled so auto-subscribe won't re-POST it.
 
         Set on a ``status=1`` (canceled, no additional info) termination: we
-        honour the cancellation (poll the resource instead) rather than fighting
+        honor the cancellation (poll the resource instead) rather than fighting
         the server by immediately re-subscribing. Persists across rediscovery;
         cleared by :meth:`clear_resubscribe_suppression` only on a genuine
         reconnect.
+
+        The mark is also written to the resource's cancelled records in the
+        store, so every manager sharing the store honors it.
         """
         self._resubscribe_suppressed.add(subscribed_resource)
+        for state in self._store.values():
+            if state.subscribed_resource == subscribed_resource and state.status != "active":
+                state.resubscribe_suppressed = True
+                self._store.put(state)
 
     def resubscribe_suppressed(self, subscribed_resource: str) -> bool:
         """True if auto-subscribe should skip this server-cancelled resource."""
-        return subscribed_resource in self._resubscribe_suppressed
+        if subscribed_resource in self._resubscribe_suppressed:
+            return True
+        return any(
+            state.resubscribe_suppressed and state.subscribed_resource == subscribed_resource
+            for state in self._store.values()
+        )
 
     def clear_resubscribe_suppression(self) -> None:
         """Clear all resubscribe suppression. Called only on a genuine reconnect
-        (upstream restart), not on every rediscovery, so an honoured status=1
-        cancellation survives the rediscovery storm."""
+        (upstream restart), not on every rediscovery, so an honored status=1
+        cancellation survives the rediscovery storm.
+
+        A manager that maintains the set also removes the suppressed records
+        from the store. One that does not clears only its own marks.
+        """
         self._resubscribe_suppressed.clear()
+        if not self.maintains_set:
+            return
+        for state in self._store.values():
+            if state.resubscribe_suppressed:
+                self._store.remove(state.subscription_uri)
+
+    def _is_active(self, subscription_uri: str) -> bool:
+        """Return whether the store holds an active record at ``subscription_uri`` now.
+
+        Checked after an await, so that a cancellation or removal written in the
+        meantime, by this process or another one, is not overwritten.
+        """
+        current = self._store.get(subscription_uri)
+        return current is not None and current.status == "active"
+
+    @staticmethod
+    def _refuse(action: str) -> None:
+        """Log that ``action`` was skipped because this manager does not maintain the set."""
+        logger.info("Not %s: this manager does not maintain the subscription set", action)
 
     async def subscribe(
         self,
@@ -338,7 +389,13 @@ class SubscriptionManager:
         Returns True if the DELETE succeeded or the subscription was unknown.
         Always removes local state to prevent stale entries blocking re-subscription.
         Unmanaged subscriptions (2018 compat) skip the DELETE.
+
+        Returns False and changes nothing in a manager that does not maintain
+        the set (see :attr:`maintains_set`).
         """
+        if not self.maintains_set:
+            self._refuse(f"cancelling {subscription_uri}")
+            return False
         state = self._store.get(subscription_uri)
         if state is not None and state.unmanaged:
             self._store.remove(subscription_uri)
@@ -383,7 +440,14 @@ class SubscriptionManager:
         for the HTTP client's full read timeout, and one that cannot be reached
         for every connection attempt and retry: 15 to 30 s of a service stop
         spent waiting on a request whose outcome changes nothing locally.
+
+        Does nothing in a manager that does not maintain the set (see
+        :attr:`maintains_set`): the subscriptions belong to every process
+        sharing the store.
         """
+        if not self.maintains_set:
+            self._refuse("cancelling the subscription set")
+            return
         uris = [s.subscription_uri for s in self._store.values()]
         if not uris:
             return
@@ -439,17 +503,28 @@ class SubscriptionManager:
                 Such a subscription is then left as it is, and so is one whose
                 resource type changed.
 
+        A manager that does not maintain the set (see :attr:`maintains_set`)
+        reconciles as if ``renew_kept`` and ``cancel_unwanted`` were both
+        False, and removes no record. A resource whose subscription the server
+        cancelled with status 1 is not subscribed again (see
+        :meth:`suppress_resubscribe`).
+
         Returns:
             ReconcileResult with counts for each action taken.
         """
         result = ReconcileResult()
+        if not self.maintains_set:
+            renew_kept = False
+            cancel_unwanted = False
 
         # Build lookup of active subs keyed by subscribed_resource
         old_by_resource: dict[str, SubscriptionState] = {}
         for state in self._store.values():
             if state.status != "active":
-                # Clean up stale cancelled entries
-                self._store.remove(state.subscription_uri)
+                # Clean up stale cancelled entries. A status=1 record stays: it
+                # tells every manager sharing the store not to subscribe again.
+                if self.maintains_set and not state.resubscribe_suppressed:
+                    self._store.remove(state.subscription_uri)
                 continue
             old_by_resource[state.subscribed_resource] = state
 
@@ -477,6 +552,7 @@ class SubscriptionManager:
             keep_resources |= cancel_resources & desired_resources
             create_resources -= cancel_resources
             cancel_resources = set()
+        create_resources = {r for r in create_resources if not self.resubscribe_suppressed(r)}
 
         # CANCEL stale subscriptions (parallel)
         cancel_uris = [old_by_resource[r].subscription_uri for r in cancel_resources]
@@ -502,6 +578,9 @@ class SubscriptionManager:
             )
             for (resource, state), ok in zip(keep_list, renew_outcomes, strict=True):
                 if isinstance(ok, BaseException) or not ok:
+                    if not self._is_active(state.subscription_uri):
+                        # Cancelled or removed while the renewal was in flight.
+                        continue
                     # Renewal failed -- subscription is stale on server.
                     # Cancel local state and fall through to CREATE.
                     self._store.remove(state.subscription_uri)
@@ -539,7 +618,11 @@ class SubscriptionManager:
         return result
 
     async def reconcile_with_server(
-        self, sub_list_href: str, *, reestablish_missing: bool = True
+        self,
+        sub_list_href: str,
+        *,
+        reestablish_missing: bool = True,
+        resources: set[str] | None = None,
     ) -> int:
         """Reconcile local subscriptions against the server's SubscriptionList.
 
@@ -565,10 +648,22 @@ class SubscriptionManager:
         IEEE 2030.5 this is meant to run at the SubscriptionList ``pollRate``
         (default 900s); the SubscriptionList isn't itself subscribed, so §8.9.3.4
         rule (r) doesn't prohibit polling it.
+
+        ``resources`` limits the drop and the re-POST to the subscriptions for
+        those resources. A record for any other resource is left for a later
+        pass that re-establishes it. A record created, renewed or re-keyed while
+        the GET was in flight is left as it is, because the list cannot show
+        it. A manager that does not maintain the set (see
+        :attr:`maintains_set`) does nothing and returns 0.
         """
         from py20305.diagnostics import report
         from py20305.models.sep.sep import SubscriptionList
 
+        if not self.maintains_set:
+            self._refuse("reconciling with the server's SubscriptionList")
+            return 0
+        # The records as they were when the GET was sent: href -> renewal time.
+        before = {s.subscription_uri: s.created_at for s in self.active_subscriptions}
         try:
             pages = await self._client.get_list(sub_list_href, SubscriptionList)
         except Exception as exc:  # a poll-time GET must never throw out of the loop
@@ -607,6 +702,8 @@ class SubscriptionManager:
         for state in list(self.active_subscriptions):
             if state.unmanaged:
                 continue  # operator/externally-managed -- we don't own its lifecycle
+            if before.get(state.subscription_uri) != state.created_at:
+                continue  # created, renewed or re-keyed after the GET was sent
             if state.subscribed_resource in server_resources:
                 # Resource is subscribed on the server. Adopt the server's URI only
                 # when it gave us a non-empty href that differs from our local one,
@@ -617,6 +714,8 @@ class SubscriptionManager:
                     state.subscription_uri = server_uri
                     self._store.put(state)
                     adopted += 1
+                continue
+            if resources is not None and state.subscribed_resource not in resources:
                 continue
             if not reestablish_missing:
                 # Rediscovery path: don't re-POST (echo-loop risk). If the server
@@ -703,6 +802,10 @@ class SubscriptionManager:
         ``post`` it is recorded as due and the renewal task renews it on its
         first pass: a re-POST to a server that does not apply the renewal rule
         would create the duplicate adoption avoids.
+
+        A manager that does not maintain the set (see :attr:`maintains_set`)
+        records what it adopts but renews and DELETEs nothing. The manager that
+        maintains the set renews the adopted records when they fall due.
         """
         from py20305.diagnostics import report
         from py20305.models.sep.sep import SubscriptionList
@@ -776,7 +879,9 @@ class SubscriptionManager:
             extras.extend(h for h in hrefs if h != keep)
 
         result.duplicates = len(extras)
-        if extras and remove_duplicates:
+        if extras and remove_duplicates and not self.maintains_set:
+            self._refuse("removing duplicate subscriptions")
+        elif extras and remove_duplicates:
             outcomes = await asyncio.gather(
                 *(self._client.delete(href) for href in extras), return_exceptions=True
             )
@@ -793,7 +898,7 @@ class SubscriptionManager:
                 len(extras),
             )
 
-        if self._renewal_method == "put" and adopted_hrefs:
+        if self._renewal_method == "put" and adopted_hrefs and self.maintains_set:
             await asyncio.gather(*(self.renew(h) for h in adopted_hrefs), return_exceptions=True)
 
         logger.info(
@@ -861,8 +966,12 @@ class SubscriptionManager:
         """Validate checkpoint-restored subscriptions by attempting renewal.
 
         Returns (valid_count, removed_count).  Subscriptions that fail
-        renewal are removed from the active set.
+        renewal are removed from the active set. Returns (0, 0) without a
+        request in a manager that does not maintain the set.
         """
+        if not self.maintains_set:
+            self._refuse("validating restored subscriptions")
+            return 0, 0
         valid = 0
         removed = 0
         for uri in [s.subscription_uri for s in self._store.values()]:
@@ -874,7 +983,7 @@ class SubscriptionManager:
                 continue
             if await self.renew(uri):
                 valid += 1
-            else:
+            elif self._is_active(uri):
                 self._store.remove(uri)
                 removed += 1
                 logger.info("Removed stale subscription %s (%s)", uri, state.resource_type)
@@ -905,8 +1014,16 @@ class SubscriptionManager:
         Optional parameter overrides allow changing encoding, level, or limit
         during renewal (WP4c).
 
-        Returns True on success, False on failure.
+        The outcome is written back only if the record is still active when
+        the server answers. A cancellation or removal made in the meantime, by
+        this process or another one sharing the store, is kept.
+
+        Returns True on success, False on failure. Returns False without a
+        request in a manager that does not maintain the set.
         """
+        if not self.maintains_set:
+            self._refuse(f"renewing {subscription_uri}")
+            return False
         state = self._store.get(subscription_uri)
         if state is None or state.status != "active":
             return False
@@ -944,6 +1061,8 @@ class SubscriptionManager:
             except Exception as exc:
                 return self._renewal_failed(subscription_uri, exc)
             else:
+                if not self._is_active(subscription_uri):
+                    return self._changed_during_renewal(subscription_uri)
                 state.created_at = time.time()
                 self._store.put(state)
                 logger.info(
@@ -958,6 +1077,8 @@ class SubscriptionManager:
         except Exception as exc:
             return self._renewal_failed(subscription_uri, exc)
 
+        if not self._is_active(subscription_uri):
+            return self._changed_during_renewal(subscription_uri)
         if location and location != subscription_uri:
             # Server returned a new URI on renewal
             self._store.remove(subscription_uri)
@@ -967,6 +1088,15 @@ class SubscriptionManager:
         self._store.put(state)
         logger.info("Renewed subscription %s (%s)", subscription_uri, state.resource_type)
         return True
+
+    @staticmethod
+    def _changed_during_renewal(subscription_uri: str) -> bool:
+        """Log a renewal whose record was cancelled or removed meanwhile; return False."""
+        logger.info(
+            "Renewal of %s not recorded: the subscription was cancelled or removed meanwhile",
+            subscription_uri,
+        )
+        return False
 
     def _renewal_rejected(self, subscription_uri: str, exc: Sep2ProtocolError) -> bool:
         """Report a renewal the server refused; returns False for ``renew``."""
@@ -1022,6 +1152,9 @@ class SubscriptionManager:
 
     async def renew_all(self) -> int:
         """Renew all active subscriptions. Returns count of successful renewals."""
+        if not self.maintains_set:
+            self._refuse("renewing the subscription set")
+            return 0
         count = 0
         for uri in [s.subscription_uri for s in self._store.values()]:
             state = self._store.get(uri)
@@ -1038,7 +1171,10 @@ class SubscriptionManager:
 
         Renews subscriptions that are older than ``interval_seconds``
         (default 24h). IEEE 2030.5 server-side subscriptions expire after 36h.
+        Returns at once in a manager that does not maintain the set.
         """
+        if not self.maintains_set:
+            return
         while not shutdown.is_set():
             try:
                 await asyncio.wait_for(shutdown.wait(), timeout=interval_seconds)

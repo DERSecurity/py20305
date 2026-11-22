@@ -21,10 +21,11 @@ from py20305.client.http import Sep2Client
 from py20305.client.request_budget import RequestLimiter
 from py20305.client.scope import DeviceSet
 from py20305.models.sep.sep import DeviceCapability
-from py20305.subscription.manager import SubscriptionManager
+from py20305.subscription.manager import SubscriptionManager, SubscriptionState
 from py20305.subscription.notification_server import NotificationServer
 from py20305.subscription.store import MemorySubscriptionStore
-from py20305.telemetry.coordinator import TelemetryCoordinator
+from py20305.telemetry.coordinator import DeviceRoleConfig, TelemetryCoordinator
+from py20305.telemetry.mup import DeviceRole
 from tests.scale_out_server import (
     NOTIFY,
     SUB_LIST,
@@ -163,6 +164,89 @@ class TestSharedSubscriptions:
         await a.shutdown()
         assert len(fake.sub_deletes) == 5
 
+    async def test_a_process_without_own_end_device_work_sends_no_delete_when_asked_to(
+        self, aiohttp_server
+    ):
+        fake = FakeTreeServer(devices=2)
+        base_url = await _serve(aiohttp_server, fake)
+        store = MemorySubscriptionStore()
+        a = _process(base_url, store, [0], own=True)
+        b = _process(base_url, store, [1], own=False)
+        try:
+            await a.connect()
+            await b.connect()
+
+            await b.shutdown(unsubscribe=True)
+
+            assert fake.sub_deletes == []
+            assert len(store.values()) == 5
+        finally:
+            await a.shutdown(unsubscribe=False)
+
+    async def test_a_process_without_own_end_device_work_or_a_filter_cancels_nothing(
+        self, aiohttp_server
+    ):
+        fake = FakeTreeServer(devices=2)
+        base_url = await _serve(aiohttp_server, fake)
+        store = MemorySubscriptionStore()
+        a = _process(base_url, store, [0], own=True)
+        b = _process(base_url, store, None, own=False)
+        try:
+            await a.connect()
+            await b.connect()
+            # A subscription another process needs that this one does not want.
+            fake.subscriptions[f"{SUB_LIST}/99"] = "/derp/9/derc"
+            store.put(
+                SubscriptionState(
+                    subscription_uri=f"{SUB_LIST}/99",
+                    subscribed_resource="/derp/9/derc",
+                    notification_uri=NOTIFY,
+                    resource_type="DERControlList",
+                    sub_list_href=SUB_LIST,
+                )
+            )
+
+            assert await b.trigger_rediscovery()
+
+            assert fake.sub_deletes == []
+            assert store.get(f"{SUB_LIST}/99") is not None
+        finally:
+            await b.shutdown()
+            await a.shutdown(unsubscribe=False)
+
+    async def test_a_process_without_own_end_device_work_adopts_without_side_effects(
+        self, aiohttp_server
+    ):
+        fake = FakeTreeServer(devices=2)
+        # Two subscriptions of ours for one resource, left by an earlier instance.
+        fake.subscriptions = {f"{SUB_LIST}/50": "/edev", f"{SUB_LIST}/51": "/edev"}
+        fake.next_sub = 52
+        base_url = await _serve(aiohttp_server, fake)
+        client = CsipClient(
+            base_url,
+            reconcile_enabled=False,
+            device_filter=DeviceSet(hrefs=["/edev/1"]),
+            own_end_device=False,
+        )
+        client.attach_subscriptions(
+            SubscriptionManager(
+                client.http,
+                NOTIFY,
+                store=MemorySubscriptionStore(),
+                renewal_method="put",
+                adopt_on_connect=True,
+                remove_duplicates=True,
+            )
+        )
+        try:
+            await client.connect()
+
+            assert fake.sub_deletes == []
+            assert fake.sub_puts == []
+            assert "/edev" not in fake.sub_posts
+        finally:
+            await client.shutdown()
+
 
 class TestOwnEndDeviceWork:
     async def test_a_process_without_own_end_device_work_cannot_register_an_end_device(self):
@@ -205,6 +289,24 @@ class TestOwnEndDeviceWork:
         coordinator.start_device_telemetry()
 
         assert started == [other]
+
+    def test_telemetry_skips_a_site_meter_mirrored_under_the_own_end_device(self):
+        own, meter = lfdi_for(0), lfdi_for(1)
+        client = MagicMock()
+        client.own_end_device = False
+        client.http.client_lfdi = own
+        coordinator = TelemetryCoordinator(
+            client,
+            lfdis=[meter],
+            connector_resolver=MagicMock(),
+            roles={meter: DeviceRoleConfig(role=DeviceRole.SITE_METER)},
+        )
+        coordinator._telemetry = MagicMock()
+        coordinator._device_post_rate = lambda _lfdi: 300  # type: ignore[method-assign]
+
+        coordinator.start_device_telemetry()
+
+        coordinator._telemetry.start_metering.assert_not_called()
 
 
 class TestProcessNotification:

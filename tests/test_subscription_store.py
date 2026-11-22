@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from py20305.client.errors import Sep2ProtocolError
+from py20305.models.sep.sep import Subscription, SubscriptionList
 from py20305.subscription.manager import SubscriptionManager, SubscriptionState
 from py20305.subscription.store import (
     MemorySubscriptionStore,
@@ -156,6 +157,196 @@ class TestSharedSubscriptionSet:
 
         assert store.values() == []
         assert mgr_a.active_subscriptions == []
+
+
+def _record(
+    uri: str, resource: str, rtype: str = "FSAList", created_at: float = 100.0
+) -> SubscriptionState:
+    return SubscriptionState(
+        subscription_uri=uri,
+        subscribed_resource=resource,
+        notification_uri=NOTIFY,
+        resource_type=rtype,
+        created_at=created_at,
+        sub_list_href=SUB_LIST,
+    )
+
+
+def _sub_list(*entries: tuple[str, str]) -> list[SubscriptionList]:
+    """Return one SubscriptionList page holding ``(href, resource)`` entries."""
+    subs = [
+        Subscription(
+            href=href,
+            subscribed_resource=resource,
+            encoding=0,
+            level="+S1",
+            limit=1,
+            notification_uri=NOTIFY,
+        )
+        for href, resource in entries
+    ]
+    return [SubscriptionList(subscription=subs, all=len(subs), results=len(subs))]
+
+
+class TestManagerThatDoesNotMaintainTheSet:
+    async def test_it_sends_no_delete_or_renewal_and_removes_no_record(
+        self, store: SubscriptionStore
+    ):
+        store.put(_record("/edev/1/sub/1", "/edev/1/fsa"))
+        store.put(_record("/edev/1/sub/2", "/derp/1/derc", "DERControlList"))
+        http = _http()
+        http.get_list = AsyncMock(return_value=_sub_list())
+        mgr = SubscriptionManager(http, NOTIFY, store=store, maintains_set=False)
+
+        assert not await mgr.cancel("/edev/1/sub/1")
+        await mgr.cancel_all()
+        assert not await mgr.renew("/edev/1/sub/1")
+        assert await mgr.renew_all() == 0
+        assert await mgr.validate_restored_subscriptions() == (0, 0)
+        await mgr.reconcile(SUB_LIST, {("/edev/1/fsa", "FSAList")})
+        assert await mgr.reconcile_with_server(SUB_LIST) == 0
+
+        http.delete.assert_not_awaited()
+        http.put.assert_not_awaited()
+        http.post.assert_not_awaited()
+        http.get_list.assert_not_awaited()
+        assert sorted(s.subscription_uri for s in store.values()) == [
+            "/edev/1/sub/1",
+            "/edev/1/sub/2",
+        ]
+
+    async def test_adoption_records_subscriptions_without_renewing_or_deleting(
+        self, store: SubscriptionStore
+    ):
+        http = _http()
+        http.get_list = AsyncMock(
+            return_value=_sub_list(
+                ("/edev/1/sub/4", "/edev/1/fsa"), ("/edev/1/sub/5", "/edev/1/fsa")
+            )
+        )
+        mgr = SubscriptionManager(
+            http,
+            NOTIFY,
+            store=store,
+            renewal_method="put",
+            adopt_on_connect=True,
+            remove_duplicates=True,
+            maintains_set=False,
+        )
+
+        result = await mgr.adopt_existing(
+            SUB_LIST, {("/edev/1/fsa", "FSAList")}, remove_duplicates=True
+        )
+
+        assert result.adopted == 1
+        assert result.removed == 0
+        http.delete.assert_not_awaited()
+        http.put.assert_not_awaited()
+        assert [s.subscription_uri for s in store.values()] == ["/edev/1/sub/4"]
+
+
+class TestSharedReconciliation:
+    async def test_disjoint_desired_sets_cancel_nothing_without_cancel_unwanted(
+        self, store: SubscriptionStore
+    ):
+        http_a, http_b = _http(), _http()
+        http_a.post.return_value = "/edev/1/sub/1"
+        http_b.post.return_value = "/edev/1/sub/2"
+        mgr_a = SubscriptionManager(http_a, NOTIFY, store=store)
+        mgr_b = SubscriptionManager(http_b, NOTIFY, store=store)
+        await mgr_a.subscribe(SUB_LIST, "/derp/1/derc", "DERControlList")
+        await mgr_b.subscribe(SUB_LIST, "/derp/2/derc", "DERControlList")
+
+        await mgr_b.reconcile(
+            SUB_LIST, {("/derp/2/derc", "DERControlList")}, renew_kept=False, cancel_unwanted=False
+        )
+        await mgr_a.reconcile(
+            SUB_LIST, {("/derp/1/derc", "DERControlList")}, renew_kept=False, cancel_unwanted=False
+        )
+
+        http_a.delete.assert_not_awaited()
+        http_b.delete.assert_not_awaited()
+        assert sorted(s.subscription_uri for s in store.values()) == [
+            "/edev/1/sub/1",
+            "/edev/1/sub/2",
+        ]
+
+    async def test_a_status_1_cancellation_stops_every_manager_from_subscribing_again(
+        self, store: SubscriptionStore
+    ):
+        http_a, http_b = _http(), _http()
+        http_a.post.return_value = "/edev/1/sub/1"
+        mgr_a = SubscriptionManager(http_a, NOTIFY, store=store)
+        mgr_b = SubscriptionManager(http_b, NOTIFY, store=store, maintains_set=False)
+        await mgr_a.subscribe(SUB_LIST, "/edev/1/fsa", "FSAList")
+
+        mgr_a.mark_cancelled("/edev/1/sub/1")
+        mgr_a.suppress_resubscribe("/edev/1/fsa")
+        await mgr_a.reconcile(SUB_LIST, {("/edev/1/fsa", "FSAList")}, renew_kept=False)
+        await mgr_b.reconcile(SUB_LIST, {("/edev/1/fsa", "FSAList")}, renew_kept=False)
+
+        assert mgr_b.resubscribe_suppressed("/edev/1/fsa")
+        http_b.post.assert_not_awaited()
+        assert http_a.post.await_count == 1
+
+        mgr_a.clear_resubscribe_suppression()
+
+        assert not mgr_b.resubscribe_suppressed("/edev/1/fsa")
+
+    @pytest.mark.parametrize("method", ["post", "put"])
+    async def test_a_cancellation_made_while_a_renewal_is_in_flight_is_kept(
+        self, store: SubscriptionStore, method: str
+    ):
+        store.put(_record("/edev/1/sub/1", "/edev/1/fsa"))
+        other = SubscriptionManager(_http(), NOTIFY, store=store)
+        http = _http()
+
+        async def cancelled_meanwhile(*_args: object) -> str:
+            other.mark_cancelled("/edev/1/sub/1")
+            return "/edev/1/sub/9"
+
+        http.post.side_effect = cancelled_meanwhile
+        http.put.side_effect = cancelled_meanwhile
+        mgr = SubscriptionManager(http, NOTIFY, store=store, renewal_method=method)
+
+        assert not await mgr.renew("/edev/1/sub/1")
+
+        record = store.get("/edev/1/sub/1")
+        assert record is not None
+        assert record.status == "cancelled"
+        assert store.get("/edev/1/sub/9") is None
+
+    async def test_a_record_created_while_the_list_is_read_is_not_dropped(
+        self, store: SubscriptionStore
+    ):
+        store.put(_record("/edev/1/sub/1", "/edev/1/fsa"))
+        http = _http()
+
+        async def subscribed_meanwhile(*_args: object) -> list[SubscriptionList]:
+            store.put(_record("/edev/1/sub/2", "/derp/1/derc", "DERControlList"))
+            return _sub_list(("/edev/1/sub/1", "/edev/1/fsa"))
+
+        http.get_list = AsyncMock(side_effect=subscribed_meanwhile)
+        mgr = SubscriptionManager(http, NOTIFY, store=store)
+
+        await mgr.reconcile_with_server(SUB_LIST, reestablish_missing=False)
+
+        assert store.get("/edev/1/sub/2") is not None
+
+    async def test_a_record_for_a_resource_outside_the_given_resources_is_not_dropped(
+        self, store: SubscriptionStore
+    ):
+        store.put(_record("/edev/1/sub/1", "/edev/1/fsa"))
+        store.put(_record("/edev/1/sub/2", "/derp/2/derc", "DERControlList"))
+        http = _http()
+        http.get_list = AsyncMock(return_value=_sub_list(("/edev/1/sub/1", "/edev/1/fsa")))
+        mgr = SubscriptionManager(http, NOTIFY, store=store)
+
+        await mgr.reconcile_with_server(
+            SUB_LIST, reestablish_missing=False, resources={"/edev/1/fsa"}
+        )
+
+        assert store.get("/edev/1/sub/2") is not None
 
 
 class TestStoreFormat:

@@ -334,10 +334,12 @@ class CsipClient:
 
         That work is: renewing the subscriptions, reconciling them with the
         server's SubscriptionList, checking restored subscriptions at connect,
-        cancelling them at shutdown, registering EndDevices, re-registering the
-        client's own EndDevice after a loss of communications, and the
-        telemetry a :class:`~py20305.telemetry.coordinator.TelemetryCoordinator`
-        posts for the client's own LFDI. True, the default, does all of it.
+        renewing adopted subscriptions and removing duplicate ones, cancelling
+        subscriptions at rediscovery and at shutdown, registering EndDevices,
+        re-registering the client's own EndDevice after a loss of
+        communications, and the telemetry a
+        :class:`~py20305.telemetry.coordinator.TelemetryCoordinator` posts for
+        the client's own LFDI. True, the default, does all of it.
         When several processes act as one client, give it to one of them.
         A process without it still creates subscriptions for the resources it
         needs that nobody has subscribed to yet.
@@ -405,7 +407,13 @@ class CsipClient:
         ``__init__`` -- construction order forces attachment to come second.
         Attach before ``connect()``: auto-subscription and poll suppression
         consult the manager during connection.
+
+        In a client without own-EndDevice work (see :attr:`own_end_device`)
+        this sets the manager's ``maintains_set`` to False, so the manager
+        never renews, cancels or removes the shared subscriptions.
         """
+        if not self._own_end_device:
+            manager.maintains_set = False
         self._subscription_manager = manager
         if notification_server is not None:
             self._notification_server = notification_server
@@ -2089,13 +2097,14 @@ class CsipClient:
                             # lifetime; rediscovery only reconciles membership.
                             # A process acting for some of the EndDevices sees only
                             # the resources it needs, so a subscription it does not
-                            # want may be another process's. Only a process acting
-                            # for every EndDevice cancels what it does not want.
+                            # want may be another process's. Only the process with
+                            # own-EndDevice work, acting for every EndDevice,
+                            # cancels what it does not want.
                             result = await self._subscription_manager.reconcile(
                                 agg_sub_href,
                                 desired,
                                 renew_kept=False,
-                                cancel_unwanted=self._device_filter is None,
+                                cancel_unwanted=self._maintains_whole_set(),
                             )
                             logger.info(
                                 "Subscription reconciliation: kept=%d cancelled=%d"
@@ -2112,10 +2121,14 @@ class CsipClient:
                             # (a stale URI otherwise 404s on a later cancel/renew).
                             # reestablish_missing=False: adopt-only, no re-POST -- a
                             # re-POST here risks the rediscovery<->echo loop.
+                            # Only records for resources this process wants are
+                            # dropped: it cannot subscribe to the others again.
                             await self._subscription_manager.reconcile_with_server(
-                                agg_sub_href, reestablish_missing=False
+                                agg_sub_href,
+                                reestablish_missing=False,
+                                resources={resource for resource, _ in desired},
                             )
-                        elif self._device_filter is None:
+                        elif self._maintains_whole_set():
                             # No subscription list or no desired subs; cancel remaining
                             await self._subscription_manager.cancel_all()
                         self._update_poll_suppression()
@@ -2191,6 +2204,14 @@ class CsipClient:
             await self._on_rediscovered()
         return True
 
+    def _maintains_whole_set(self) -> bool:
+        """Return whether this process may cancel subscriptions it does not want.
+
+        True only with own-EndDevice work and no device filter: a process that
+        acts for some EndDevices does not know what the others need.
+        """
+        return self._own_end_device and self._device_filter is None
+
     async def take_over_devices(self, device_hrefs: Iterable[str]) -> bool:
         """Start acting for EndDevices another process stopped acting for.
 
@@ -2252,10 +2273,10 @@ class CsipClient:
         for every one. See :meth:`SubscriptionManager.cancel_all`.
 
         ``unsubscribe`` decides whether those DELETEs are sent; ``None`` uses the
-        subscription manager's ``unsubscribe_on_close`` in a process with
-        own-EndDevice duties, and sends none in a process without them, whose
-        subscriptions other processes share. Pass False when another instance
-        with the same identity takes over and adopts the subscriptions.
+        subscription manager's ``unsubscribe_on_close``. Pass False when another
+        instance with the same identity takes over and adopts the subscriptions.
+        A process without own-EndDevice work sends none even when asked: other
+        processes share its subscriptions.
         """
         self._shutdown_event.set()
         # Before anything is torn down. An expiry firing later would call

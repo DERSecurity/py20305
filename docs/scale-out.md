@@ -44,7 +44,8 @@ process and pass `own_end_device=False` to the rest. The work is:
 
 - renewing the subscriptions, reconciling them with the server's
   SubscriptionList, and checking restored subscriptions at connect;
-- cancelling the subscriptions at shutdown;
+- renewing the subscriptions it adopts and removing duplicate ones;
+- cancelling subscriptions, at rediscovery and at shutdown;
 - registering EndDevices (`register_end_device` raises `RuntimeError` in a
   process without the work), and re-registering the client's own EndDevice
   after a loss of communications;
@@ -52,9 +53,16 @@ process and pass `own_end_device=False` to the rest. The work is:
   posts a `TelemetryCoordinator` makes for the client's own LFDI.
 
 A process without the work still subscribes to the resources it needs that
-nobody has subscribed to yet. A `TelemetryCoordinator` in each process reports
-the devices that process acts for: give it their LFDIs, and use
-`start_device_telemetry` and `stop_device_telemetry` as devices move.
+nobody has subscribed to yet, and records the subscriptions it adopts. Its
+subscription manager is set to `maintains_set=False` when it is attached, so
+it never renews, cancels or removes a shared subscription, whatever it is
+asked to do: `shutdown(unsubscribe=True)` included.
+
+A `TelemetryCoordinator` in each process reports the devices that process acts
+for: give it their LFDIs, and use `start_device_telemetry` and
+`stop_device_telemetry` as devices move. A site meter mirrored under the
+client's own EndDevice is own-EndDevice work too; configure it in the process
+that has the work.
 
 ## Share the subscription set
 
@@ -72,9 +80,16 @@ manager = SubscriptionManager(
     client.http,
     notification_uri,
     store=shared_subscriptions,   # the same store in every process
+    unsubscribe_on_close=False,   # a process that stops leaves the set in place
 )
 client.attach_subscriptions(manager, notification_server)
 ```
+
+Build every manager with `unsubscribe_on_close=False`. With the default, the
+process with the own-EndDevice work DELETEs the whole set when it stops, and
+the processes still running lose their subscriptions. To remove the set when
+the whole client stops for good, stop the other processes first, then call
+`shutdown(unsubscribe=True)` in the process with the own-EndDevice work.
 
 `shared_subscriptions` implements
 `py20305.subscription.store.SubscriptionStore`: `get`, `put`, `remove` and
@@ -88,17 +103,34 @@ With a shared store:
 - A process that finds an active subscription for a resource makes no POST for
   it, whichever process created it.
 - A renewal, a new href from the server, and a cancellation by the server are
-  written back to the store, so every process sees them.
+  written back to the store, so every process sees them. A renewal is written
+  back only if the record is still active when the server answers, so a
+  cancellation recorded while the renewal was in flight is kept.
+- A cancellation by the server with status 1 stops every process from
+  subscribing to that resource again, until a reconnect.
 - A notification is classified by the subscription record, whichever process
   received it.
-- A process with a device filter never cancels a subscription during
-  rediscovery: a resource it does not want may be one another process needs.
+- Only the process with the own-EndDevice work and no device filter cancels a
+  subscription during rediscovery. Any other process may not know which
+  resources the others need.
+- The process with the own-EndDevice work drops, at rediscovery, only the
+  records of resources it wants that the server no longer lists, and never a
+  record written while it was reading the list.
 
 The calls are synchronous and made from the event loop, so they must return
-quickly. The library takes no lock across processes: two processes that
-subscribe to the same resource at the same moment can both POST. Connect the
-processes one at a time, or make the store refuse a second active record for
-one resource.
+quickly. The library takes no lock across processes. Looking up a record,
+POSTing the subscription and storing the result are separate steps, so two
+processes that subscribe to the same resource at the same moment can both
+POST. A store that refuses the second record does not prevent this: the
+second POST has already reached the server, and refusing the record leaves
+that subscription untracked. Connect the processes one at a time. After that,
+two processes POST for one resource only when both discover it at the same
+moment, as when the server adds a DERProgram that serves EndDevices of both.
+If two subscriptions for one resource are created anyway, a server that
+applies the renewal rule of IEEE 2030.5 §8.9.3.4 keeps one; with any other
+server, notifications for that resource can arrive twice until the extra
+subscription expires, and the process with the own-EndDevice work removes it
+when it next connects with `adopt_on_connect=True, remove_duplicates=True`.
 
 ## Share the event state
 
@@ -239,6 +271,7 @@ With none of these options, a client behaves exactly as it did before:
 | Option | Default | Behavior |
 |---|---|---|
 | `SubscriptionManager(store=...)` | None | Records kept in a dict in the process |
+| `SubscriptionManager(maintains_set=...)` | True | This manager renews, reconciles and cancels the set |
 | `CsipClient(device_filter=...)` | None | Every EndDevice is walked and acted for |
 | `CsipClient(own_end_device=...)` | True | This process does all own-EndDevice work |
 | `CsipClient(event_state_store=...)` | None | Event state kept in this process only |
