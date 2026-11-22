@@ -33,9 +33,12 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
+
+if TYPE_CHECKING:
+    from py20305.client.request_budget import RequestLimiter
 
 #: Message carried by the simulated transport failure. Deliberately explicit:
 #: it surfaces in ``last_error`` and in diagnostics, and an operator reading a
@@ -70,6 +73,7 @@ def is_simulated_failure(error: BaseException | None) -> bool:
         seen.add(id(current))
         current = current.__cause__ or current.__context__
     return False
+
 
 #: Phases reported to the management API. ``recovering`` and the two terminal
 #: phases exist because clearing the gate is not the same event as leaving
@@ -212,15 +216,26 @@ class _GatedRequestContext:
     request coroutine behind on every gated call.
     """
 
-    def __init__(self, simulation: CommLossSimulation, factory: Callable[[], Any]) -> None:
+    def __init__(
+        self,
+        simulation: CommLossSimulation,
+        factory: Callable[[], Any],
+        limiter: RequestLimiter | None = None,
+    ) -> None:
         self._simulation = simulation
         self._factory = factory
+        self._limiter = limiter
         self._inner: Any = None
         self._counted = False
 
     async def __aenter__(self) -> Any:
         if self._simulation.active:
             raise SimulatedTransportError(SIMULATED_FAILURE_MESSAGE)
+        if self._limiter is not None:
+            await self._limiter.acquire()
+            # A simulation can start while the request waits for its turn.
+            if self._simulation.active:
+                raise SimulatedTransportError(SIMULATED_FAILURE_MESSAGE)
         self._simulation.note_request_started()
         self._counted = True
         try:
@@ -255,9 +270,19 @@ class GatedSession:
     session directly by the client that owns it.
     """
 
-    def __init__(self, session: aiohttp.ClientSession, simulation: CommLossSimulation) -> None:
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        simulation: CommLossSimulation,
+        limiter: RequestLimiter | None = None,
+    ) -> None:
         self._session = session
         self._simulation = simulation
+        #: Awaited before each request is sent; see :mod:`py20305.client.request_budget`.
+        self.limiter = limiter
+
+    def _wrap(self, factory: Callable[[], Any]) -> _GatedRequestContext:
+        return _GatedRequestContext(self._simulation, factory, self.limiter)
 
     @property
     def session(self) -> aiohttp.ClientSession:
@@ -275,33 +300,29 @@ class GatedSession:
         return getattr(self._session, item)
 
     def get(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
-        return _GatedRequestContext(self._simulation, lambda: self._session.get(*args, **kwargs))
+        return self._wrap(lambda: self._session.get(*args, **kwargs))
 
     def post(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
-        return _GatedRequestContext(self._simulation, lambda: self._session.post(*args, **kwargs))
+        return self._wrap(lambda: self._session.post(*args, **kwargs))
 
     def put(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
-        return _GatedRequestContext(self._simulation, lambda: self._session.put(*args, **kwargs))
+        return self._wrap(lambda: self._session.put(*args, **kwargs))
 
     def delete(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
-        return _GatedRequestContext(self._simulation, lambda: self._session.delete(*args, **kwargs))
+        return self._wrap(lambda: self._session.delete(*args, **kwargs))
 
     def request(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
-        return _GatedRequestContext(
-            self._simulation, lambda: self._session.request(*args, **kwargs)
-        )
+        return self._wrap(lambda: self._session.request(*args, **kwargs))
 
     # The client uses only the five verbs above today. These three are wrapped
     # anyway: reaching the network through an unwrapped verb would be both
     # ungated and untracked, and a future caller has no reason to suspect that
     # the wrapper covers some verbs and not others.
     def head(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
-        return _GatedRequestContext(self._simulation, lambda: self._session.head(*args, **kwargs))
+        return self._wrap(lambda: self._session.head(*args, **kwargs))
 
     def patch(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
-        return _GatedRequestContext(self._simulation, lambda: self._session.patch(*args, **kwargs))
+        return self._wrap(lambda: self._session.patch(*args, **kwargs))
 
     def options(self, *args: Any, **kwargs: Any) -> _GatedRequestContext:
-        return _GatedRequestContext(
-            self._simulation, lambda: self._session.options(*args, **kwargs)
-        )
+        return self._wrap(lambda: self._session.options(*args, **kwargs))

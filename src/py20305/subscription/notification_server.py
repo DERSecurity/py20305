@@ -67,7 +67,10 @@ STATUS_RESOURCE_DELETED = 4
 NS_SEP = "urn:ieee:std:2030.5:ns"
 NS_XSI = "http://www.w3.org/2001/XMLSchema-instance"
 
-NotificationCallback = Callable[[Notification], Awaitable[None]]
+NotificationCallback = Callable[[Notification], Awaitable[object]]
+
+#: Receives the raw body of one accepted notification. See ``NotificationServer.forward``.
+NotificationForwarder = Callable[[bytes], Awaitable[None]]
 
 
 class NotificationServer:
@@ -86,6 +89,7 @@ class NotificationServer:
         client_cert_mode: ClientCertMode = "warn",
         traffic_recorder: TrafficRecorder | None = None,
         shutdown_timeout: float = 2.0,
+        forward: NotificationForwarder | None = None,
     ) -> None:
         self._host = host
         # How long stop() lets a request still being received finish. aiohttp's
@@ -97,6 +101,7 @@ class NotificationServer:
         self._port = port
         self._tls = tls
         self._on_notification = on_notification
+        self._forward = forward
         self._client_cert_mode: ClientCertMode = client_cert_mode
         self._traffic_recorder = traffic_recorder
         self._app: web.Application | None = None
@@ -119,6 +124,26 @@ class NotificationServer:
     @on_notification.setter
     def on_notification(self, callback: NotificationCallback | None) -> None:
         self._on_notification = callback
+
+    @property
+    def forward(self) -> NotificationForwarder | None:
+        """The coroutine each accepted notification's raw body is handed to, if set.
+
+        When set, the listener does not process notifications. It parses and
+        checks each one as before, then awaits ``forward(body)`` and answers
+        201 only after it returns. If it raises, the listener answers 503 so the
+        server knows the delivery failed. Use it to put each notification on a
+        queue that the process acting for the affected EndDevice reads, and
+        hand it to :meth:`CsipClient.process_notification` there.
+
+        None, the default, processes each notification here, after answering
+        201, as before.
+        """
+        return self._forward
+
+    @forward.setter
+    def forward(self, callback: NotificationForwarder | None) -> None:
+        self._forward = callback
 
     @property
     def suspended(self) -> bool:
@@ -504,11 +529,45 @@ class NotificationServer:
             )
             return web.Response(status=201, text="Created")
 
+        if self._forward is not None:
+            return await self._forward_body(body, notification, remote, exchange)
+
         if self._on_notification is not None:
             task = asyncio.create_task(self._safe_notify(notification))
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
 
+        return web.Response(status=201, text="Created")
+
+    async def _forward_body(
+        self, body: bytes, notification: Notification, remote: str, exchange: _Notification
+    ) -> web.Response:
+        """Hand one notification to the host and answer by the outcome.
+
+        Answered after the host's coroutine returns, so a 201 tells the server
+        the host has the notification. A failure answers 503 (RFC 9110
+        §15.6.4, a temporary condition) rather than 201, so the server does not
+        take a notification nobody holds as delivered.
+        """
+        from py20305.diagnostics import report
+
+        resource = notification.subscribed_resource or "<unknown>"
+        try:
+            await self._forward(body)  # type: ignore[misc]
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            report(
+                "warnings",
+                f"Notification for {resource} from {remote} was not handed on: {exc}",
+                source="notification",
+                dedup_key=f"notif_forward:{resource}:{type(exc).__name__}",
+                details={"subscribed_resource": resource, "error": str(exc)},
+                exc_info=True,
+            )
+            exchange.anomaly = (
+                AnomalyCode.DROPPED_NOTIFICATION,
+                f"Notification for {resource} refused: the host did not accept it ({exc})",
+            )
+            return web.Response(status=503, text="Notification not accepted")
         return web.Response(status=201, text="Created")
 
     async def _safe_notify(self, notification: Notification) -> None:

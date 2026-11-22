@@ -289,8 +289,16 @@ class TelemetryCoordinator:
         if lfdi is not None:
             self._started.setdefault(lfdi.lower(), False)
         targets = [lfdi.lower()] if lfdi is not None else list(self._started)
+        skipped = self._own_lfdi_if_not_ours()
         for target in targets:
             if self._started.get(target, True):
+                continue
+            if target == skipped:
+                logger.info(
+                    "not starting telemetry for %s: this client process does not do "
+                    "own-EndDevice work",
+                    target[:8],
+                )
                 continue
             role = self._roles.get(target, _DER_ROLE)
             mirror_lfdi = self._mirror_lfdi(role)
@@ -320,6 +328,18 @@ class TelemetryCoordinator:
             if role.role is DeviceRole.DER:
                 self._start_der_resources_for_device(target, post_rate)
             self._started[target] = True
+
+    def _own_lfdi_if_not_ours(self) -> str | None:
+        """Return the client's own LFDI when another process reports for it, else None.
+
+        A client process without own-EndDevice duties (see
+        :attr:`CsipClient.own_end_device`) posts no telemetry for the client's
+        own EndDevice, so several processes do not post it twice.
+        """
+        if getattr(self._client, "own_end_device", True):
+            return None
+        own = getattr(self._client.http, "client_lfdi", None)
+        return own.lower() if isinstance(own, str) and own else None
 
     def _mirror_lfdi(self, role: DeviceRoleConfig) -> str | None:
         """Return the LFDI to post a device's MUP under, or None for its own.

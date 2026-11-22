@@ -14,6 +14,7 @@ from lxml import etree
 from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
 from py20305.client.http import Sep2Client
 from py20305.client.poll_rate import DEFAULT_POLL_RATE, normalize_poll_rate
+from py20305.client.scope import DeviceFilter
 from py20305.client.state import (
     DerProgramState,
     DeviceMapping,
@@ -489,6 +490,7 @@ async def discover(
     *,
     registration_pins: dict[str, int] | None = None,
     dcap_path: str = "/dcap",
+    device_filter: DeviceFilter | None = None,
 ) -> None:
     """Run full hierarchical discovery: dcap -> sdev -> edev -> der -> fsa -> derp.
 
@@ -501,6 +503,10 @@ async def discover(
         registration_pins: Optional mapping from LFDI hex -> expected PIN
             for registration verification.
         dcap_path: Path to DeviceCapability resource (default: /dcap).
+        device_filter: Walk only the EndDevices this accepts (see
+            :mod:`py20305.client.scope`). An EndDevice it rejects is left out
+            of ``state.end_devices`` and nothing below it is fetched; its
+            SubscriptionListLink is still recorded. None walks every EndDevice.
     """
     state.clear()
 
@@ -608,6 +614,12 @@ async def discover(
                         logger.debug(
                             "Could not read SubscriptionList pollRate, using default: %s", exc
                         )
+                if state.subscription_list_href is None:
+                    state.subscription_list_href = sub_list_href
+
+            if device_filter is not None and not device_filter(edev_href, lfdi.hex()):
+                logger.debug("EndDevice %s is outside this client's device filter", edev_href)
+                continue
 
             # Registration link (for PIN verification)
             reg_href = _extract_href(edev.registration_link)

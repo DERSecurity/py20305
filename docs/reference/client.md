@@ -10,6 +10,10 @@ The protocol client: discovery, polling, mTLS transport and retry.
 
 ::: py20305.client.retry
 
+::: py20305.client.scope
+
+::: py20305.client.request_budget
+
 ::: py20305.security.identity
 
 ::: py20305.config

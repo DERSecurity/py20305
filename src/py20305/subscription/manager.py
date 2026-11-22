@@ -411,6 +411,7 @@ class SubscriptionManager:
         desired: set[tuple[str, str]],
         *,
         renew_kept: bool = True,
+        cancel_unwanted: bool = True,
     ) -> ReconcileResult:
         """Diff-based subscription reconciliation.
 
@@ -431,6 +432,12 @@ class SubscriptionManager:
                 change and rediscovers again -- an infinite loop. Subscription
                 lifetime is the periodic renewal task's responsibility, not
                 rediscovery's.
+            cancel_unwanted: Cancel subscriptions for resources not in
+                ``desired``. Pass False from a process that acts for only some
+                of the client's EndDevices and shares the subscription set: a
+                resource it does not want may be one another process needs.
+                Such a subscription is then left as it is, and so is one whose
+                resource type changed.
 
         Returns:
             ReconcileResult with counts for each action taken.
@@ -466,6 +473,10 @@ class SubscriptionManager:
 
         cancel_resources |= old_resources - desired_resources
         create_resources |= desired_resources - old_resources
+        if not cancel_unwanted:
+            keep_resources |= cancel_resources & desired_resources
+            create_resources -= cancel_resources
+            cancel_resources = set()
 
         # CANCEL stale subscriptions (parallel)
         cancel_uris = [old_by_resource[r].subscription_uri for r in cancel_resources]
