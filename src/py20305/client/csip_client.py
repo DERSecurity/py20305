@@ -58,6 +58,7 @@ from py20305.subscription.notification_server import (
 )
 
 if TYPE_CHECKING:
+    from py20305.client.aggregation import AggregationInfo
     from py20305.client.request_budget import RequestLimiter
     from py20305.events.shared_state import EventStateStore
     from py20305.history import History
@@ -480,6 +481,75 @@ class CsipClient:
     @property
     def timebase(self) -> ServerTimebase:
         return self._timebase
+
+    def aggregation(self, lfdi: str) -> AggregationInfo | None:
+        """Return the aggregation the discovered EndDevice ``lfdi`` represents, or None.
+
+        None when no discovered EndDevice has that LFDI or the EndDevice
+        describes no aggregation (IEEE 2030.5-2023 §8.7). Read from the
+        discovered state: the EndDevice's ``distribution``, its
+        AggregatedDeviceList and, for a Priority distribution, its
+        AggregationPriority (Annex C.3), as of the last discovery or EndDevice
+        list refresh.
+        """
+        wanted = bytes.fromhex(lfdi)
+        for edev_state in self._state.end_devices.values():
+            if edev_state.lfdi == wanted:
+                return edev_state.aggregation
+        return None
+
+    async def register_aggregated_device(
+        self,
+        *,
+        aggregated_device_list_href: str,
+        lfdi: str,
+        device_category: int | None = None,
+        check_duplicate: bool = True,
+    ) -> str | None:
+        """POST an AggregatedDevice to an AggregatedDeviceList and return its ``Location``.
+
+        IEEE 2030.5-2023 §8.7.1 lets a client create an AggregatedDevice by a POST
+        to the list, where the server allows it (Annex A.2.5.2: POST optional).
+        ``lfdi`` is a 40-hex string; the ``sFDI`` is derived from it. With
+        ``check_duplicate``, the list is first read with the ``sFDI`` query
+        string parameter (§8.7.3.2), and an LFDI the list already holds raises
+        ``ValueError``: clients SHALL NOT POST an AggregatedDevice the list
+        already contains (§8.7.3.1). Raises ``Sep2ProtocolError`` on a server
+        rejection status and ``RuntimeError`` in a process without
+        own-EndDevice duties (see :attr:`own_end_device`).
+        """
+        if not self._own_end_device:
+            raise RuntimeError(
+                "this client process does not do own-EndDevice work; register devices "
+                "from the process that does"
+            )
+        from py20305.models.sep.sep import (
+            AggregatedDevice,
+            AggregatedDeviceList,
+            DeviceCategoryType,
+            Sfditype,
+            TimeType,
+        )
+        from py20305.security.identity import compute_sfdi
+
+        lfdi_bytes = bytes.fromhex(lfdi)
+        sfdi = compute_sfdi(lfdi)
+        if device_category is not None and not 0 <= device_category < 2**32:
+            raise ValueError("device_category must be between 0 and 4294967295 (32-bit bitmap)")
+        if check_duplicate:
+            separator = "&" if "?" in aggregated_device_list_href else "?"
+            query = f"{aggregated_device_list_href}{separator}sFDI={sfdi}"
+            for page in await self._http.get_list(query, AggregatedDeviceList):
+                if any(device.l_fdi == lfdi_bytes for device in page.aggregated_device):
+                    raise ValueError(f"An AggregatedDevice with LFDI {lfdi} is already listed")
+        device = AggregatedDevice(
+            l_fdi=lfdi_bytes,
+            s_fdi=Sfditype(value=sfdi),
+            changed_time=TimeType(value=int(self._timebase.now())),
+        )
+        if device_category is not None:
+            device.device_category = DeviceCategoryType(value=device_category.to_bytes(4, "big"))
+        return await self._http.post(aggregated_device_list_href, device)
 
     async def run_redirect_probe(self) -> dict[str, Any]:
         """Run ERR-001 HTTP-to-HTTPS redirect probe using this client's session."""

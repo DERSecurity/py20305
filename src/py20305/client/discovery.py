@@ -11,6 +11,7 @@ from typing import Any
 
 from lxml import etree
 
+from py20305.client.aggregation import read_aggregation
 from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
 from py20305.client.http import Sep2Client
 from py20305.client.poll_rate import DEFAULT_POLL_RATE, normalize_poll_rate
@@ -626,6 +627,10 @@ async def discover(
             if reg_href:
                 edev_state.registration_href = reg_href
 
+            # An EndDevice that represents an aggregation: its AggregatedDeviceList
+            # and, for a Priority distribution, its AggregationPriority (Annex C.3).
+            edev_state.aggregation = await read_aggregation(client, edev)
+
             # 5a. DER list (optional; server may advertise link without resource).
             # Contained per device: one EndDevice's unreadable DER list must not
             # abort the walk for every other device, and at startup a raise here
@@ -1061,6 +1066,9 @@ async def refresh_end_device_lists(client: Sep2Client, state: DiscoveredState) -
                 # Update the device object and LFDI
                 state.end_devices[edev_href].device = edev
                 state.end_devices[edev_href].lfdi = edev.l_fdi or b""
+                # The distribution, members and priority may change (§8.7.3.1:
+                # a member is disabled before it is removed).
+                state.end_devices[edev_href].aggregation = await read_aggregation(client, edev)
 
     register_device_prefixes(client, state)
     logger.debug("Refreshed EndDevice list with %d devices", len(state.end_devices))
