@@ -467,7 +467,11 @@ class BlockingDispatcher(RecordingDispatcher):
 
 
 class TestHandoverEdgeCases:
-    async def test_a_released_device_keeps_a_pending_default_fallback_delay(self):
+    async def test_a_released_device_keeps_a_pending_default_fallback_delay(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A zero start draw keeps the late event active at once (rule k).
+        monkeypatch.setattr("py20305.events.randomization.random.randint", lambda _a, _b: 0)
         store = MemoryEventStateStore()
         lfdi = b"\x01" * 20
         derc = _derc(1, _now() - 700, randomize_start=600)
@@ -635,7 +639,7 @@ class TestHandoverEdgeCases:
         start = _now() + 7200
         first = _derc(1, start, randomize_start=600)
         second = _derc(2, start + 3600, randomize_start=600)
-        store.claim_offsets(first.m_rid.value.hex(), (300, 0))
+        store.claim_offsets(first.m_rid.value.hex(), "/edev/1", (300, 0))
         a = _processor(_state("/edev/1", b"\x01" * 20, [first, second]), store)
         try:
             await a.process_controls("/derp/1")
@@ -643,7 +647,7 @@ class TestHandoverEdgeCases:
             record = a._store.get(second.m_rid.value)
             assert record is not None
             assert record.start == start + 3600 + 300
-            assert store._offsets[second.m_rid.value.hex()] == (300, 0)
+            assert store._offsets[(second.m_rid.value.hex(), "/edev/1")] == (300, 0)
         finally:
             await a.shutdown()
 
@@ -669,13 +673,13 @@ class TestSharedProcessorState:
         finally:
             await proc.shutdown()
 
-    async def test_two_processes_give_one_event_the_same_randomized_start(self):
+    async def test_a_device_keeps_its_randomized_start_in_another_process(self):
         store = MemoryEventStateStore()
         start = _now() + 7200
         procs = [
             EventProcessor(
                 _http(),
-                _state(f"/edev/{i}", bytes([i]) * 20, [_derc(1, start, randomize_start=3600)]),
+                _state("/edev/1", b"\x01" * 20, [_derc(1, start, randomize_start=3600)]),
                 NullDispatcher(),
                 asyncio.Event(),
                 state_store=store,
@@ -694,7 +698,7 @@ class TestSharedProcessorState:
 
     async def test_stored_randomization_offsets_are_used(self):
         store = MemoryEventStateStore()
-        store.claim_offsets((b"\x01" * 16).hex(), (123, 0))
+        store.claim_offsets((b"\x01" * 16).hex(), "/edev/1", (123, 0))
         start = _now() + 7200
         proc = EventProcessor(
             _http(),

@@ -156,16 +156,41 @@ client keeps in it, for each EndDevice it acts for:
   are not resumed;
 - each Response posted for the device, recorded as it is posted.
 
-It also keeps the randomization offsets of each event, so an event whose
-DERProgram serves devices of several processes starts and ends at the same
-moment in all of them. The offsets stored are the final ones: a successive
-event whose start follows its predecessor's end (IEEE 2030.5 §10.2.2.3 rule
-m) stores the adjusted start. Values are JSON types, so a store can write them
-to a database as they are.
+It also keeps the randomization offsets of each event on each device (see
+[Randomization](#randomization)), so a device moved to another process keeps
+the timing it drew. Values are JSON types, so a store can write them to a
+database as they are.
 
 The store's concurrency rules are in its docstring. In short: a device's
 snapshot has one writer, the process acting for it; `claim_offsets` must be
-compare-and-set across processes; `record_response` only appends.
+compare-and-set across processes for each event and device; `record_response`
+only appends.
+
+## Randomization
+
+Each device draws its own randomization, as IEEE 2030.5-2023 requires:
+§10.2.3.2.2 has the device "randomly select a number in seconds from zero to
+the randomizeStart specified for this event", §10.2.3.2.3 does the same for
+randomizeDuration, and the purpose stated in §10.2.3.1 is to keep a large
+group of devices from acting at the same moment. A client acting for several
+EndDevices therefore draws one start offset and one duration offset per event
+and device, and each device is dispatched, answered for and fallen back at
+its own start and end. The event's state follows its devices: it is ACTIVE
+from the first device's start to the last device's end.
+
+The successive-event rule (§10.2.2.3 rule m.1) applies on each device: a later
+event starts on a device at the earlier event's effective end on that device.
+An event first received after its effective start on a device, with its
+specified end still ahead, starts on that device at the current time plus the
+absolute value of the device's start offset (rule k).
+
+With a shared event state store, the offsets are claimed per event and device
+through `claim_offsets(mrid, device, offsets)`, first writer wins, so a
+process that takes a device over uses the offsets the device already drew.
+The offsets stored for a successive event are the adjusted ones.
+
+Under a `group_lookup` the EndDevices of a program share one draw: the lookup
+dispatches to all of the group's local devices at once.
 
 Each process detects a loss of communications on its own, from its own
 requests to the server. The shared state carries what the detection did to a

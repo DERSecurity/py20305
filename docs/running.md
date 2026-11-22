@@ -367,6 +367,15 @@ has been cancelled" when the event's `responseRequired` asks for it. Cancelling
 an event that is already running applies the wind-down randomization §10.2.3.3
 requires, so the revert can land later than the cancellation that caused it.
 
+An event with `randomizeStart` or `randomizeDuration` is randomized per device,
+as IEEE 2030.5-2023 §10.2.3.2.2 and §10.2.3.2.3 require: each EndDevice the
+client acts for draws its own offsets, so the devices of one event start and
+end at different moments rather than as one block, and each device's ACTIVE
+and COMPLETED Responses are posted at its own start and end. An event received
+after its start begins on each device at the current time plus that device's
+start offset (§10.2.2.3 rule k), and a successive event starts on each device
+where the earlier one ended on it (rule m).
+
 Removal is acted on only when the list was fetched completely. A DERControl
 fetch that fails or does not parse leaves the client holding no list rather than
 an empty one. The distinction matters: an empty list is a server that removed

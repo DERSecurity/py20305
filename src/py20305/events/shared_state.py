@@ -19,10 +19,10 @@ one snapshot per EndDevice, and records each Response as it is posted. A
 process taking devices over loads their snapshots (see
 :meth:`CsipClient.take_over_devices`).
 
-The store also holds the randomization offsets of each event, drawn from its
-randomizeStart and randomizeDuration. An event that two processes
-both act on, a DERProgram serving devices of both, then starts and ends at the
-same moment in both, and a device moved between them keeps its timing.
+The store also holds the randomization offsets of each event on each
+EndDevice, drawn from its randomizeStart and randomizeDuration. Each device
+draws its own (IEEE 2030.5-2023 §10.2.3.2.2 and §10.2.3.2.3), and a device
+moved between processes keeps the offsets it drew.
 
 No store is the default: the processor keeps all of this in memory only, as
 before. :class:`MemoryEventStateStore` keeps it in a dict, for tests and for
@@ -55,9 +55,9 @@ class EventStateStore(Protocol):
     - One EndDevice is acted for by one process at a time, so its snapshot has
       one writer. The host moves a device by releasing it in one process
       before taking it over in another.
-    - ``claim_offsets`` is compare-and-set: the first offsets stored for an
-      event win, and every later call returns them. Several processes can act
-      on one event, so this one must be atomic across them.
+    - ``claim_offsets`` is compare-and-set per event and device: the first
+      offsets stored for that pair win, and every later call returns them. It
+      must be atomic across processes.
     - ``record_response`` only appends.
     """
 
@@ -77,15 +77,17 @@ class EventStateStore(Protocol):
         """Return ``(mrid, status, at)`` for each Response recorded for ``lfdi``."""
         ...
 
-    def claim_offsets(self, mrid: str, offsets: tuple[int, int]) -> tuple[int, int]:
-        """Return the stored ``(start, duration)`` offsets of event ``mrid``.
+    def claim_offsets(self, mrid: str, device: str, offsets: tuple[int, int]) -> tuple[int, int]:
+        """Return the stored ``(start, duration)`` offsets of event ``mrid`` on ``device``.
 
-        Stores ``offsets`` first when the event has none.
+        Stores ``offsets`` first when that event and device have none.
+        ``device`` is the EndDevice href, or the empty string for an event
+        whose program has no device mapping.
         """
         ...
 
-    def forget_offsets(self, mrid: str) -> None:
-        """Drop the offsets of event ``mrid``, which has ended."""
+    def forget_offsets(self, mrid: str, device: str) -> None:
+        """Drop the offsets of event ``mrid`` on ``device``, which have ended."""
         ...
 
 
@@ -100,7 +102,7 @@ class MemoryEventStateStore:
     def __init__(self, *, response_max_age: int = 7200) -> None:
         self._devices: dict[str, dict[str, Any]] = {}
         self._responses: dict[str, list[tuple[str, int, int]]] = {}
-        self._offsets: dict[str, tuple[int, int]] = {}
+        self._offsets: dict[tuple[str, str], tuple[int, int]] = {}
         self._response_max_age = response_max_age
 
     def load_device(self, device_href: str) -> dict[str, Any] | None:
@@ -122,10 +124,10 @@ class MemoryEventStateStore:
         """Return the Responses recorded for ``lfdi``."""
         return list(self._responses.get(lfdi, []))
 
-    def claim_offsets(self, mrid: str, offsets: tuple[int, int]) -> tuple[int, int]:
-        """Return the stored offsets of ``mrid``, storing ``offsets`` when there are none."""
-        return self._offsets.setdefault(mrid, offsets)
+    def claim_offsets(self, mrid: str, device: str, offsets: tuple[int, int]) -> tuple[int, int]:
+        """Return the stored offsets of ``mrid`` on ``device``, storing ``offsets`` if none."""
+        return self._offsets.setdefault((mrid, device), offsets)
 
-    def forget_offsets(self, mrid: str) -> None:
-        """Drop the offsets of ``mrid``."""
-        self._offsets.pop(mrid, None)
+    def forget_offsets(self, mrid: str, device: str) -> None:
+        """Drop the offsets of ``mrid`` on ``device``."""
+        self._offsets.pop((mrid, device), None)

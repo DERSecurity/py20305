@@ -91,6 +91,34 @@ class EventTimerManager:
         )
         self._track(record.mrid, task)
 
+    def schedule_at(
+        self,
+        record: EventRecord,
+        target: int,
+        callback: Callable[[EventRecord], Awaitable[None]],
+        label: str,
+        *,
+        now_fn: Callable[[], int] | None = None,
+    ) -> None:
+        """Schedule ``callback`` at ``target`` on ``now_fn``'s clock.
+
+        For one device's activation or completion, whose window differs from
+        the event's (IEEE 2030.5-2023 §10.2.3.2). Skipped like the event-level
+        timers once the event has ended.
+        """
+        now_fn = now_fn or _local_now
+        logger.debug(
+            "Scheduling %s timer for %s in %ds",
+            label,
+            record.mrid.hex()[:8],
+            max(target - now_fn(), 0),
+        )
+        task = asyncio.create_task(
+            self._wait_and_fire(record, target, callback, label, now_fn, _ENDED_STATES),
+            name=f"{label}-{record.mrid.hex()[:8]}",
+        )
+        self._track(record.mrid, task)
+
     def schedule_delayed_callback(
         self,
         record: EventRecord,
