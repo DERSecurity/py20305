@@ -21,6 +21,7 @@ from py20305.models.sep.sep import Subscription
 
 if TYPE_CHECKING:
     from py20305.client.http import Sep2Client
+    from py20305.subscription.store import SubscriptionStore
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +103,9 @@ class AdoptionResult:
 class SubscriptionManager:
     """Create, cancel, and track IEEE 2030.5 subscriptions.
 
-    Uses Sep2Client for HTTP operations and maintains in-memory state
-    of active subscriptions and received notifications.
+    Uses Sep2Client for HTTP operations. The subscription records live in a
+    :class:`~py20305.subscription.store.SubscriptionStore`, by default a dict in
+    this process; received notifications are kept in memory.
     """
 
     def __init__(
@@ -119,6 +121,7 @@ class SubscriptionManager:
         adopt_on_connect: bool = False,
         remove_duplicates: bool = False,
         unsubscribe_on_close: bool = True,
+        store: SubscriptionStore | None = None,
     ) -> None:
         """
         Args:
@@ -135,6 +138,10 @@ class SubscriptionManager:
             unsubscribe_on_close: Have the client DELETE its subscriptions when
                 it shuts down. Turn off for an instance that hands over to
                 another instance with the same identity, which adopts them.
+            store: Where the subscription records are kept. None keeps them in
+                this process. Give several managers for one client the same
+                store to share one subscription set; see
+                :class:`~py20305.subscription.store.SubscriptionStore`.
 
         Raises:
             ValueError: ``renewal_method`` is not ``post`` or ``put``, or
@@ -150,7 +157,11 @@ class SubscriptionManager:
         self._renewal_method = renewal_method
         self._client = client
         self._notification_uri = notification_uri
-        self._subscriptions: dict[str, SubscriptionState] = {}
+        if store is None:
+            from py20305.subscription.store import MemorySubscriptionStore
+
+            store = MemorySubscriptionStore()
+        self._store: SubscriptionStore = store
         self._notifications: deque[StoredNotification] = deque(maxlen=max_notifications)
         self._dedup_cache: dict[str, float] = {}
         # Resources the server has cancelled (status=1) -- auto-subscribe skips
@@ -176,7 +187,7 @@ class SubscriptionManager:
 
     def _find_active_for_resource(self, subscribed_resource: str) -> SubscriptionState | None:
         """Find an existing active subscription for a resource href."""
-        for state in self._subscriptions.values():
+        for state in self._store.values():
             if state.subscribed_resource == subscribed_resource and state.status == "active":
                 return state
         return None
@@ -295,7 +306,7 @@ class SubscriptionManager:
                     is_list_subscription=resource_type.endswith("List"),
                     unmanaged=True,
                 )
-                self._subscriptions[location] = state
+                self._store.put(state)
                 return state
 
             from py20305.diagnostics import report
@@ -317,7 +328,7 @@ class SubscriptionManager:
             is_list_subscription=resource_type.endswith("List"),
             sub_list_href=sub_list_href,
         )
-        self._subscriptions[location] = state
+        self._store.put(state)
         logger.info("Subscribed to %s (%s) -> %s", subscribed_resource, resource_type, location)
         return state
 
@@ -328,9 +339,9 @@ class SubscriptionManager:
         Always removes local state to prevent stale entries blocking re-subscription.
         Unmanaged subscriptions (2018 compat) skip the DELETE.
         """
-        state = self._subscriptions.get(subscription_uri)
+        state = self._store.get(subscription_uri)
         if state is not None and state.unmanaged:
-            self._subscriptions.pop(subscription_uri, None)
+            self._store.remove(subscription_uri)
             logger.info("Removed unmanaged subscription %s", subscription_uri)
             return True
 
@@ -338,10 +349,10 @@ class SubscriptionManager:
             await self._client.delete(subscription_uri)
         except Exception:
             logger.warning("Failed to cancel subscription %s", subscription_uri, exc_info=True)
-            self._subscriptions.pop(subscription_uri, None)
+            self._store.remove(subscription_uri)
             return False
 
-        self._subscriptions.pop(subscription_uri, None)
+        self._store.remove(subscription_uri)
         logger.info("Cancelled subscription %s", subscription_uri)
         return True
 
@@ -350,7 +361,7 @@ class SubscriptionManager:
 
         Unmanaged subscriptions skip the DELETE.
         """
-        state = self._subscriptions.get(subscription_uri)
+        state = self._store.get(subscription_uri)
         if state is not None and state.unmanaged:
             logger.info("Skipping DELETE for unmanaged subscription %s", subscription_uri)
             return True
@@ -373,7 +384,7 @@ class SubscriptionManager:
         for every connection attempt and retry: 15 to 30 s of a service stop
         spent waiting on a request whose outcome changes nothing locally.
         """
-        uris = list(self._subscriptions.keys())
+        uris = [s.subscription_uri for s in self._store.values()]
         if not uris:
             return
         tasks = [asyncio.ensure_future(self._cancel_one(uri)) for uri in uris]
@@ -391,7 +402,8 @@ class SubscriptionManager:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             # Always clear all local state -- stale entries block re-subscription
-            self._subscriptions.clear()
+            for uri in uris:
+                self._store.remove(uri)
 
     async def reconcile(
         self,
@@ -427,10 +439,10 @@ class SubscriptionManager:
 
         # Build lookup of active subs keyed by subscribed_resource
         old_by_resource: dict[str, SubscriptionState] = {}
-        for state in list(self._subscriptions.values()):
+        for state in self._store.values():
             if state.status != "active":
                 # Clean up stale cancelled entries
-                self._subscriptions.pop(state.subscription_uri, None)
+                self._store.remove(state.subscription_uri)
                 continue
             old_by_resource[state.subscribed_resource] = state
 
@@ -463,7 +475,7 @@ class SubscriptionManager:
                 return_exceptions=True,
             )
             for uri, ok in zip(cancel_uris, cancel_outcomes, strict=True):
-                self._subscriptions.pop(uri, None)
+                self._store.remove(uri)
                 result.cancelled += 1
                 if isinstance(ok, BaseException) or not ok:
                     result.cancel_errors += 1
@@ -481,7 +493,7 @@ class SubscriptionManager:
                 if isinstance(ok, BaseException) or not ok:
                     # Renewal failed -- subscription is stale on server.
                     # Cancel local state and fall through to CREATE.
-                    self._subscriptions.pop(state.subscription_uri, None)
+                    self._store.remove(state.subscription_uri)
                     create_resources.add(resource)
                     result.cancelled += 1
                 else:
@@ -590,9 +602,9 @@ class SubscriptionManager:
                 # so what we report/cancel/renew matches what the server holds.
                 server_uri = server_uri_by_resource.get(state.subscribed_resource)
                 if server_uri is not None and server_uri != state.subscription_uri:
-                    self._subscriptions.pop(state.subscription_uri, None)
+                    self._store.remove(state.subscription_uri)
                     state.subscription_uri = server_uri
-                    self._subscriptions[server_uri] = state
+                    self._store.put(state)
                     adopted += 1
                 continue
             if not reestablish_missing:
@@ -612,7 +624,7 @@ class SubscriptionManager:
                         "(rediscovery re-subscribes)",
                         state.subscribed_resource,
                     )
-                    self._subscriptions.pop(state.subscription_uri, None)
+                    self._store.remove(state.subscription_uri)
                     dropped += 1
                 continue
             logger.info(
@@ -623,11 +635,11 @@ class SubscriptionManager:
             # active local state). Restore it if the re-POST fails transiently, so
             # the next reconcile retries instead of silently forgetting the sub
             # (which, if it were the last one, would stop the reconcile poll).
-            self._subscriptions.pop(state.subscription_uri, None)
+            self._store.remove(state.subscription_uri)
             if await self.subscribe(sub_list_href, state.subscribed_resource, state.resource_type):
                 re_established += 1
             else:
-                self._subscriptions[state.subscription_uri] = state
+                self._store.put(state)
         if re_established:
             logger.info("Reconcile re-established %d dropped subscription(s)", re_established)
         if adopted:
@@ -727,23 +739,25 @@ class SubscriptionManager:
             elif local is not None:
                 # Tracked under an href the server no longer lists: re-key it.
                 keep = hrefs[0]
-                self._subscriptions.pop(local.subscription_uri, None)
+                self._store.remove(local.subscription_uri)
                 local.subscription_uri = keep
                 local.sub_list_href = sub_list_href
-                self._subscriptions[keep] = local
+                self._store.put(local)
                 adopted_hrefs.append(keep)
                 result.adopted += 1
             else:
                 keep = hrefs[0]
                 resource_type = desired_types[resource]
-                self._subscriptions[keep] = SubscriptionState(
-                    subscription_uri=keep,
-                    subscribed_resource=resource,
-                    notification_uri=self._notification_uri,
-                    resource_type=resource_type,
-                    created_at=0.0,
-                    is_list_subscription=resource_type.endswith("List"),
-                    sub_list_href=sub_list_href,
+                self._store.put(
+                    SubscriptionState(
+                        subscription_uri=keep,
+                        subscribed_resource=resource,
+                        notification_uri=self._notification_uri,
+                        resource_type=resource_type,
+                        created_at=0.0,
+                        is_list_subscription=resource_type.endswith("List"),
+                        sub_list_href=sub_list_href,
+                    )
                 )
                 adopted_hrefs.append(keep)
                 result.adopted += 1
@@ -786,9 +800,10 @@ class SubscriptionManager:
 
     def mark_cancelled(self, subscription_uri: str) -> None:
         """Mark a subscription as cancelled (server-initiated)."""
-        state = self._subscriptions.get(subscription_uri)
+        state = self._store.get(subscription_uri)
         if state:
             state.status = "cancelled"
+            self._store.put(state)
 
     def remove_notifications_for(self, subscribed_resource: str) -> None:
         """Remove all stored notifications for a given resource."""
@@ -800,7 +815,7 @@ class SubscriptionManager:
     @property
     def active_subscriptions(self) -> list[SubscriptionState]:
         """Return subscriptions with status 'active'."""
-        return [s for s in self._subscriptions.values() if s.status == "active"]
+        return [s for s in self._store.values() if s.status == "active"]
 
     @property
     def notifications(self) -> list[StoredNotification]:
@@ -809,42 +824,27 @@ class SubscriptionManager:
 
     def subscribed_resource_types(self) -> set[str]:
         """Return the set of resource_type values for active subscriptions."""
-        return {s.resource_type for s in self._subscriptions.values() if s.status == "active"}
+        return {s.resource_type for s in self._store.values() if s.status == "active"}
+
+    @property
+    def store(self) -> SubscriptionStore:
+        """The store holding this manager's subscription records."""
+        return self._store
 
     def to_checkpoint(self) -> dict[str, Any]:
         """Serialize subscription state for persistence."""
-        return {
-            "subscriptions": [
-                {
-                    "subscription_uri": s.subscription_uri,
-                    "subscribed_resource": s.subscribed_resource,
-                    "notification_uri": s.notification_uri,
-                    "resource_type": s.resource_type,
-                    "status": s.status,
-                    "created_at": s.created_at,
-                    "unmanaged": s.unmanaged,
-                    "sub_list_href": s.sub_list_href,
-                }
-                for s in self._subscriptions.values()
-            ],
-        }
+        from py20305.subscription.store import subscription_record
+
+        return {"subscriptions": [subscription_record(s) for s in self._store.values()]}
 
     def restore_from_checkpoint(self, data: dict[str, Any]) -> None:
-        """Restore subscription state from a checkpoint."""
-        self._subscriptions.clear()
+        """Replace the stored subscription records with those of a checkpoint."""
+        from py20305.subscription.store import subscription_from_record
+
+        for state in self._store.values():
+            self._store.remove(state.subscription_uri)
         for entry in data.get("subscriptions", []):
-            state = SubscriptionState(
-                subscription_uri=entry["subscription_uri"],
-                subscribed_resource=entry["subscribed_resource"],
-                notification_uri=entry["notification_uri"],
-                resource_type=entry["resource_type"],
-                status=entry.get("status", "active"),
-                created_at=entry.get("created_at", 0.0),
-                is_list_subscription=entry.get("is_list_subscription", False),
-                unmanaged=entry.get("unmanaged", False),
-                sub_list_href=entry.get("sub_list_href"),
-            )
-            self._subscriptions[state.subscription_uri] = state
+            self._store.put(subscription_from_record(entry))
 
     async def validate_restored_subscriptions(self) -> tuple[int, int]:
         """Validate checkpoint-restored subscriptions by attempting renewal.
@@ -854,8 +854,8 @@ class SubscriptionManager:
         """
         valid = 0
         removed = 0
-        for uri in list(self._subscriptions.keys()):
-            state = self._subscriptions.get(uri)
+        for uri in [s.subscription_uri for s in self._store.values()]:
+            state = self._store.get(uri)
             if state is None or state.status != "active":
                 continue
             if state.unmanaged:
@@ -864,7 +864,7 @@ class SubscriptionManager:
             if await self.renew(uri):
                 valid += 1
             else:
-                self._subscriptions.pop(uri, None)
+                self._store.remove(uri)
                 removed += 1
                 logger.info("Removed stale subscription %s (%s)", uri, state.resource_type)
         return valid, removed
@@ -896,12 +896,13 @@ class SubscriptionManager:
 
         Returns True on success, False on failure.
         """
-        state = self._subscriptions.get(subscription_uri)
+        state = self._store.get(subscription_uri)
         if state is None or state.status != "active":
             return False
 
         if state.unmanaged:
             state.created_at = time.time()
+            self._store.put(state)
             logger.info("Renewed unmanaged subscription %s (timestamp only)", subscription_uri)
             return True
 
@@ -933,6 +934,7 @@ class SubscriptionManager:
                 return self._renewal_failed(subscription_uri, exc)
             else:
                 state.created_at = time.time()
+                self._store.put(state)
                 logger.info(
                     "Renewed subscription %s (%s) by PUT", subscription_uri, state.resource_type
                 )
@@ -947,11 +949,11 @@ class SubscriptionManager:
 
         if location and location != subscription_uri:
             # Server returned a new URI on renewal
-            self._subscriptions.pop(subscription_uri, None)
+            self._store.remove(subscription_uri)
             state.subscription_uri = location
-            self._subscriptions[location] = state
 
         state.created_at = time.time()
+        self._store.put(state)
         logger.info("Renewed subscription %s (%s)", subscription_uri, state.resource_type)
         return True
 
@@ -1010,8 +1012,8 @@ class SubscriptionManager:
     async def renew_all(self) -> int:
         """Renew all active subscriptions. Returns count of successful renewals."""
         count = 0
-        for uri in list(self._subscriptions.keys()):
-            state = self._subscriptions.get(uri)
+        for uri in [s.subscription_uri for s in self._store.values()]:
+            state = self._store.get(uri)
             if state and state.status == "active" and await self.renew(uri):
                 count += 1
         return count
@@ -1035,8 +1037,8 @@ class SubscriptionManager:
 
             # Renew stale subscriptions
             now = time.time()
-            for uri in list(self._subscriptions.keys()):
-                state = self._subscriptions.get(uri)
+            for uri in [s.subscription_uri for s in self._store.values()]:
+                state = self._store.get(uri)
                 if state and state.status == "active":
                     age = now - state.created_at
                     if age >= interval_seconds:
@@ -1051,7 +1053,7 @@ class SubscriptionManager:
 
         Non-list resource subscriptions should not fire on ListLink attribute changes.
         """
-        state = self._subscriptions.get(subscription_uri)
+        state = self._store.get(subscription_uri)
         if state is None:
             return True  # Unknown subscription, process anyway
         return state.is_list_subscription or resource_href == state.subscribed_resource
@@ -1065,7 +1067,7 @@ class SubscriptionManager:
         path. None when the subscription isn't tracked locally (callers fall back
         to a path heuristic).
         """
-        state = self._subscriptions.get(subscription_uri)
+        state = self._store.get(subscription_uri)
         return state.resource_type if state is not None else None
 
     # ------------------------------------------------------------------
