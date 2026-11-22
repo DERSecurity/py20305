@@ -1,22 +1,32 @@
-"""Deterministic per-mRID randomization of event start time and duration."""
+"""Per-mRID randomization of event start time and duration, drawn once and reused."""
 
 from __future__ import annotations
 
 import random
+from collections.abc import Callable
 
 from py20305.models.sep.sep import OneHourRangeType, RandomizableEvent
 
 
 class RandomizationCache:
-    """Cache randomized offsets per mRID for session determinism.
+    """Cache randomized offsets per mRID so an event keeps one timing.
 
-    Offsets are generated once per mRID and reused on subsequent calls.
+    Offsets are drawn at random once per mRID and reused on subsequent calls.
     The cache is prunable to avoid unbounded memory growth.
+
+    ``claim`` shares the offsets beyond this process: it is called with each
+    mRID and the offsets just drawn, and returns the offsets to use, which are
+    the first ever stored for that mRID (see
+    :meth:`~py20305.events.shared_state.EventStateStore.claim_offsets`). None
+    keeps them in this cache only.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, claim: Callable[[bytes, tuple[int, int]], tuple[int, int]] | None = None
+    ) -> None:
         self._cache: dict[bytes, tuple[int, int]] = {}
         self._expiry: dict[bytes, int] = {}
+        self._claim = claim
 
     def get_offsets(self, event: RandomizableEvent, start: int, duration: int) -> tuple[int, int]:
         """Return (start_offset, duration_offset) for the given randomizable event.
@@ -33,18 +43,26 @@ class RandomizationCache:
 
         start_offset = self._compute_offset(event.randomize_start)
         dur_offset = self._compute_offset(event.randomize_duration)
+        if self._claim is not None:
+            start_offset, dur_offset = self._claim(mrid, (start_offset, dur_offset))
 
         self._cache[mrid] = (start_offset, dur_offset)
         # Track expiry based on effective end time
         self._expiry[mrid] = start + start_offset + duration + dur_offset
         return (start_offset, dur_offset)
 
-    def prune(self, now: int, grace: int = 10) -> None:
-        """Remove cache entries for events that have expired."""
+    def prune(self, now: int, grace: int = 10) -> list[bytes]:
+        """Remove cache entries for events that have expired. Return their mRIDs."""
         expired = [mrid for mrid, end in self._expiry.items() if end + grace < now]
         for mrid in expired:
             del self._cache[mrid]
             del self._expiry[mrid]
+        return expired
+
+    def seed(self, mrid: bytes, offsets: tuple[int, int], end: int) -> None:
+        """Use ``offsets`` for ``mrid``, an event loaded with its timing already drawn."""
+        self._cache[mrid] = offsets
+        self._expiry[mrid] = end
 
     @staticmethod
     def _compute_offset(value: OneHourRangeType | None) -> int:

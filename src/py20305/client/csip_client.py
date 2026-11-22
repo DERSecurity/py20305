@@ -7,7 +7,7 @@ import contextlib
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
@@ -59,6 +59,7 @@ from py20305.subscription.notification_server import (
 
 if TYPE_CHECKING:
     from py20305.client.request_budget import RequestLimiter
+    from py20305.events.shared_state import EventStateStore
     from py20305.history import History
     from py20305.models.sep.sep import Notification
 
@@ -152,6 +153,8 @@ class CsipClient:
     in several processes". ``device_filter`` limits the EndDevices this process
     acts for, ``own_end_device`` says whether it does the client's own-EndDevice
     work, and ``request_limiter`` paces its requests against a shared budget.
+    ``event_state_store`` shares the event state of each EndDevice, so another
+    process can take a device over (see :meth:`take_over_devices`).
     """
 
     def __init__(
@@ -188,6 +191,7 @@ class CsipClient:
         device_filter: DeviceFilter | None = None,
         own_end_device: bool = True,
         request_limiter: RequestLimiter | None = None,
+        event_state_store: EventStateStore | None = None,
     ) -> None:
         #: Application-level server timebase :
         #: time-of-day-sensitive operations follow the head-end's Time resource;
@@ -283,6 +287,7 @@ class CsipClient:
             comms_loss=self._comms_loss,
             timebase=self._timebase,
             audit=self._audit,
+            state_store=event_state_store,
         )
         #: Pricing function set: relays active-interval prices to connectors.
         #: Constructed unconditionally but only driven by the tariff poll when
@@ -2185,6 +2190,53 @@ class CsipClient:
             # and a listener that rescheduled work per pass would do it twice.
             await self._on_rediscovered()
         return True
+
+    async def take_over_devices(self, device_hrefs: Iterable[str]) -> bool:
+        """Start acting for EndDevices another process stopped acting for.
+
+        The host first makes this client's device filter accept the devices,
+        and the other process releases them (:meth:`release_devices`). This
+        loads their event state from the shared event state store, rediscovers
+        so the devices' programs and controls are read from the server again,
+        and then applies any running event a device never received. Events the
+        previous process handled are carried on, not started again: no
+        Response already posted is posted again, and no control already applied
+        is applied again. A change the server made while no process acted for
+        the devices is found by the rediscovery, as is one a notification
+        reports while it runs.
+
+        Returns False when the rediscovery failed or did not find every device;
+        call it again to complete the take-over.
+        Without an event state store the devices are rediscovered and treated
+        as new, as a fresh client would treat them.
+        """
+        hrefs = list(device_hrefs)
+        self._event_processor.load_devices(hrefs)
+        await self.trigger_rediscovery()
+        # A rediscovery already running coalesces this one into a further pass;
+        # wait for that pass, so the devices are mapped before they are resumed.
+        async with self._rediscovery_lock:
+            pass
+        if not all(href in self._state.end_devices for href in hrefs):
+            logger.warning(
+                "Take-over incomplete: not every EndDevice taken over was discovered; "
+                "running events are not applied to them yet"
+            )
+            return False
+        await self._event_processor.resume_devices(hrefs)
+        return True
+
+    async def release_devices(self, device_hrefs: Iterable[str]) -> bool:
+        """Stop acting for EndDevices another process will take over.
+
+        The host first makes this client's device filter reject the devices.
+        This saves their event state to the shared event state store, forgets
+        the events that concern only them without a Response or a write to a
+        device, and rediscovers without them. Subscriptions stay as they are.
+        Returns what :meth:`trigger_rediscovery` returns.
+        """
+        self._event_processor.release_devices(device_hrefs)
+        return await self.trigger_rediscovery()
 
     async def shutdown(
         self,

@@ -10,6 +10,8 @@ The DERControl scheduling engine: state machine, supersession, randomization.
 
 ::: py20305.events.randomization
 
+::: py20305.events.shared_state
+
 ::: py20305.events.response
 
 ::: py20305.events.dispatch

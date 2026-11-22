@@ -35,6 +35,7 @@ from py20305.events.response import (
     post_der_response,
     response_code_for_dispatch_error,
 )
+from py20305.events.shared_state import SNAPSHOT_VERSION, EventStateStore
 from py20305.events.state_machine import EventRecord, EventState, EventStore
 from py20305.events.supersession import compared_mode_keys, compute_supersession
 from py20305.events.timers import EventTimerManager
@@ -155,7 +156,12 @@ class EventProcessor:
         comms_loss: CommsLossState | None = None,
         timebase: ServerTimebase | None = None,
         audit: AuditEmitter | None = None,
+        state_store: EventStateStore | None = None,
     ) -> None:
+        # ``state_store`` shares the event state of each EndDevice with other
+        # processes acting as the same client, so one can take a device over
+        # from another (see py20305.events.shared_state). None keeps it here.
+        #
         # ``group_lookup`` is an optional fan-out hook, unset by default.
         # Given a server-side program href, it returns the list of local
         # sub-device LFDIs that program should fan out to, or None to fall
@@ -184,8 +190,23 @@ class EventProcessor:
         #: kinds can be past their end and still served, poll after poll.
         self._audit_unstored_seen: dict[bytes, str] = {}
         self._store = EventStore()
-        self._rand_cache = RandomizationCache()
+        self._state_store = state_store
+        self._rand_cache = RandomizationCache(
+            claim=self._claim_offsets if state_store is not None else None
+        )
         self._response_tracker = ResponseTracker()
+        if state_store is not None:
+            self._response_tracker.on_sent = self._record_sent
+        #: The snapshot last saved for each EndDevice, so an unchanged one is
+        #: not written again.
+        self._saved: dict[str, dict[str, Any]] = {}
+        #: EndDevices handed to another process: their snapshots are not
+        #: written from here any more.
+        self._released: set[str] = set()
+        #: Events load_devices created, whose timers resume_devices schedules.
+        self._untimed: dict[bytes, EventRecord] = {}
+        #: Each event's control as XML, with the object it was serialized from.
+        self._control_xml: dict[bytes, tuple[Dercontrol1, str]] = {}
         self._dderc_tracker = DdercTracker()
         self._timer_mgr = EventTimerManager(shutdown)
         self._mode_tracker = ActiveModeTracker()
@@ -211,6 +232,13 @@ class EventProcessor:
 
         Called after polling discovers or refreshes DERControl data.
         """
+        try:
+            await self._process_controls(program_href)
+        finally:
+            self._persist()
+
+    async def _process_controls(self, program_href: str) -> None:
+        """Process the DERControls of one DERProgram; see :meth:`process_controls`."""
         if self._closed:
             return
 
@@ -456,7 +484,13 @@ class EventProcessor:
         for expired_mrid in expired:
             self._relay_snapshots.pop(("control", expired_mrid.hex()), None)
             self._relay_snapshots.pop(("doe", expired_mrid.hex()), None)
-        self._rand_cache.prune(now)
+        for ended in self._rand_cache.prune(now):
+            self._control_xml.pop(ended, None)
+            if self._state_store is not None:
+                try:
+                    self._state_store.forget_offsets(ended.hex())
+                except Exception:
+                    logger.warning("Could not forget the offsets of %s", ended.hex()[:8])
         self._forget_unstored_no_longer_served(program_href)
         self._response_tracker.prune(now)
 
@@ -530,7 +564,7 @@ class EventProcessor:
         if self._closed:
             return
         self._timer_mgr.schedule_activation(
-            record, self._on_activation, now_fn=self._now_fn_for(record.program_href)
+            record, self._activate, now_fn=self._now_fn_for(record.program_href)
         )
         self._relay_control_event(record, "scheduled")
         self._audit_transition(record, None, "scheduled")
@@ -565,7 +599,7 @@ class EventProcessor:
 
         # Schedule completion timer
         self._timer_mgr.schedule_completion(
-            record, self._on_completion, now_fn=self._now_fn_for(record.program_href)
+            record, self._complete, now_fn=self._now_fn_for(record.program_href)
         )
 
     async def _handle_cancellation(self, record: EventRecord) -> None:
@@ -614,6 +648,20 @@ class EventProcessor:
         rs = abs(derc.randomize_start.value) if derc.randomize_start is not None else 0
         rd = abs(derc.randomize_duration.value) if derc.randomize_duration is not None else 0
         return max(rs, rd)
+
+    async def _activate(self, record: EventRecord) -> None:
+        """Activation timer callback: activate the event, then save the shared state."""
+        try:
+            await self._on_activation(record)
+        finally:
+            self._persist()
+
+    async def _complete(self, record: EventRecord) -> None:
+        """Completion timer callback: complete the event, then save the shared state."""
+        try:
+            await self._on_completion(record)
+        finally:
+            self._persist()
 
     async def _on_activation(self, record: EventRecord) -> None:
         """Activation timer callback: transition scheduled -> active.
@@ -675,7 +723,7 @@ class EventProcessor:
         self._relay_control_event(record, "active")
         self._audit_activation(record, from_state=EventState.SCHEDULED.value)
         self._timer_mgr.schedule_completion(
-            record, self._on_completion, now_fn=self._now_fn_for(record.program_href)
+            record, self._complete, now_fn=self._now_fn_for(record.program_href)
         )
 
     async def _on_completion(self, record: EventRecord) -> None:
@@ -860,13 +908,16 @@ class EventProcessor:
             result[href] = set(devices)
         return result
 
-    async def _apply_and_respond(self, record: EventRecord) -> None:
+    async def _apply_and_respond(self, record: EventRecord, only: set[str] | None = None) -> None:
         """Dispatch the control, then report each device by its own outcome.
 
         Status 2 asserts the event started, so it is posted for a device only
         once that device's apply has returned successfully. A failure reports
         the matching rejection code instead and marks the device, which
         keeps it out of the COMPLETED response at the event's end.
+
+        ``only`` limits the dispatch to those device hrefs, for devices taken
+        over from another process while the event was running.
         """
         mrid_short = record.mrid.hex()[:8]
 
@@ -886,8 +937,8 @@ class EventProcessor:
             logger.info("Event %s: %s rejected -> %s", mrid_short, dev_href, code.name)
             await self._post_response_for_devices(record.derc, code, {dev_href})
 
-        outcomes = await self._apply_control_to_devices(record, on_result=respond)
-        if outcomes:
+        outcomes = await self._apply_control_to_devices(record, on_result=respond, only=only)
+        if outcomes or only is not None:
             return
         # No dispatch targets -- the program has no device mapping, so nothing
         # could fail. Keep the existing any-LFDI ACTIVE announcement rather than
@@ -903,6 +954,7 @@ class EventProcessor:
         self,
         record: EventRecord,
         on_result: Callable[[str, BaseException | None], Awaitable[None]] | None = None,
+        only: set[str] | None = None,
     ) -> dict[str, BaseException | None]:
         """Apply a DERControl to all devices in the program's group (parallel).
 
@@ -915,7 +967,9 @@ class EventProcessor:
         derp_state = self._state.der_programs.get(record.program_href)
         curves = derp_state.der_curves if derp_state else []
         mrid_short = record.mrid.hex()[:8]
-        targets = [d for d in devices if d not in record.superseded_devices]
+        targets = [
+            d for d in devices if d not in record.superseded_devices and (only is None or d in only)
+        ]
         logger.debug("Event %s: applying control to %d device(s)", mrid_short, len(targets))
         if not targets:
             return {}
@@ -1445,6 +1499,283 @@ class EventProcessor:
         self._relay_tasks.add(task)
         task.add_done_callback(self._relay_tasks.discard)
 
+    # ------------------------------------------------------------------
+    # Shared event state: save, load, take over and release EndDevices
+    # ------------------------------------------------------------------
+
+    def _claim_offsets(self, mrid: bytes, offsets: tuple[int, int]) -> tuple[int, int]:
+        """Return the shared randomization offsets of ``mrid``, sharing ``offsets`` if none."""
+        assert self._state_store is not None
+        try:
+            start, duration = self._state_store.claim_offsets(mrid.hex(), offsets)
+        except Exception:
+            logger.warning(
+                "Could not share the randomization of %s; using this process's own",
+                mrid.hex()[:8],
+                exc_info=True,
+            )
+            return offsets
+        return int(start), int(duration)
+
+    def _record_sent(self, mrid: bytes, code: ResponseCode, lfdi: bytes, at: int) -> None:
+        """Record one posted response in the shared event state."""
+        assert self._state_store is not None
+        self._state_store.record_response(lfdi.hex(), mrid.hex(), int(code), at)
+
+    def _control_xml_of(self, record: EventRecord) -> str:
+        """Return the record's DERControl as XML, serialized once per object."""
+        from py20305.xml.serialization import to_xml
+
+        cached = self._control_xml.get(record.mrid)
+        if cached is not None and cached[0] is record.derc:
+            return cached[1]
+        xml = to_xml(record.derc).decode("utf-8")
+        self._control_xml[record.mrid] = (record.derc, xml)
+        return xml
+
+    def _device_snapshot(self, dev_href: str, lfdi: bytes) -> dict[str, Any]:
+        """Return the event state of one EndDevice in the shared snapshot format."""
+        mapping = self._state.device_mapping.program_to_devices
+        events: list[dict[str, Any]] = []
+        for record in self._store.values():
+            concerned = (
+                dev_href in mapping.get(record.program_href, [])
+                or dev_href in record.applied_devices
+                or dev_href in record.rejected_devices
+                or dev_href in record.superseded_devices
+            )
+            if not concerned:
+                continue
+            modes = record.superseded_modes.get(dev_href)
+            events.append(
+                {
+                    "mrid": record.mrid.hex(),
+                    "program_href": record.program_href,
+                    "primacy": record.primacy,
+                    "state": record.state.value,
+                    "start": record.start,
+                    "duration": record.duration,
+                    "server_status_time": record.server_status_time,
+                    "creation_time": record.creation_time,
+                    "control": self._control_xml_of(record),
+                    "applied": dev_href in record.applied_devices,
+                    "rejected": dev_href in record.rejected_devices,
+                    "superseded": dev_href in record.superseded_devices,
+                    "superseded_modes": sorted(modes) if modes is not None else None,
+                    "opted_out": record.opted_out,
+                }
+            )
+        return {
+            "version": SNAPSHOT_VERSION,
+            "lfdi": lfdi.hex(),
+            "events": events,
+            "defaults": [
+                {"program_href": path, "mrid": mrid.hex(), "primacy": primacy}
+                for path, mrid, primacy in self._dderc_tracker.entries_for(lfdi)
+            ],
+            "comms_loss": {
+                "active": self._comms_loss.active,
+                "resume_after": self._comms_loss.resume_after_epoch,
+            },
+        }
+
+    def _persist(self) -> None:
+        """Save the snapshot of each EndDevice this process acts for that changed.
+
+        A no-op without a shared store. A store that fails is logged and
+        tried again at the next save; it never stops event processing.
+        """
+        if self._state_store is None:
+            return
+        for dev_href, edev in list(self._state.end_devices.items()):
+            if dev_href in self._released:
+                continue
+            try:
+                snapshot = self._device_snapshot(dev_href, edev.lfdi)
+                if self._saved.get(dev_href) == snapshot:
+                    continue
+                self._state_store.save_device(dev_href, snapshot)
+            except Exception:
+                logger.warning(
+                    "Could not save the event state of %s; will retry", dev_href, exc_info=True
+                )
+                continue
+            self._saved[dev_href] = snapshot
+
+    def load_devices(self, device_hrefs: Iterable[str]) -> int:
+        """Load the saved event state of EndDevices taken over from another process.
+
+        Merges each device's events into this processor: an event already held
+        here gains the device's applied, rejected and superseded marks; an
+        event not held here is created from the snapshot, with its saved
+        timing, and its activation or completion timer is scheduled by
+        :meth:`resume_devices`. Responses
+        already posted for the devices are counted as sent, the DefaultDERControl
+        last applied to each is remembered, and the loss-of-communications
+        resume boundary is kept. Returns how many snapshots were loaded.
+
+        Call before the rediscovery that adds the devices, so the events are
+        known when their controls are fetched, then :meth:`resume_devices`
+        after it.
+        """
+        if self._state_store is None:
+            return 0
+        loaded = 0
+        for dev_href in device_hrefs:
+            self._released.discard(dev_href)
+            self._saved.pop(dev_href, None)
+            snapshot = self._state_store.load_device(dev_href)
+            if not snapshot or snapshot.get("version") != SNAPSHOT_VERSION:
+                continue
+            lfdi = bytes.fromhex(snapshot["lfdi"])
+            for entry in snapshot.get("events", []):
+                self._merge_event(dev_href, entry)
+            for entry in snapshot.get("defaults", []):
+                self._dderc_tracker.record_application(
+                    lfdi, entry["program_href"], bytes.fromhex(entry["mrid"]), entry["primacy"]
+                )
+            resume_after = snapshot.get("comms_loss", {}).get("resume_after")
+            if resume_after is not None:
+                current = self._comms_loss.resume_after_epoch or 0
+                self._comms_loss.resume_after_epoch = max(current, int(resume_after))
+            for mrid_hex, status, at in self._state_store.responses(lfdi.hex()):
+                self._response_tracker.restore(
+                    bytes.fromhex(mrid_hex), ResponseCode(status), lfdi, int(at)
+                )
+            loaded += 1
+        return loaded
+
+    def _merge_event(self, dev_href: str, entry: dict[str, Any]) -> None:
+        """Merge one EndDevice's view of an event into this processor's record of it."""
+        from py20305.xml.serialization import from_xml
+
+        mrid = bytes.fromhex(entry["mrid"])
+        record = self._store.get(mrid)
+        created = record is None
+        if record is None:
+            derc = from_xml(entry["control"], Dercontrol1)
+            record = EventRecord(
+                mrid=mrid,
+                derc=derc,
+                program_href=entry["program_href"],
+                primacy=entry["primacy"],
+                state=EventState(entry["state"]),
+                start=entry["start"],
+                duration=entry["duration"],
+                server_status_time=entry["server_status_time"],
+                creation_time=entry["creation_time"],
+                opted_out=entry["opted_out"],
+            )
+            self._store.upsert(record)
+            raw_start = derc.interval.start.value
+            raw_duration = derc.interval.duration
+            self._rand_cache.seed(
+                mrid, (record.start - raw_start, record.duration - raw_duration), record.end
+            )
+        else:
+            record.opted_out = record.opted_out or entry["opted_out"]
+        if entry["applied"]:
+            record.applied_devices.add(dev_href)
+        if entry["rejected"]:
+            record.rejected_devices.add(dev_href)
+        if entry["superseded"]:
+            record.superseded_devices.add(dev_href)
+        if entry.get("superseded_modes") is not None:
+            held = record.superseded_modes.get(dev_href, frozenset())
+            record.superseded_modes[dev_href] = held | frozenset(entry["superseded_modes"])
+        running = record.state == EventState.ACTIVE and not record.opted_out
+        if running and entry["applied"] and not entry["superseded"]:
+            modes = get_active_mode_names(record.derc.dercontrol_base)
+            self._mode_tracker.register(dev_href, mrid, modes)
+        if created and not record.opted_out:
+            self._untimed[mrid] = record
+
+    async def resume_devices(self, device_hrefs: Iterable[str]) -> None:
+        """Apply running events to taken-over EndDevices that never received them.
+
+        For a device the previous process stopped acting for in the middle of
+        an activation: the event is active, but the device was neither told it
+        started nor told it was rejected. It gets the control now, and its
+        Response. A device already marked applied or rejected gets nothing, so
+        no control and no Response is sent twice. While in loss-of-communications
+        mode the event is opted out instead, as on entering that mode.
+
+        Not done for a program under a group lookup, whose dispatch goes to the
+        group's local devices rather than to the EndDevices named here.
+
+        Then schedules the timers of the events :meth:`load_devices` created.
+        They wait until now so an event does not activate before the devices
+        it applies to are mapped.
+        """
+        taken = set(device_hrefs)
+        for record in self._store.by_state(EventState.ACTIVE):
+            if record.opted_out or self._closed:
+                continue
+            pending = (set(self._unique_devices(record.program_href)) & taken) - (
+                record.applied_devices | record.rejected_devices | record.superseded_devices
+            )
+            if not pending:
+                continue
+            if self._group_local_lfdis(record.program_href) is not None:
+                logger.warning(
+                    "Event %s: not applying to taken-over devices under a group lookup",
+                    record.mrid.hex()[:8],
+                )
+                continue
+            if self._comms_loss.active:
+                await self._opt_out_event(record, from_state=EventState.ACTIVE.value)
+                continue
+            logger.info(
+                "Event %s: applying to %d taken-over device(s)", record.mrid.hex()[:8], len(pending)
+            )
+            await self._apply_and_respond(record, only=pending)
+        untimed, self._untimed = self._untimed, {}
+        for record in untimed.values():
+            if self._store.get(record.mrid) is not record or record.opted_out:
+                continue
+            if record.state == EventState.SCHEDULED:
+                self._timer_mgr.schedule_activation(
+                    record, self._activate, now_fn=self._now_fn_for(record.program_href)
+                )
+            elif record.state == EventState.ACTIVE:
+                self._timer_mgr.schedule_completion(
+                    record, self._complete, now_fn=self._now_fn_for(record.program_href)
+                )
+        self._persist()
+
+    def release_devices(self, device_hrefs: Iterable[str]) -> None:
+        """Stop acting for EndDevices another process will take over.
+
+        Saves their snapshots first, then stops writing them. An event that
+        concerns only released devices is forgotten here without a state
+        change, a Response or a write to a device: its timers are cancelled and
+        the taking-over process carries it on. An event that also concerns
+        devices this process keeps loses only the released devices' marks.
+        Call before the rediscovery that removes the devices.
+        """
+        released = set(device_hrefs)
+        self._persist()
+        self._released |= released
+        for dev_href in released:
+            self._saved.pop(dev_href, None)
+            edev = self._state.end_devices.get(dev_href)
+            if edev is not None:
+                self._dderc_tracker.clear_devices({edev.lfdi})
+        for record in self._store.values():
+            devices = set(self._unique_devices(record.program_href))
+            for dev_href in released:
+                self._mode_tracker.unregister(dev_href, record.mrid)
+            if devices and devices <= released:
+                self._timer_mgr.cancel(record.mrid)
+                self._store.remove(record.mrid)
+                self._control_xml.pop(record.mrid, None)
+                continue
+            record.applied_devices -= released
+            record.rejected_devices -= released
+            record.superseded_devices -= released
+            for dev_href in released:
+                record.superseded_modes.pop(dev_href, None)
+
     async def enter_comms_loss(self) -> None:
         """Opt out of every active event and revert devices to the planning limit.
 
@@ -1469,6 +1800,7 @@ class EventProcessor:
             self._audit_transition(record, EventState.ACTIVE.value, "opted_out")
         for record in active:
             await self._apply_dderc_fallback(record, clear_if_no_dderc=True)
+        self._persist()
 
     async def _opt_out_event(self, record: EventRecord, *, from_state: str | None) -> None:
         """Opt a single event out (comms-loss gate on activation/late discovery).

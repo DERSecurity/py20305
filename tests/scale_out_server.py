@@ -10,6 +10,7 @@ hand, so the client's parser is checked against text it did not produce.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -55,6 +56,10 @@ class FakeTreeServer:
     sub_deletes: list[str] = field(default_factory=list)
     sub_puts: list[str] = field(default_factory=list)
     next_sub: int = 1
+    #: GETs of this path wait for ``release`` after setting ``reached``.
+    hold: str | None = None
+    reached: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
 
     def program(self, device: int) -> int:
         return self.program_of.get(device, device)
@@ -152,6 +157,9 @@ class FakeTreeServer:
     async def _get(self, request: web.Request) -> web.Response:
         path = request.path
         self.requests.append(("GET", path))
+        if path == self.hold:
+            self.reached.set()
+            await self.release.wait()
         parts = path.strip("/").split("/")
         if path == "/dcap":
             return self._xml(self._dcap())

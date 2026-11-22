@@ -80,6 +80,14 @@ class EventStore:
     def get(self, mrid: bytes) -> EventRecord | None:
         return self._events.get(mrid)
 
+    def remove(self, mrid: bytes) -> None:
+        """Forget an event without a state change. An unknown mRID is not an error."""
+        self._events.pop(mrid, None)
+
+    def values(self) -> list[EventRecord]:
+        """Return every stored event, whatever its state."""
+        return list(self._events.values())
+
     def by_state(self, state: EventState) -> list[EventRecord]:
         return [r for r in self._events.values() if r.state == state]
 

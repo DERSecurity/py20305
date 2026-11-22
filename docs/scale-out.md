@@ -100,6 +100,84 @@ subscribe to the same resource at the same moment can both POST. Connect the
 processes one at a time, or make the store refuse a second active record for
 one resource.
 
+## Share the event state
+
+Give each process's client the same event state store:
+
+```python
+client = CsipClient(url, tls=tls, device_filter=mine, event_state_store=shared_events)
+```
+
+`shared_events` implements `py20305.events.shared_state.EventStateStore`. The
+client keeps in it, for each EndDevice it acts for:
+
+- a snapshot of the events the device is under: their state, their randomized
+  start and duration, whether the control was applied to the device or
+  rejected there, whether a higher-priority event superseded it there, and
+  whether it was opted out during a loss of communications;
+- the DefaultDERControl last applied to the device;
+- the loss-of-communications resume boundary, before which recovered events
+  are not resumed;
+- each Response posted for the device, recorded as it is posted.
+
+It also keeps the randomization offsets of each event, so an event whose
+DERProgram serves devices of several processes starts and ends at the same
+moment in all of them. Values are JSON types, so a store can write them to a
+database as they are.
+
+The store's concurrency rules are in its docstring. In short: a device's
+snapshot has one writer, the process acting for it; `claim_offsets` must be
+compare-and-set across processes; `record_response` only appends.
+
+Each process detects a loss of communications on its own, from its own
+requests to the server. The shared state carries what the detection did to a
+device (events opted out, the resume boundary), not the detection itself.
+
+## Move devices from one process to another
+
+To move EndDevices from process A to process B:
+
+```python
+# In process A
+a_devices.discard(hrefs=moving)
+await client_a.release_devices(moving)
+
+# In process B, once A has released them
+b_devices.add(hrefs=moving)
+await client_b.take_over_devices(moving)
+```
+
+`release_devices` saves the devices' snapshots, forgets the events that
+concern only them without posting a Response or writing to a device, and
+rediscovers without them. The subscriptions stay as they are.
+
+`take_over_devices` loads the snapshots, rediscovers so the devices' programs
+and controls are read from the server again, and then:
+
+- carries on each event the previous process handled, with its timing, and
+  posts no Response that was already posted for the device;
+- applies a running event to a device that was neither told it started nor
+  told it was rejected, as when the previous process stopped in the middle of
+  an activation;
+- starts the activation and completion timers of the events it loaded,
+  after the devices are mapped, so an event due while no process acted for
+  the device starts once, on the device;
+- handles a control the server added or changed while no process acted for
+  the device, or while the take-over ran: the rediscovery fetches it, and a
+  notification that arrives during the rediscovery is left to it.
+
+A process that stops without `release_devices`, by crashing, leaves the last
+snapshot it saved. Snapshots are saved after each pass over a program's
+controls and after each activation and completion, and each Response is
+recorded as it is posted, so what can repeat is narrow: a control applied in
+the moments before the process stopped can be applied again, never left
+unapplied, and a Response posted between its POST returning and its record
+being written can be posted again.
+
+Moving devices under a `group_lookup`, which fans one EndDevice out to
+several local devices, carries the event state over but does not apply a
+running event to devices that never received it.
+
 ## Receive notifications in one process, act on them in another
 
 The server sends every notification to the one notificationURI. Run the
@@ -144,9 +222,12 @@ client awaits it before every request to the server, each retry included.
 
 ## What the host provides
 
-- **Stores shared by every process.** The subscription store above.
+- **Stores shared by every process.** The subscription store and the event
+  state store above.
 - **An assignment of EndDevices to processes**, as each process's device
-  filter, and one process with the own-EndDevice work.
+  filter, and one process with the own-EndDevice work. When a process stops,
+  the host moves its devices to the others with `release_devices` and
+  `take_over_devices`.
 - **A notification queue** from the listener to the processes, when the
   listener runs in a process that does not act for every EndDevice.
 - **A shared request limiter**, if the server limits the client's request rate.
@@ -160,5 +241,6 @@ With none of these options, a client behaves exactly as it did before:
 | `SubscriptionManager(store=...)` | None | Records kept in a dict in the process |
 | `CsipClient(device_filter=...)` | None | Every EndDevice is walked and acted for |
 | `CsipClient(own_end_device=...)` | True | This process does all own-EndDevice work |
+| `CsipClient(event_state_store=...)` | None | Event state kept in this process only |
 | `NotificationServer(forward=...)` | None | Each notification is processed here, after the 201 |
 | `CsipClient(request_limiter=...)` | None | Requests are sent at once |
