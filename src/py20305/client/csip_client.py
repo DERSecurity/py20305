@@ -300,6 +300,11 @@ class CsipClient:
         self._on_structural_change = on_structural_change
         self._on_rediscovered: Callable[[], Awaitable[None]] | None = None
         self._on_device_removed = on_device_removed
+        #: The exception that ended the last failed rediscovery pass, or None.
+        self._rediscovery_error: Exception | None = None
+        #: The hrefs this process acted for when the running rediscovery began.
+        #: A lifecycle notification during the rediscovery is matched against it.
+        self._scope_before_rediscovery: set[str] = set()
         self._dcap_path = dcap_path
         #: LFDI hex -> expected registration PIN. Verified once during the
         #: initial connect() discovery (not on rediscovery). Empty/None
@@ -1656,8 +1661,11 @@ class CsipClient:
         them. A host can therefore deliver every notification to every process.
 
         Raises ``ValueError`` when the body is not a valid Notification. An
-        error while acting on it (a failed GET, for example) is raised to the
-        caller, so the host can keep the notification and retry it.
+        error while acting on it (a failed GET, or a failed rediscovery the
+        notification started) is raised to the caller, so the host can keep the
+        notification and retry it; a retry is not skipped as a duplicate. A
+        notification that arrives while a rediscovery is running is left to
+        that rediscovery and counts as acted on.
         """
         from py20305.models.sep.sep import Notification
         from py20305.subscription.notification_server import (
@@ -1680,7 +1688,7 @@ class CsipClient:
                 parsed.subscribed_resource or "<unknown>",
             )
             return False
-        return await self._handle_notification(parsed)
+        return await self._handle_notification(parsed, raise_failures=True)
 
     def acts_for_resource(self, href: str) -> bool:
         """Return whether a notification about ``href`` concerns this process.
@@ -1691,11 +1699,34 @@ class CsipClient:
         FunctionSetAssignments, for their DERPrograms with their DERControlLists
         and DefaultDERControls, and for the Pricing resources it reads. Also
         True while a rediscovery is running, because the discovered state is
-        being rebuilt then and the rediscovery deals with what arrives.
+        being rebuilt then and the rediscovery deals with what arrives. A
+        notification that reports a resource cancelled, moved, changed or
+        deleted is not left to a running rediscovery: the client matches it
+        against the EndDevices this process acted for when the rediscovery
+        began, and those it has found since. After a rediscovery that failed,
+        the hrefs this process acted for before it still count, so a
+        notification retried after the failure is not dropped.
         """
         if self._device_filter is None or self._rediscovery_lock.locked():
             return True
-        return href in self._scoped_resource_hrefs()
+        return href in self._scope()
+
+    def _scope(self) -> set[str]:
+        """Return the hrefs this process acts for, with the earlier scope when it applies.
+
+        The earlier scope applies while a rediscovery runs and after one that
+        failed, because the discovered state is then incomplete.
+        """
+        scope = self._scoped_resource_hrefs()
+        if self._rediscovery_lock.locked() or self._rediscovery_error is not None:
+            scope |= self._scope_before_rediscovery
+        return scope
+
+    def _acts_for_notification(self, href: str, status: int) -> bool:
+        """Return whether a notification with ``status`` about ``href`` concerns this process."""
+        if self._device_filter is None or status == STATUS_DEFAULT:
+            return self.acts_for_resource(href)
+        return href in self._scope()
 
     def _scoped_resource_hrefs(self) -> set[str]:
         """Return the hrefs a notification may name that concern this process."""
@@ -1720,10 +1751,14 @@ class CsipClient:
                 hrefs.add(rc_state.tti_list_href)
         return {href for href in hrefs if href}
 
-    async def _handle_notification(self, notification: object) -> bool:
+    async def _handle_notification(
+        self, notification: object, *, raise_failures: bool = False
+    ) -> bool:
         """Process a received IEEE 2030.5 notification.
 
         Returns False when the notification was not acted on.
+        ``raise_failures`` raises the error of a rediscovery the notification
+        started and that failed, instead of only reporting it.
 
         Routes STATUS_DEFAULT notifications based on subscribed_resource path:
         - DERControlList changes (/derc): re-poll DERPs (fast path)
@@ -1741,7 +1776,7 @@ class CsipClient:
         if mgr is None:
             return False
 
-        if not self.acts_for_resource(notification.subscribed_resource):
+        if not self._acts_for_notification(notification.subscribed_resource, notification.status):
             logger.debug(
                 "Ignoring notification for %s: no EndDevice this process acts for",
                 notification.subscribed_resource,
@@ -1802,7 +1837,16 @@ class CsipClient:
                     created_at=time.time(),
                 )
             )
-            await self._route_default_notification(notification.subscribed_resource, resource_type)
+            try:
+                await self._route_default_notification(
+                    notification.subscribed_resource,
+                    resource_type,
+                    raise_failures=raise_failures,
+                )
+            except Exception:
+                # Let a redelivery of this notification through the dedup window.
+                mgr.forget_notification(notification.subscribed_resource)
+                raise
         elif notification.status == STATUS_CANCELLED:
             # Server cancelled with no further info (rule n, status=1). Honour it:
             # stop treating the sub as active and DON'T auto-re-subscribe -- fall
@@ -1831,18 +1875,35 @@ class CsipClient:
                         new_resource_uri=notification.new_resource_uri,
                     )
                 )
-            if self._on_structural_change:
-                await self._on_structural_change()
-            else:
-                await self.trigger_rediscovery()
+            await self._rediscover_for_notification(raise_failures)
         elif notification.status == STATUS_DEFINITION_CHANGED:
             mgr.mark_cancelled(notification.subscription_uri)
             self._update_poll_suppression()
         elif notification.status == STATUS_RESOURCE_DELETED:
             mgr.mark_cancelled(notification.subscription_uri)
             self._update_poll_suppression()
-            await self._handle_resource_deleted(notification.subscribed_resource)
+            await self._handle_resource_deleted(
+                notification.subscribed_resource, raise_failures=raise_failures
+            )
         return True
+
+    async def _rediscover_for_notification(self, raise_failures: bool) -> None:
+        """Rediscover after a structural notification.
+
+        Calls the structural-change callback instead when one is set. With
+        ``raise_failures``, raises the error of a rediscovery pass that failed.
+        A call that joins a rediscovery already running returns at once: that
+        rediscovery runs again and handles the change.
+        """
+        if self._on_structural_change:
+            await self._on_structural_change()
+            return
+        joined = self._rediscovery_lock.locked()
+        if await self.trigger_rediscovery() or joined or not raise_failures:
+            return
+        if self._rediscovery_error is not None:
+            raise self._rediscovery_error
+        raise RuntimeError("rediscovery failed")
 
     def _is_structural(self, resource_path: str, resource_type: str | None = None) -> bool:
         """Classify a notification as structural (EndDevice/FSA -> rediscovery).
@@ -1922,22 +1983,24 @@ class CsipClient:
         return path.endswith("/tti") or path.endswith("/tp")
 
     async def _route_default_notification(
-        self, subscribed_resource: str, resource_type: str | None = None
+        self,
+        subscribed_resource: str,
+        resource_type: str | None = None,
+        *,
+        raise_failures: bool = False,
     ) -> None:
         """Route a STATUS_DEFAULT notification based on resource type.
 
         ``resource_type`` (the subscription's topology-derived type) drives the
         classification when known; otherwise the path heuristic is the fallback.
+        ``raise_failures`` raises the error of a rediscovery that failed.
         """
         if self._is_structural(subscribed_resource, resource_type):
             logger.info(
                 "Structural change notification for %s, triggering rediscovery",
                 subscribed_resource,
             )
-            if self._on_structural_change:
-                await self._on_structural_change()
-            else:
-                await self.trigger_rediscovery()
+            await self._rediscover_for_notification(raise_failures)
         else:
             # Skip re-poll if rediscovery is in progress — the device mapping
             # is in flux and process_controls would produce incorrect results.
@@ -1989,11 +2052,13 @@ class CsipClient:
             )
             await self._do_poll_derp()
 
-    async def _handle_resource_deleted(self, subscribed_resource: str) -> None:
+    async def _handle_resource_deleted(
+        self, subscribed_resource: str, *, raise_failures: bool = False
+    ) -> None:
         """Handle STATUS_RESOURCE_DELETED notification.
 
         If the deleted resource is an EndDevice, call the device-removal callback.
-        Otherwise trigger rediscovery.
+        Otherwise trigger rediscovery; ``raise_failures`` raises its error if it fails.
         """
         path = subscribed_resource.rstrip("/")
         parts = path.strip("/").split("/")
@@ -2007,10 +2072,7 @@ class CsipClient:
 
         # Other resource deletions trigger rediscovery
         logger.info("Resource deleted: %s, triggering rediscovery", subscribed_resource)
-        if self._on_structural_change:
-            await self._on_structural_change()
-        else:
-            await self.trigger_rediscovery()
+        await self._rediscover_for_notification(raise_failures)
 
     async def trigger_rediscovery(self) -> bool:
         """Re-run discovery and restart polling. Safe to call concurrently.
@@ -2056,6 +2118,8 @@ class CsipClient:
                     self._renewal_task = None
                 # Remember active programs before clearing state
                 previous_programs = set(self._state.der_programs.keys())
+                if self._device_filter is not None:
+                    self._scope_before_rediscovery = self._scoped_resource_hrefs()
                 # Signal that state is being rebuilt — event timers that fire
                 # during this window will wait until discover() repopulates it.
                 self._state_ready.clear()
@@ -2152,6 +2216,7 @@ class CsipClient:
                     for href in list(self._state.der_programs):
                         await self._event_processor.process_controls(href)
                     self._start_polls()
+                    self._rediscovery_error = None
                     logger.info("Rediscovery complete")
                 except Exception as exc:
                     # Re-arm the scheduler so the connectivity heartbeat (and polls)
@@ -2171,6 +2236,7 @@ class CsipClient:
                         details={"error": str(exc)},
                         exc_info=True,
                     )
+                    self._rediscovery_error = exc
                     self._start_polls()
                     return False
                 if not self._rediscovery_pending:

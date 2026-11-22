@@ -1232,6 +1232,14 @@ class SubscriptionManager:
         self._dedup_cache[resource_href] = now
         return False
 
+    def forget_notification(self, resource_href: str) -> None:
+        """Forget that a notification for ``resource_href`` was seen.
+
+        Called when acting on it failed, so a redelivery within the dedup
+        window is processed rather than skipped as a duplicate.
+        """
+        self._dedup_cache.pop(resource_href, None)
+
     def record_notification_ancestry(self, resource_href: str) -> None:
         """Record program-scope parent paths in dedup cache after a targeted fetch.
 

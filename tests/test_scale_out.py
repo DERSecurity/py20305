@@ -17,6 +17,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from py20305.client.csip_client import CsipClient
+from py20305.client.errors import Sep2ConnectionError
 from py20305.client.http import Sep2Client
 from py20305.client.request_budget import RequestLimiter
 from py20305.client.scope import DeviceSet
@@ -354,6 +355,71 @@ class TestProcessNotification:
             await b.shutdown()
             await a.shutdown()
 
+    async def test_a_failed_rediscovery_is_raised_and_the_notification_can_be_retried(
+        self, aiohttp_server, monkeypatch: pytest.MonkeyPatch
+    ):
+        fake = FakeTreeServer(devices=2)
+        base_url = await _serve(aiohttp_server, fake)
+        store = MemorySubscriptionStore()
+        a = _process(base_url, store, [0], own=True)
+        b = _process(base_url, store, [1], own=False)
+        try:
+            await a.connect()
+            await b.connect()
+            sub = {s.subscribed_resource: s.subscription_uri for s in store.values()}
+            body = notification_xml("/edev/1/fsa", sub["/edev/1/fsa"])
+            discover = AsyncMock(side_effect=Sep2ConnectionError("server unreachable"))
+            monkeypatch.setattr("py20305.client.csip_client.discover", discover)
+
+            with pytest.raises(Sep2ConnectionError):
+                await b.process_notification(body)
+
+            monkeypatch.undo()
+            before = fake.gets("/edev/1/fsa")
+
+            assert await b.process_notification(body) is True
+            assert fake.gets("/edev/1/fsa") > before
+        finally:
+            await b.shutdown()
+            await a.shutdown()
+
+    async def test_a_deletion_of_another_processes_device_during_rediscovery_is_ignored(
+        self, aiohttp_server
+    ):
+        fake = FakeTreeServer(devices=2)
+        base_url = await _serve(aiohttp_server, fake)
+        store = MemorySubscriptionStore()
+        removed: list[str] = []
+
+        async def on_removed(href: str) -> None:
+            removed.append(href)
+
+        b = CsipClient(
+            base_url,
+            reconcile_enabled=False,
+            device_filter=DeviceSet(hrefs=["/edev/1"]),
+            own_end_device=False,
+            on_device_removed=on_removed,
+        )
+        b.attach_subscriptions(SubscriptionManager(b.http, NOTIFY, store=store))
+        try:
+            await b.connect()
+            fake.hold = "/edev/1/fsa"
+            rediscovery = asyncio.ensure_future(b.trigger_rediscovery())
+            await fake.reached.wait()
+
+            acted = await b.process_notification(
+                notification_xml("/edev/0", f"{SUB_LIST}/1", status=4)
+            )
+            fake.release.set()
+            await rediscovery
+
+            assert acted is False
+            assert removed == []
+        finally:
+            fake.release.set()
+            await b.shutdown()
+
     async def test_an_invalid_body_is_rejected(self):
         client = CsipClient("https://server.example.com")
         client.attach_subscriptions(SubscriptionManager(client.http, NOTIFY))
@@ -457,6 +523,31 @@ class TestRequestLimiter:
             await get
 
         assert fake.requests == [("GET", "/dcap")]
+
+    @pytest.mark.parametrize("error", [OSError("store unavailable"), TimeoutError("no slot")])
+    async def test_a_limiter_failure_reaches_the_caller_unchanged(
+        self, aiohttp_server, error: Exception
+    ):
+        fake = FakeTreeServer(devices=1)
+        base_url = await _serve(aiohttp_server, fake)
+        limiter = MagicMock()
+        limiter.acquire = AsyncMock(side_effect=error)
+
+        async with Sep2Client(base_url, request_limiter=limiter) as http:
+            alive = http.server_alive
+            with pytest.raises(type(error)) as raised:
+                await http.get("/dcap", DeviceCapability)
+            with pytest.raises(type(error)):
+                await http.delete("/edev/0/sub/1")
+            with pytest.raises(type(error)):
+                await http.get_raw(f"{base_url}/dcap")
+
+            assert raised.value is error
+            assert limiter.acquire.await_count == 3
+            assert http.server_alive is alive
+            assert http.last_error is None
+
+        assert fake.requests == []
 
     async def test_without_a_limiter_requests_go_straight_out(self, aiohttp_server):
         fake = FakeTreeServer(devices=1)

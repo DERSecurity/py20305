@@ -37,6 +37,8 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
+from py20305.client.request_budget import LimiterFailure
+
 if TYPE_CHECKING:
     from py20305.client.request_budget import RequestLimiter
 
@@ -232,7 +234,10 @@ class _GatedRequestContext:
         if self._simulation.active:
             raise SimulatedTransportError(SIMULATED_FAILURE_MESSAGE)
         if self._limiter is not None:
-            await self._limiter.acquire()
+            try:
+                await self._limiter.acquire()
+            except Exception as exc:
+                raise LimiterFailure(exc) from exc
             # A simulation can start while the request waits for its turn.
             if self._simulation.active:
                 raise SimulatedTransportError(SIMULATED_FAILURE_MESSAGE)

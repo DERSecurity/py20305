@@ -37,6 +37,7 @@ from py20305.client.errors import (
     Sep2TlsError,
 )
 from py20305.client.exchange import ExchangeScope, NullScope, endpoint
+from py20305.client.request_budget import LimiterFailure
 from py20305.client.retry import RetryPolicy, with_retry
 from py20305.client.timebase import ServerTimebase
 from py20305.client.tls import (
@@ -890,8 +891,15 @@ class Sep2Client:
         self._silence_simulated = None
 
     async def _retry_observed(self, do_fn: Callable[[], Awaitable[T]]) -> T:
-        """Run one logical request through retry."""
-        return await with_retry(self._retry, do_fn, peer=self._server_host)
+        """Run one logical request through retry.
+
+        An exception from the request limiter is raised to the caller as the
+        limiter raised it, without a retry: no request reached the server.
+        """
+        try:
+            return await with_retry(self._retry, do_fn, peer=self._server_host)
+        except LimiterFailure as failure:
+            raise failure.error from None
 
     async def _send_tracked(self, do_fn: Callable[[], Awaitable[T]]) -> T:
         """Run a non-GET request via retry, recording connectivity health once
@@ -1103,6 +1111,8 @@ class Sep2Client:
                         "headers": headers,
                         "body": body,
                     }
+            except LimiterFailure as failure:
+                raise failure.error from None
             except (aiohttp.ClientError, OSError) as exc:
                 exchange.failed(exc)
                 self._record_contact(reachable=False, error=exc)
@@ -1177,6 +1187,8 @@ class Sep2Client:
                         "headers": resp_headers,
                         "body": resp_body,
                     }
+            except LimiterFailure as failure:
+                raise failure.error from None
             except (aiohttp.ClientError, OSError) as exc:
                 exchange.failed(exc)
                 self._record_traffic_response(verb, path, status=None, error=str(exc))

@@ -237,7 +237,13 @@ It returns False, and does nothing, for a notification about a resource that
 concerns no EndDevice this process acts for (`client.acts_for_resource(href)`
 says which do), so the host can deliver every notification to every process.
 It raises `ValueError` for a body that is not a Notification, and passes on any
-error from acting on it, so the host can keep the notification and retry.
+error from acting on it, a failed rediscovery included, so the host can keep
+the notification and retry; the retry is not skipped as a duplicate. A
+notification that arrives while a rediscovery runs is left to that
+rediscovery, except one that reports a resource cancelled, moved or deleted:
+that one is matched against the EndDevices the process acted for when the
+rediscovery began, so a process never acts on the deletion of another
+process's EndDevice.
 
 ## Share the request budget
 
@@ -251,6 +257,9 @@ client = CsipClient(url, tls=tls, request_limiter=shared_budget)
 `shared_budget` implements `py20305.client.request_budget.RequestLimiter`: an
 `async def acquire()` that returns when one more request may be sent. The
 client awaits it before every request to the server, each retry included.
+An exception from `acquire` reaches the code that made the request as it was
+raised: it is not retried, and it does not count as a failure to reach the
+server.
 
 ## What the host provides
 

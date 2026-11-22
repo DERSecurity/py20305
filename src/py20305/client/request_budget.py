@@ -17,6 +17,21 @@ from typing import Protocol, runtime_checkable
 __all__ = ["RequestLimiter"]
 
 
+class LimiterFailure(Exception):  # noqa: N818 -- a carrier, not an error the caller sees
+    """Carry an exception raised by :meth:`RequestLimiter.acquire` past the transport handling.
+
+    The HTTP layer retries transport failures and counts them against the
+    server's health. A limiter that fails has sent nothing to the server, so
+    its exception is wrapped in this class, which no transport handler
+    catches, and unwrapped where the request returns to its caller.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(str(error))
+        #: The exception ``acquire`` raised.
+        self.error = error
+
+
 @runtime_checkable
 class RequestLimiter(Protocol):
     """Decides when the next request to the server may be sent."""
