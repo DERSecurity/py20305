@@ -936,13 +936,18 @@ async def refresh_der_controls(client: Sep2Client, state: DiscoveredState) -> No
 
 
 async def refresh_der_controls_for_program(
-    client: Sep2Client, state: DiscoveredState, program_href: str
+    client: Sep2Client, state: DiscoveredState, program_href: str, *, strict: bool = False
 ) -> bool:
     """Re-fetch DERControl list and DefaultDERControl for a single program.
 
     Returns True if the program was found and refreshed, False if
     *program_href* is not in state (e.g. removed between notification
     and fetch).
+
+    A failed fetch is logged and skipped, and the call still returns True, so
+    a poll carries on. ``strict`` raises it instead, for a caller that hands
+    the failure back to whoever asked, so the request can be retried. A
+    DefaultDERControl the server reports absent (404, 204) is not a failure.
     """
     derp_state = state.der_programs.get(program_href)
     if derp_state is None:
@@ -966,8 +971,12 @@ async def refresh_der_controls_for_program(
             else:
                 raise
         except Sep2PayloadError as exc:
+            if strict:
+                raise
             logger.warning("Skipping DDERC targeted refresh at %s: %s", dderc_href, exc)
         except Exception:
+            if strict:
+                raise
             logger.warning(
                 "Failed to parse DDERC at %s during targeted refresh, skipping",
                 dderc_href,
@@ -986,7 +995,7 @@ async def refresh_der_controls_for_program(
         try:
             derc_pages = await client.get_list(derc_list_href, DercontrolList)
         except Sep2ProtocolError as exc:
-            if _paging_fault(exc):
+            if _paging_fault(exc) and not strict:
                 logger.error(
                     "DERC list at %s stopped answering between pages (%s) during targeted refresh",
                     derc_list_href,
@@ -995,9 +1004,13 @@ async def refresh_der_controls_for_program(
                 return True
             raise
         except Sep2PayloadError as exc:
+            if strict:
+                raise
             logger.warning("Skipping DERControl targeted refresh: %s", exc)
             return True
         except Exception:
+            if strict:
+                raise
             logger.warning(
                 "Failed to parse DERControl list at %s during targeted refresh, skipping",
                 derc_list_href,

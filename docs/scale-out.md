@@ -247,7 +247,8 @@ and controls are read from the server again, and then:
   notification that arrives during the rediscovery is left to it.
 
 It returns False, and resumes nothing, when no rediscovery pass that started
-after the call completed, or when the rediscovery did not find every device.
+after the call completed, when the last pass failed, or when the rediscovery
+did not find every device.
 Call it again to complete the take-over.
 
 A process that stops without `release_devices`, by crashing, leaves the last
@@ -289,8 +290,9 @@ It returns False, and does nothing, for a notification about a resource that
 concerns no EndDevice this process acts for (`client.acts_for_resource(href)`
 says which do), so the host can deliver every notification to every process.
 It raises `ValueError` for a body that is not a Notification, and passes on any
-error from acting on it, a failed rediscovery included, so the host can keep
-the notification and retry; the retry is not skipped as a duplicate. A
+error from acting on it, a failed rediscovery or DERControl fetch included,
+so the host can keep the notification and retry; the retry is not skipped as
+a duplicate. A
 notification that arrives while a rediscovery runs is left to that
 rediscovery, except one that reports a resource cancelled, moved or deleted:
 that one is matched against the EndDevices the process acted for when the

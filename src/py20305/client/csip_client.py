@@ -1279,12 +1279,15 @@ class CsipClient:
         await refresh_tariffs(self._http, self._state)
         await self._tariff_processor.process_tariffs()
 
-    async def _do_poll_derp_targeted(self, subscribed_resource: str) -> bool:
+    async def _do_poll_derp_targeted(
+        self, subscribed_resource: str, *, strict: bool = False
+    ) -> bool:
         """Fetch controls for the single program that owns *subscribed_resource*.
 
         Returns True if a targeted refresh was performed, False if the
         resource could not be resolved to a known program (caller should
-        fall back to full re-poll).
+        fall back to full re-poll). ``strict`` raises a failed fetch instead
+        of skipping it.
         """
         program_href = self._state.find_program_for_resource(subscribed_resource)
         if program_href is None:
@@ -1299,7 +1302,9 @@ class CsipClient:
             program_href,
             subscribed_resource,
         )
-        found = await refresh_der_controls_for_program(self._http, self._state, program_href)
+        found = await refresh_der_controls_for_program(
+            self._http, self._state, program_href, strict=strict
+        )
         if found:
             await self._event_processor.process_controls(program_href)
         return found
@@ -2043,7 +2048,12 @@ class CsipClient:
                 mgr = self._subscription_manager
                 if mgr:
                     mgr.record_notification_ancestry(subscribed_resource)
-                if await self._do_poll_derp_targeted(subscribed_resource):
+                targeted = (
+                    self._do_poll_derp_targeted(subscribed_resource, strict=True)
+                    if raise_failures
+                    else self._do_poll_derp_targeted(subscribed_resource)
+                )
+                if await targeted:
                     return
                 logger.info(
                     "Targeted fetch failed for %s, falling back to full re-poll",
@@ -2124,7 +2134,9 @@ class CsipClient:
                     self._renewal_task = None
                 # Remember active programs before clearing state
                 previous_programs = set(self._state.der_programs.keys())
-                if self._device_filter is not None:
+                # Taken only from state a pass rebuilt: after a failed pass the
+                # state is incomplete, and the earlier scope still applies.
+                if self._device_filter is not None and self._rediscovery_error is None:
                     self._scope_before_rediscovery = self._scoped_resource_hrefs()
                 # Signal that state is being rebuilt — event timers that fire
                 # during this window will wait until discover() repopulates it.
@@ -2300,7 +2312,8 @@ class CsipClient:
         reports while it runs.
 
         Returns False when no rediscovery pass that started after this call
-        completed, or the rediscovery did not find every device; nothing is
+        completed, when the last pass failed, or when the rediscovery did not
+        find every device; nothing is
         resumed then, and the call can be made again to complete the take-over.
         Without an event state store the devices are rediscovered and treated
         as new, as a fresh client would treat them.
@@ -2313,7 +2326,7 @@ class CsipClient:
         # wait for that pass, so the devices are mapped before they are resumed.
         async with self._rediscovery_lock:
             pass
-        if self._last_completed_pass <= started_before:
+        if self._last_completed_pass <= started_before or self._rediscovery_error is not None:
             logger.warning(
                 "Take-over incomplete: the rediscovery failed; running events are not "
                 "applied to the EndDevices taken over yet"

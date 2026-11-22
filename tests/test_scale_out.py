@@ -383,6 +383,49 @@ class TestProcessNotification:
             await b.shutdown()
             await a.shutdown()
 
+    async def test_a_failed_control_list_fetch_is_raised(
+        self, aiohttp_server, monkeypatch: pytest.MonkeyPatch
+    ):
+        fake = FakeTreeServer(devices=2)
+        base_url = await _serve(aiohttp_server, fake)
+        store = MemorySubscriptionStore()
+        a = _process(base_url, store, [0], own=True)
+        b = _process(base_url, store, [1], own=False)
+        try:
+            await a.connect()
+            await b.connect()
+            sub = {s.subscribed_resource: s.subscription_uri for s in store.values()}
+            monkeypatch.setattr(
+                b.http, "get_list", AsyncMock(side_effect=Sep2ConnectionError("unreachable"))
+            )
+
+            with pytest.raises(Sep2ConnectionError):
+                await b.process_notification(notification_xml("/derp/1/derc", sub["/derp/1/derc"]))
+        finally:
+            monkeypatch.undo()
+            await b.shutdown()
+            await a.shutdown()
+
+    async def test_the_scope_survives_two_failed_rediscoveries(
+        self, aiohttp_server, monkeypatch: pytest.MonkeyPatch
+    ):
+        fake = FakeTreeServer(devices=2)
+        base_url = await _serve(aiohttp_server, fake)
+        b = _process(base_url, MemorySubscriptionStore(), [1], own=False)
+        try:
+            await b.connect()
+            discover = AsyncMock(side_effect=Sep2ConnectionError("server unreachable"))
+            monkeypatch.setattr("py20305.client.csip_client.discover", discover)
+
+            assert not await b.trigger_rediscovery()
+            assert not await b.trigger_rediscovery()
+
+            assert b.acts_for_resource("/edev/1/fsa")
+            assert not b.acts_for_resource("/edev/0/fsa")
+        finally:
+            monkeypatch.undo()
+            await b.shutdown()
+
     async def test_a_deletion_of_another_processes_device_during_rediscovery_is_ignored(
         self, aiohttp_server
     ):

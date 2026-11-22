@@ -20,7 +20,8 @@ from py20305.events.dispatch import NullDispatcher
 from py20305.events.processor import EventProcessor
 from py20305.events.response import ResponseCode
 from py20305.events.shared_state import MemoryEventStateStore
-from py20305.events.state_machine import EventState
+from py20305.events.state_machine import EventRecord, EventState
+from py20305.events.supersession import compute_supersession
 from py20305.models.sep.sep import (
     DateTimeInterval,
     Dercontrol1,
@@ -269,3 +270,36 @@ class TestPerDeviceRandomization:
             assert record.window(DEV_2) == (start + 400, start + 400 + 3600)
         finally:
             await b.shutdown()
+
+
+def _record(mrid: int, primacy: int, window: tuple[int, int]) -> EventRecord:
+    derc = _derc(mrid, window[0])
+    return EventRecord(
+        mrid=derc.m_rid.value,
+        derc=derc,
+        program_href=f"/derp/{mrid}",
+        primacy=primacy,
+        state=EventState.SCHEDULED,
+        start=90,
+        duration=20,
+        server_status_time=1,
+        device_windows={DEV_1: window},
+    )
+
+
+class TestPerDeviceSupersession:
+    def test_an_empty_device_window_supersedes_nothing(self):
+        empty = _record(1, primacy=1, window=(100, 100))
+        running = _record(2, primacy=2, window=(90, 110))
+
+        results = compute_supersession([empty, running], {"/derp/1": {DEV_1}, "/derp/2": {DEV_1}})
+
+        assert results == []
+
+    def test_overlapping_device_windows_supersede(self):
+        winner = _record(1, primacy=1, window=(95, 105))
+        loser = _record(2, primacy=2, window=(90, 110))
+
+        results = compute_supersession([winner, loser], {"/derp/1": {DEV_1}, "/derp/2": {DEV_1}})
+
+        assert [r.superseded_mrid for r in results] == [loser.mrid]

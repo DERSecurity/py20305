@@ -252,6 +252,39 @@ class TestHandover:
         finally:
             await b.client.shutdown()
 
+    async def test_a_take_over_fails_when_a_later_coalesced_pass_fails(
+        self, aiohttp_server, monkeypatch
+    ):
+        events = MemoryEventStateStore()
+        fake = FakeTreeServer(devices=2, controls={1: [Control(C1, start=_now() - 5)]})
+        a, b = await _two_processes(aiohttp_server, fake, events)
+        try:
+            await a.client.poll_now()
+            a.devices.discard(hrefs=["/edev/1"])
+            await a.client.release_devices(["/edev/1"])
+            await a.client.shutdown()
+            b.devices.add(hrefs=["/edev/1"])
+            from py20305.client import csip_client
+
+            real_refresh = csip_client.refresh_der_controls
+            calls = 0
+
+            async def refresh(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    # A structural change arrives during the first pass.
+                    b.client._rediscovery_pending = True
+                    return await real_refresh(*args, **kwargs)
+                raise RuntimeError("DERControl list unreadable")
+
+            monkeypatch.setattr(csip_client, "refresh_der_controls", refresh)
+
+            assert not await b.client.take_over_devices(["/edev/1"])
+        finally:
+            monkeypatch.undo()
+            await b.client.shutdown()
+
     async def test_a_take_over_whose_rediscovery_fails_resumes_nothing(
         self, aiohttp_server, monkeypatch
     ):
@@ -632,6 +665,56 @@ class TestHandoverEdgeCases:
             assert snapshot["events"][0]["applied"] is True
         finally:
             dispatcher.release.set()
+            await a.shutdown()
+
+    async def test_an_event_completed_here_resumes_for_a_device_still_in_its_window(self):
+        store = MemoryEventStateStore()
+        lfdi_1, lfdi_2 = b"\x01" * 20, b"\x02" * 20
+        derc = _derc(1, _now() - 100)
+        entry = _entry(derc, "active", applied=True, started=True)
+        entry["window"] = [_now() - 100, _now() + 3600]
+        store.save_device("/edev/1", _snapshot(lfdi_1, [entry]))
+        state = _state("/edev/2", lfdi_2, [derc])
+        _add_device(state, "/edev/1", lfdi_1)
+        b = _processor(state, store)
+        record = EventRecord(
+            mrid=derc.m_rid.value,
+            derc=derc,
+            program_href="/derp/1",
+            primacy=1,
+            state=EventState.COMPLETED,
+            start=_now() - 100,
+            duration=90,
+            server_status_time=1,
+            applied_devices={"/edev/2"},
+            device_windows={"/edev/2": (_now() - 100, _now() - 10)},
+            started_devices={"/edev/2"},
+            ended_devices={"/edev/2"},
+        )
+        b._store.upsert(record)
+        try:
+            b.load_devices(["/edev/1"])
+            await b.resume_devices(["/edev/1"])
+
+            assert record.state is EventState.ACTIVE
+            assert b._timer_mgr.has_pending(record.mrid)
+            b._http.post.assert_not_awaited()
+        finally:
+            await b.shutdown()
+
+    async def test_a_device_released_and_taken_back_without_a_store_is_dispatched(self):
+        dispatcher = RecordingDispatcher()
+        state = _state("/edev/1", b"\x01" * 20, [])
+        a = EventProcessor(_http(), state, dispatcher, asyncio.Event())
+        try:
+            await a.release_devices(["/edev/1"])
+            a.load_devices(["/edev/1"])
+            state.der_programs["/derp/1"].der_controls = [_derc(1, _now() - 5)]
+
+            await a.process_controls("/derp/1")
+
+            assert dispatcher.controls == [("/edev/1", (b"\x01" * 16).hex().upper())]
+        finally:
             await a.shutdown()
 
     async def test_a_successive_events_adjusted_start_is_the_shared_one(self):

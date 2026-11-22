@@ -76,8 +76,12 @@ def _time_overlaps(a: EventRecord, b: EventRecord) -> bool:
 
 
 def _windows_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
-    """Check if two half-open ``(start, end)`` windows overlap."""
-    return a[0] < b[1] and b[0] < a[1]
+    """Check if two half-open ``(start, end)`` windows overlap.
+
+    An empty window, such as a late start capped at the event's end, holds no
+    time and overlaps nothing.
+    """
+    return a[0] < a[1] and b[0] < b[1] and a[0] < b[1] and b[0] < a[1]
 
 
 def compute_supersession(

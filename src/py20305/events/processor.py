@@ -1994,11 +1994,13 @@ class EventProcessor:
         known when their controls are fetched, then :meth:`resume_devices`
         after it.
         """
+        hrefs = list(device_hrefs)
+        # This process acts for the devices again, with a store or without one.
+        self._released.difference_update(hrefs)
         if self._state_store is None:
             return 0
         loaded = 0
-        for dev_href in device_hrefs:
-            self._released.discard(dev_href)
+        for dev_href in hrefs:
             self._saved.pop(dev_href, None)
             self._ledger_pending.add(dev_href)
             self._awaiting_resume.add(dev_href)
@@ -2057,13 +2059,24 @@ class EventProcessor:
         else:
             incoming = EventState(entry["state"])
             if (
-                record.state == EventState.SUPERSEDED
+                record.state in (EventState.SUPERSEDED, EventState.COMPLETED)
                 and incoming in (EventState.SCHEDULED, EventState.ACTIVE)
                 and not entry["superseded"]
+                and not entry.get("ended")
             ):
-                # Superseded here only on this process's devices: the incoming
-                # device still runs the event, so it keeps its timers and its
-                # completion. The local devices stay in superseded_devices.
+                # Superseded or completed here only on this process's devices:
+                # the incoming device's own window is still open, so the event
+                # keeps its timers and its completion for that device. The local
+                # devices stay superseded, or are marked ended, so they are not
+                # told again how the event ended on them.
+                if record.state == EventState.COMPLETED:
+                    local = (
+                        set(record.device_windows)
+                        | record.applied_devices
+                        | record.rejected_devices
+                    )
+                    record.started_devices |= local
+                    record.ended_devices |= local
                 record.state = incoming
             if entry["opted_out"] and not record.opted_out:
                 # Opted out on the incoming device only. The event goes on for
