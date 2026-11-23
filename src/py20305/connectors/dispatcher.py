@@ -417,7 +417,7 @@ class ConnectorDispatcher:
 
         refused: list[str] = []
         for method_name, params in translations:
-            method, reason = self._control_support(connector, method_name)
+            method, reason = self.control_support(connector, method_name)
             if method is not None:
                 logger.debug("  %s.%s(%s)", connector.connector_name, method_name, params)
                 applied = await self._apply_one(
@@ -642,7 +642,7 @@ class ConnectorDispatcher:
         if connector is None:
             raise ConnectorError(f"no connector for LFDI {lfdi}")
         method_name = f"update_{control}"
-        method, _reason = self._control_support(connector, method_name)
+        method, _reason = self.control_support(connector, method_name)
         if method is None:
             raise ConnectorError(f"connector for {lfdi} does not implement {method_name}")
         applied = await self._apply_one(
@@ -727,7 +727,7 @@ class ConnectorDispatcher:
         translations = translate_default_controls(dderc, curves)
         logger.debug("Applying DDERC fallback to %s (%d mode(s))", label, len(translations))
         for method_name, params in translations:
-            method, reason = self._control_support(connector, method_name)
+            method, reason = self.control_support(connector, method_name)
             if method is not None:
                 await self._apply_one(
                     method,
@@ -883,10 +883,10 @@ class ConnectorDispatcher:
         )
 
     @staticmethod
-    def _control_support(
-        connector: BaseConnector, method_name: str
+    def control_support(
+        connector: object, method_name: str
     ) -> tuple[Callable[[dict[str, Any]], Any] | None, str | None]:
-        """``(bound method, reason)``. ``reason`` is None when implemented.
+        """Return ``(bound method, reason)``. ``reason`` is None when implemented.
 
         ``BaseConnector`` declares every ``update_*`` method as a concrete method that
         return ``None``, so ``getattr`` finds one whether or not the connector
@@ -1063,7 +1063,7 @@ class ConnectorDispatcher:
             if entry is not None:
                 calls.setdefault(entry[0], entry[1])
         for method_name, params in calls.items():
-            method, _reason = self._control_support(connector, method_name)
+            method, _reason = self.control_support(connector, method_name)
             if method is None:
                 continue
             logger.debug("  %s: %s disabled at event end", label, method_name)
@@ -1121,7 +1121,7 @@ class ConnectorDispatcher:
             # any other write. Taking an inherited no-op for an implementation
             # would file twenty commands that reached no register, for a device
             # that implements a handful of modes.
-            method, _reason = self._control_support(connector, method_name)
+            method, _reason = self.control_support(connector, method_name)
             if method is not None:
                 await self._apply_one(
                     method,

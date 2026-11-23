@@ -143,9 +143,11 @@ recently observed. An observation older than the staleness threshold
 if every observation is that old, the most recent one answers, and
 `age_seconds` shows how old it is. `spread_seconds` is the largest difference
 between the FSAs' offsets, so a consumer can refuse a reading when the head-end
-is inconsistent with itself. It is `null` for a global reading and when only
-one FSA was observed. A global observation always wins when one exists. An FSA the
-server stops listing is forgotten, so it cannot answer or widen the spread.
+is inconsistent with itself. While any observation is fresh, only fresh ones
+count toward it. It is `null` for a global reading and when only one FSA was
+observed. A global observation always wins when one exists. An FSA the server
+stops listing is forgotten, so it cannot answer or widen the spread. An FSA list
+that fails to read during rediscovery forgets nothing.
 
 ### When there is no answer
 

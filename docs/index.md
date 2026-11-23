@@ -50,7 +50,8 @@ pass to a monitoring system.
   (`https://csipaus.org/ns`). Once discovery detects CSIP-AUS, the HTTP client
   writes the extensions with no further setting, and each discovery follows
   what the server declares now. Setting `Sep2Client.csip_aus_mode` to `True` or
-  `False`, or listing `extensions` in the configuration, overrides detection.
+  `False`, or listing `extensions` in the configuration, overrides detection;
+  setting it to `None` follows discovery again.
   `doeModesSupported` and `doeModesEnabled` default to the DOE limits the
   connector implements.
 

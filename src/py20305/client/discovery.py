@@ -502,6 +502,9 @@ async def discover(
             for registration verification.
         dcap_path: Path to DeviceCapability resource (default: /dcap).
     """
+    # Kept for an EndDevice whose FSA list fails to read: the FSAs it named
+    # before are still the best knowledge of what it is assigned.
+    previous_fsa_hrefs = {href: set(fsas) for href, fsas in state.previous_fsa_hrefs.items()}
     state.clear()
 
     # 1. Device Capability (with raw body for CSIP-AUS detection)
@@ -656,6 +659,7 @@ async def discover(
 
             # 5b. FSA list (optional; server may advertise link without resource)
             fsa_href = _extract_href(edev.function_set_assignments_list_link)
+            fsa_list_read = True
             if fsa_href:
                 try:
                     fsa_pages = await client.get_list(fsa_href, FunctionSetAssignmentsList)
@@ -667,6 +671,7 @@ async def discover(
                             exc.status_code,
                         )
                         fsa_pages = []
+                        fsa_list_read = False
                     else:
                         raise
                 for fsa_page in fsa_pages:
@@ -764,10 +769,15 @@ async def discover(
                         else:
                             raise
 
-            # Gap 3: snapshot current FSA hrefs for removal detection on next poll
-            state.previous_fsa_hrefs[edev_href] = {
-                fsa.href for fsa in edev_state.fsa_list if fsa.href
-            }
+            # Snapshot the FSA hrefs for removal detection on the next poll. When
+            # the list did not read through, keep the previous snapshot: the
+            # unread list may be the one that names those FSAs.
+            if fsa_list_read:
+                state.previous_fsa_hrefs[edev_href] = {
+                    fsa.href for fsa in edev_state.fsa_list if fsa.href
+                }
+            elif edev_href in previous_fsa_hrefs:
+                state.previous_fsa_hrefs[edev_href] = previous_fsa_hrefs[edev_href]
 
             # Verify registration PIN if configured. Gate the fetch on map
             # membership so EndDevices without a configured PIN don't incur an
@@ -795,8 +805,10 @@ async def discover(
     _set_time_poll_rate(state)
 
     # Observations of FSAs the server stopped advertising are of no further use.
+    # The snapshot holds each device's FSAs as read now, or its previous FSAs
+    # when its list did not read through, so a failed read prunes nothing.
     client.timebase.retain_fsas(
-        {fsa.href for edev in state.end_devices.values() for fsa in edev.fsa_list if fsa.href}
+        {href for hrefs in state.previous_fsa_hrefs.values() for href in hrefs}
     )
 
     register_device_prefixes(client, state)

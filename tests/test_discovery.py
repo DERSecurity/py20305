@@ -2602,6 +2602,23 @@ async def test_a_csip_aus_flag_forced_by_the_caller_survives_discovery_and_redis
 
 
 @pytest.mark.asyncio
+async def test_assigning_none_to_csip_aus_mode_follows_discovery_again():
+    bodies = [_PLAIN_DCAP]
+    client = _http_client_serving(bodies)
+    client.csip_aus_mode = True
+    state = DiscoveredState()
+
+    await discover(client, state)
+    assert client.csip_aus_mode is True
+
+    client.csip_aus_mode = None
+    assert client.csip_aus_mode is False
+    bodies.append(_AUS_DCAP)
+    await discover(client, state)
+    assert client.csip_aus_mode is True
+
+
+@pytest.mark.asyncio
 async def test_full_rediscovery_forgets_the_time_observation_of_an_fsa_the_server_withdrew():
     edev = _make_edev("/edev/1")
     edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
@@ -2627,3 +2644,40 @@ async def test_full_rediscovery_forgets_the_time_observation_of_an_fsa_the_serve
     await discover(client, state)  # type: ignore[arg-type]
 
     assert set(client.timebase.snapshot()["per_fsa"]) == {"/fsa/1"}
+
+
+@pytest.mark.asyncio
+async def test_rediscovery_keeps_the_time_observations_of_a_device_whose_fsa_list_failed():
+    """A device whose FSA list fails between pages keeps its FSAs' time observations.
+
+    The other device's list reads through, so its withdrawn FSA is still forgotten.
+    """
+    edev1 = _make_edev("/edev/1")
+    edev1.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    edev2 = _make_edev("/edev/2")
+    edev2.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/2/fsa")
+    fsa1 = _make_fsa("/fsa/1", derp_list_href="/fsa/1/derp", time_href="/fsa/1/tm")
+    fsa2 = _make_fsa("/fsa/2", derp_list_href="/fsa/2/derp", time_href="/fsa/2/tm")
+    client = _MockClient(
+        {
+            "/dcap": _make_dcap(),
+            "/tm": _make_time(),
+            "/edev": _make_edev_list(edev1, edev2),
+            "/edev/1/fsa": _make_fsa_list(fsa1),
+            "/edev/2/fsa": _make_fsa_list(fsa2),
+            "/fsa/1/derp": _make_derp_list(_make_derp("/derp/1")),
+            "/fsa/2/derp": _make_derp_list(_make_derp("/derp/2")),
+            "/fsa/1/tm": _make_time(),
+            "/fsa/2/tm": _make_time(),
+        }
+    )
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+    assert set(client.timebase.snapshot()["per_fsa"]) == {"/fsa/1", "/fsa/2"}
+
+    client._responses["/edev/1/fsa"] = Sep2ProtocolError("stopped mid-pagination", 404)
+    client._responses["/edev/2/fsa"] = _make_fsa_list()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert set(client.timebase.snapshot()["per_fsa"]) == {"/fsa/1"}
+    assert state.previous_fsa_hrefs == {"/edev/1": {"/fsa/1"}, "/edev/2": set()}

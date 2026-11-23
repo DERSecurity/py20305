@@ -89,6 +89,7 @@ class HeadEndTime:
     fsa_href: str | None
     #: Largest difference between the per-FSA offsets, in seconds, when the
     #: reading is from an FSA and more than one FSA was observed; else ``None``.
+    #: Only fresh observations count while any FSA observation is fresh.
     spread_seconds: float | None
 
 
@@ -398,7 +399,9 @@ class ServerTimebase:
             )
         else:
             best_href, best = max(self._per_fsa.items(), key=lambda item: _recency(item[1]))
-        offsets = [obs.offset for obs in self._per_fsa.values()]
+        # The spread covers the observations the answer was chosen from, so an
+        # aged-out offset does not widen it while fresh ones exist.
+        offsets = [obs.offset for obs in (fresh or self._per_fsa).values()]
         spread = round(max(offsets) - min(offsets), 3) if len(offsets) > 1 else None
         return HeadEndTime(
             time.time() + best.offset, best, _age_seconds(best), best_href, spread

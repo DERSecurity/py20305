@@ -580,8 +580,11 @@ class Sep2Client:
         return self._csip_aus_detected
 
     @csip_aus_mode.setter
-    def csip_aus_mode(self, value: bool) -> None:
-        """Force CSIP-AUS extensions on or off; discovery no longer changes the result."""
+    def csip_aus_mode(self, value: bool | None) -> None:
+        """Force CSIP-AUS extensions on or off, or pass None to follow discovery again.
+
+        While a forced value is set, discovery does not change the result.
+        """
         self._csip_aus_override = value
 
     def observe_csip_aus_detection(self, detected: bool) -> None:

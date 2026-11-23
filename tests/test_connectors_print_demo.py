@@ -127,5 +127,5 @@ class TestPrintDemoReadings:
 
         c = PrintDemoConnector()
         for element in ALL_ELEMENTS:
-            method, reason = ConnectorDispatcher._control_support(c, element.method)
+            method, reason = ConnectorDispatcher.control_support(c, element.method)
             assert method is not None and reason is None, element.method

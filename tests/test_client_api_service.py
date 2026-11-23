@@ -728,6 +728,22 @@ class TestGetTimeFromFsaScopes:
 
         assert result["fsa_href"] == "/fsa/2"
 
+    def test_an_aged_out_observation_does_not_widen_the_spread(
+        self, service: ClientAPIService, mock_client: MagicMock
+    ):
+        tb = _fsa_only_timebase(mock_client)
+        _observe_fsa(tb, "/fsa/1", 1_030, quality=3, now=1_000.0, tick=0.0)
+        _observe_fsa(tb, "/fsa/2", 1_040, quality=3, now=1_000.0, tick=9_000.0)
+        _observe_fsa(tb, "/fsa/3", 1_045, quality=3, now=1_000.0, tick=9_000.0)
+
+        with (
+            patch("time.time", return_value=1_000.0),
+            patch("time.monotonic", return_value=9_001.0),
+        ):
+            result = service.get_time()
+
+        assert result["spread_seconds"] == 5.0
+
     def test_when_every_observation_has_aged_out_the_most_recent_answers(
         self, service: ClientAPIService, mock_client: MagicMock
     ):

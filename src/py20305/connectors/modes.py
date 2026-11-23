@@ -343,16 +343,15 @@ def implemented_modes2(connector: object) -> int:
     support. A connector's own ``supported_modes2()`` can start from this and
     clear the bits its device cannot apply.
     """
-    from py20305.connectors.base import BaseConnector
+    from py20305.connectors.dispatcher import ConnectorDispatcher
     from py20305.events.modes_bitmask import MODES2_BIT_OF_ELEMENT
 
     bits = 0
     for element, bit in MODES2_BIT_OF_ELEMENT.items():
-        method = f"update_{snake_case(element)}"
-        own = getattr(type(connector), method, None)
-        if own is not None and own is getattr(BaseConnector, method, None):
-            continue
-        if getattr(connector, method, None) is not None:
+        method, _reason = ConnectorDispatcher.control_support(
+            connector, f"update_{snake_case(element)}"
+        )
+        if method is not None:
             bits |= 1 << bit
     return bits
 
@@ -370,10 +369,7 @@ def implemented_doe_modes(connector: object) -> int:
 
     bits = 0
     for bit, element in enumerate(DOE_ELEMENTS):
-        method, _reason = ConnectorDispatcher._control_support(
-            connector,  # type: ignore[arg-type]
-            element.method,
-        )
+        method, _reason = ConnectorDispatcher.control_support(connector, element.method)
         if method is not None:
             bits |= 1 << bit
     return bits
