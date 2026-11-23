@@ -58,11 +58,6 @@ _MB_READBACK_DELAY = 0.5
 # otherwise cost a reconnect handshake on every cycle.
 _STORAGE_RETRY_SECONDS = 600.0
 
-#: Where a state of charge is read after model 713 ``SoC``, in order: the basic
-#: storage control model (124) and the lithium-ion battery model (802). Each is
-#: read only when no earlier source gave a value.
-_STATE_OF_CHARGE_POINTS = ((124, "ChaState"), (802, "SoC"))
-
 # Modbus protocol exception codes (MODBUS Application Protocol, 7 Exception
 # Responses) the server device emits when a request is malformed or it can't
 # satisfy the read. We treat the following as PERMANENT for the lifetime of
@@ -919,22 +914,33 @@ class SunSpecModbusConnector:
         """Return the state of charge in percent, or None.
 
         ``storage`` is model 713 as just read, or None. The sources, in order:
-        model 713 ``SoC``, model 124 ``ChaState``, model 802 ``SoC``, and model
-        713 ``WHAvail`` over ``WHRtg``. Model 124 or 802 is read only when no
-        earlier source gave a value. A value outside 0 to 100 is not used.
+        model 713 ``SoC``, model 802 ``SoC`` (percent of the watt-hour rating),
+        model 713 ``WHAvail`` over ``WHRtg``, and model 124 ``ChaState``. The
+        first three are energy-based. Model 124 is last because ``ChaState`` is
+        a percent of the amp-hour rating, which differs from the energy-based
+        figure on a real battery. Model 802 or 124 is read only when no earlier
+        source gave a value. A value outside 0 to 100 is not used.
         """
-        soc = _percent(_cvalue_or_none(storage, "SoC")) if storage is not None else None
-        for model_id, point in _STATE_OF_CHARGE_POINTS:
+        if storage is not None:
+            soc = _percent(_cvalue_or_none(storage, "SoC"))
             if soc is not None:
                 return soc
-            model = self._read_optional_model(model_id)
-            soc = _percent(_cvalue_or_none(model, point)) if model is not None else None
-        if soc is None and storage is not None:
+        soc = self._optional_percent(802, "SoC")
+        if soc is not None:
+            return soc
+        if storage is not None:
             rating = _finite(_cvalue_or_none(storage, "WHRtg"))
             available = _finite(_cvalue_or_none(storage, "WHAvail"))
             if rating is not None and rating > 0 and available is not None:
                 soc = _percent(100.0 * available / rating)
-        return soc
+                if soc is not None:
+                    return soc
+        return self._optional_percent(124, "ChaState")
+
+    def _optional_percent(self, model_id: int, point: str) -> float | None:
+        """Return ``point`` of an optional model as a percent, or None."""
+        model = self._read_optional_model(model_id)
+        return _percent(_cvalue_or_none(model, point)) if model is not None else None
 
     def _read_optional_model(self, model_id: int) -> Any:
         """Read a model the device may not have, or return None.

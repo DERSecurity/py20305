@@ -8,7 +8,7 @@ use the DERCapability and DERSettings element names, status uses the
 DERStatus types, and controls arrive as ``update_<element>`` calls.
 
 A DER is read through models 701 to 705 (and 706, 712 and 713 where the
-device has them), and its state of charge through model 713, 124 or 802. A
+device has them), and its state of charge through model 713, 802 or 124. A
 meter is read through models 201 to 204, 211 to 214 or 220; set its ``role``
 to ``site_meter`` or ``der_meter``, and ``power_sign`` when the meter's sign of
 real power is known.

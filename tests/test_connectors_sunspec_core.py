@@ -353,13 +353,31 @@ class TestSunSpecFetch:
         sunspec_connector._target.models[124][0].read.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_state_of_charge_falls_back_to_model_124_then_model_802(self, sunspec_connector):
+    async def test_state_of_charge_prefers_model_802_over_model_124(self, sunspec_connector):
         sunspec_connector._target.models[713] = [self._storage(SoC=None, WHAvail=None)]
-        sunspec_connector._target.models[124] = [self._storage(ChaState=None)]
-        sunspec_connector._target.models[802] = [self._storage(SoC=71.0)]
-        assert (await sunspec_connector.fetch_monitoring())["SoC"] == 71.0
-
         sunspec_connector._target.models[124] = [self._storage(ChaState=40.0)]
+        sunspec_connector._target.models[802] = [self._storage(SoC=71.0)]
+
+        assert (await sunspec_connector.fetch_monitoring())["SoC"] == 71.0
+        # Model 124 is not read when model 802 gave a value.
+        sunspec_connector._target.models[124][0].read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_energy_available_over_the_rating_is_preferred_to_model_124(
+        self, sunspec_connector
+    ):
+        sunspec_connector._target.models[713] = [self._storage(SoC=None, WHAvail=2500, WHRtg=10000)]
+        sunspec_connector._target.models[124] = [self._storage(ChaState=40.0)]
+
+        assert (await sunspec_connector.fetch_monitoring())["SoC"] == 25.0
+        sunspec_connector._target.models[124][0].read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_state_of_charge_falls_back_to_model_124_last(self, sunspec_connector):
+        sunspec_connector._target.models[713] = [self._storage(SoC=None, WHAvail=None)]
+        sunspec_connector._target.models[802] = [self._storage(SoC=None)]
+        sunspec_connector._target.models[124] = [self._storage(ChaState=40.0)]
+
         assert (await sunspec_connector.fetch_monitoring())["SoC"] == 40.0
 
     @pytest.mark.asyncio

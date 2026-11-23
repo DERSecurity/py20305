@@ -64,6 +64,14 @@ What it reports:
   `operationalModeStatus`, the 2030.5-2023 `connectStatus` and 2030.5-2018
   `genConnectStatus` bitmaps, and the AC over- and under-voltage and over-
   and under-frequency alarms at their `alarmStatus` bits.
+- **State of charge**, as a `SoC` reading and as DERStatus
+  `stateOfChargeStatus`, from the first source the device has: model 713
+  `SoC`, model 802 `SoC` (percent of the watt-hour rating), model 713
+  `WHAvail` over `WHRtg`, then model 124 `ChaState`. Model 124 is last because
+  `ChaState` is a percent of the amp-hour rating, which can differ by several
+  percent from the energy-based figure a battery management system shows. The
+  status value comes from the last monitoring read, so its `dateTime` is that
+  read's time and can lag the status poll by up to one monitoring interval.
 
 What it applies: the volt-var, volt-watt and watt-var curves, `opModMaxLimW`
 and its inject and absorb forms, `opModFixedW`, `opModTargetW`,
