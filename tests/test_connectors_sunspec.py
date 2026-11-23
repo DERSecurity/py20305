@@ -16,6 +16,7 @@ import pytest
 import py20305
 from py20305.connectors.base import BaseConnector
 from py20305.connectors.config import SunSpecDeviceConfig
+from py20305.connectors.control_errors import ModeNotSupportedError
 from py20305.connectors.registry import ConnectorConfigRegistry
 from py20305.connectors.sunspec import _ieee2030_5 as convert
 from py20305.connectors.sunspec.connector import SunSpecConnector
@@ -152,7 +153,9 @@ def test_ratings_take_their_element_names_and_the_current_rating() -> None:
 
     assert nameplate == {
         "rtgMaxW": {"value": 5, "multiplier": 3},
-        "modesSupported": 3,
+        # CtrlModes bits 0 and 1 (MAX_W, FIXED_W): opModMaxLimW is bit 20 and
+        # opModFixedW bit 7 of DERControlType.
+        "modesSupported": (1 << 20) | (1 << 7),
         "rtgMaxA": {"value": 140, "multiplier": -1},
     }
 
@@ -176,6 +179,89 @@ def test_settings_take_their_element_names() -> None:
     settings = convert.settings({"WMax": 1, "WMaxOvrExt": 2, "DoeModesEnabled": 4})
 
     assert settings == {"setMaxW": 1, "doeModesEnabled": 4}
+
+
+# -- Control modes and operating categories ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("ctrl_modes", "expected_bits"),
+    [
+        # SunSpec CtrlModes bit -> DERControlType bit (IEEE 2030.5-2023).
+        (1 << 0, {20}),  # MAX_W -> opModMaxLimW
+        (1 << 1, {7}),  # FIXED_W -> opModFixedW
+        (1 << 2, {6}),  # FIXED_VAR -> opModFixedVar
+        (1 << 3, {4, 5}),  # FIXED_PF -> opModFixedPFAbsorbW, opModFixedPFInjectW
+        (1 << 4, {23}),  # VOLT_VAR -> opModVoltVar
+        (1 << 5, {8}),  # FREQ_WATT -> opModFreqDroop
+        (1 << 9, {26}),  # WATT_VAR -> opModWattVar
+        (1 << 10, {24}),  # VOLT_WATT -> opModVoltWatt
+        # Dynamic reactive current, the trip functions and scheduling have no
+        # control the connector applies.
+        ((1 << 6) | (1 << 7) | (1 << 8) | (1 << 11) | (1 << 12) | (1 << 13), set()),
+        (0, set()),
+    ],
+)
+def test_control_modes_are_reported_in_the_dercontroltype_bit_layout(
+    ctrl_modes: int, expected_bits: set[int]
+) -> None:
+    expected = sum(1 << bit for bit in expected_bits)
+
+    assert convert.nameplate({"CtrlModes": ctrl_modes}) == {"modesSupported": expected}
+    assert convert.settings({"CtrlModes": ctrl_modes}) == {"modesEnabled": expected}
+
+
+def test_a_volt_var_and_max_w_device_is_not_reported_as_charge_and_fixed_pf_absorb() -> None:
+    """Reading CtrlModes bits 4 and 0 as DERControlType bits 4 and 0 was the defect."""
+    volt_var_and_max_w = (1 << 4) | (1 << 0)
+
+    modes = convert.nameplate({"CtrlModes": volt_var_and_max_w})["modesSupported"]
+
+    assert modes == (1 << 23) | (1 << 20)  # opModVoltVar, opModMaxLimW
+    assert not modes & (1 << 0)  # charge mode
+    assert not modes & (1 << 4)  # opModFixedPFAbsorbW
+
+
+@pytest.mark.parametrize("unreadable", [None, True, "3", 1.5, -1])
+def test_an_unreadable_control_modes_value_is_left_out(unreadable: Any) -> None:
+    assert convert.nameplate({"CtrlModes": unreadable}) == {}
+    assert convert.settings({"CtrlModes": unreadable}) == {}
+
+
+@pytest.mark.parametrize(
+    ("key", "element", "sunspec_value", "expected"),
+    [
+        # IEEE 2030.5 rtgNormalCategory: 0 not specified, 1 Category A, 2 Category B.
+        ("NorOpCatRtg", "rtgNormalCategory", 0, 1),
+        ("NorOpCatRtg", "rtgNormalCategory", 1, 2),
+        # IEEE 2030.5 rtgAbnormalCategory: 0 not specified, 1 to 3 Category I to III.
+        ("AbnOpCatRtg", "rtgAbnormalCategory", 0, 1),
+        ("AbnOpCatRtg", "rtgAbnormalCategory", 1, 2),
+        ("AbnOpCatRtg", "rtgAbnormalCategory", 2, 3),
+    ],
+)
+def test_operating_categories_count_from_one(
+    key: str, element: str, sunspec_value: int, expected: int
+) -> None:
+    assert convert.nameplate({key: sunspec_value}) == {element: expected}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("NorOpCatRtg", None),
+        ("NorOpCatRtg", -1),
+        ("NorOpCatRtg", 2),
+        ("NorOpCatRtg", 65535),
+        ("NorOpCatRtg", True),
+        ("AbnOpCatRtg", None),
+        ("AbnOpCatRtg", -1),
+        ("AbnOpCatRtg", 3),
+        ("AbnOpCatRtg", 65535),
+    ],
+)
+def test_an_operating_category_outside_the_defined_ones_is_left_out(key: str, value: Any) -> None:
+    assert convert.nameplate({key: value}) == {}
 
 
 # -- Controls --------------------------------------------------------------------
@@ -248,7 +334,7 @@ def test_a_curve_becomes_its_scaled_points() -> None:
         "CurveData": [{"xvalue": 95, "yvalue": 50}, {"xvalue": 105, "yvalue": -50}],
         "xMultiplier": 0,
         "yMultiplier": 0,
-        "yRefType": 2,
+        "yRefType": 7,
         "openLoopTms": 500,
     }
 
@@ -264,6 +350,132 @@ def test_a_curve_becomes_its_scaled_points() -> None:
 def test_an_element_the_core_cannot_write_is_refused() -> None:
     with pytest.raises(KeyError):
         convert.Controls().translate("opModWattPF", {"enabled": True, "value": 1})
+
+
+def _curve(y_ref_type: int | None, **extra: Any) -> dict[str, Any]:
+    curve: dict[str, Any] = {
+        "CurveData": [{"xvalue": 95, "yvalue": 50}, {"xvalue": 105, "yvalue": -50}],
+        "xMultiplier": 0,
+        "yMultiplier": 0,
+    }
+    if y_ref_type is not None:
+        curve["yRefType"] = y_ref_type
+    return curve | extra
+
+
+@pytest.mark.parametrize(
+    ("element", "y_ref_type", "key", "dept_ref"),
+    [
+        # IEEE 2030.5-2023 DERUnitRefType -> SunSpec DeptRef. Models 705 and 712:
+        # W_MAX_PCT 0, VAR_MAX_PCT 1, VAR_AVAL_PCT 2, VA_MAX_PCT 3.
+        ("opModVoltVar", 1, "qv_deptref", 0),  # %setMaxW
+        ("opModVoltVar", 2, "qv_deptref", 1),  # %setMaxVar
+        ("opModVoltVar", 3, "qv_deptref", 2),  # %statVarAvail
+        ("opModVoltVar", 8, "qv_deptref", 3),  # %setMaxVA
+        ("opModWattVar", 1, "qp_deptref", 0),
+        ("opModWattVar", 2, "qp_deptref", 1),
+        ("opModWattVar", 3, "qp_deptref", 2),
+        ("opModWattVar", 8, "qp_deptref", 3),
+        # Model 706: W_MAX_PCT 0, W_AVAL_PCT 1.
+        ("opModVoltWatt", 1, "pv_deptref", 0),  # %setMaxW
+        ("opModVoltWatt", 7, "pv_deptref", 1),  # %statWAvail
+    ],
+)
+def test_a_curve_reference_follows_its_yreftype(
+    element: str, y_ref_type: int, key: str, dept_ref: int
+) -> None:
+    _, params = convert.Controls().translate(
+        element, {"enabled": True, "value": _curve(y_ref_type)}
+    )
+
+    assert params[key] == dept_ref
+
+
+@pytest.mark.parametrize(
+    ("element", "y_ref_type"),
+    [
+        ("opModVoltVar", None),
+        ("opModVoltVar", 0),  # N/A
+        ("opModVoltVar", 4),  # %setEffectiveV
+        ("opModVoltVar", 5),  # %setMaxChargeRateW
+        ("opModVoltVar", 7),  # %statWAvail is a volt-watt reference
+        ("opModWattVar", 7),
+        ("opModVoltWatt", 2),  # %setMaxVar is not an active-power reference
+        ("opModVoltWatt", 8),
+        ("opModVoltWatt", 0),
+    ],
+)
+def test_a_curve_with_a_reference_sunspec_lacks_is_declined(
+    element: str, y_ref_type: int | None
+) -> None:
+    with pytest.raises(ModeNotSupportedError, match=element):
+        convert.Controls().translate(element, {"enabled": True, "value": _curve(y_ref_type)})
+
+
+def test_a_withdrawn_curve_needs_no_reference() -> None:
+    assert convert.Controls().translate("opModVoltVar", {"enabled": False}) == (
+        "update_qv",
+        {"qv_mode_enable": 0},
+    )
+
+
+def test_a_volt_var_curve_without_vref_carries_none() -> None:
+    _, params = convert.Controls().translate(
+        "opModVoltVar", {"enabled": True, "value": _curve(2)}
+    )
+
+    assert params["qv_vref"] is None
+
+
+def test_vref_is_in_percent() -> None:
+    """IEEE 2030.5 vRef is a PerCent in hundredths of a percent (10000 = 100%)."""
+    _, params = convert.Controls().translate(
+        "opModVoltVar", {"enabled": True, "value": _curve(2, vRef=10200)}
+    )
+
+    assert params["qv_vref"] == pytest.approx(102.0)
+
+
+def test_the_autonomous_vref_time_constant_is_converted_from_hundredths_to_seconds() -> None:
+    """IEEE 2030.5 autonomousVRefTimeConstant is in hundredths of a second."""
+    _, params = convert.Controls().translate(
+        "opModVoltVar",
+        {"enabled": True, "value": _curve(2, autonomousVRefTimeConstant=6000)},
+    )
+
+    assert params["qv_vref_olrt"] == pytest.approx(60.0)
+
+
+def test_a_volt_var_curve_without_a_time_constant_carries_none() -> None:
+    _, params = convert.Controls().translate(
+        "opModVoltVar", {"enabled": True, "value": _curve(2)}
+    )
+
+    assert params["qv_vref_olrt"] is None
+
+
+def test_the_droop_minimum_power_is_passed_in_watts() -> None:
+    droop = {
+        "dBOF": 36,
+        "dBUF": 36,
+        "kOF": 40,
+        "kUF": 40,
+        "openLoopTms": 500,
+        "pMin": {"value": 25, "multiplier": 2},
+    }
+
+    _, params = convert.Controls().translate("opModFreqDroop", {"enabled": True, "value": droop})
+
+    assert params["pf_pmin_w"] == 2500.0
+    assert "pf_pmin" not in params
+
+
+def test_a_droop_without_a_minimum_power_carries_none() -> None:
+    droop = {"dBOF": 36, "dBUF": 36, "kOF": 40, "kUF": 40, "openLoopTms": 500}
+
+    _, params = convert.Controls().translate("opModFreqDroop", {"enabled": True, "value": droop})
+
+    assert params["pf_pmin_w"] is None
 
 
 # -- The connector class -----------------------------------------------------------
