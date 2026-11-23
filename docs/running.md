@@ -169,7 +169,10 @@ with `post` it is renewed on the renewal task's first pass, because a re-POST to
 a server that does not treat it as a renewal would create another copy.
 `subscription.remove_duplicates: true` also DELETEs the further
 subscriptions of its own it finds for a resource it adopted. A subscription
-with any other notificationURI is never adopted or removed. If the server does
+with any other notificationURI is never adopted or removed. The comparison
+ignores differences a server may introduce when it echoes the URI: the case of
+the scheme and host, an explicit default port, percent-encoding case, and a
+trailing slash. If the server does
 not return its SubscriptionList, the client logs a warning and subscribes as it
 would without adoption. Embedding code can call
 `CsipClient.adopt_subscriptions()` itself.

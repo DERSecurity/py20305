@@ -111,20 +111,6 @@ class RandomizationCache:
         sign = 1 if raw > 0 else -1
         return sign * self._draw(abs(raw))
 
-    @staticmethod
-    def _compute_offset(value: OneHourRangeType | None) -> int:
-        """Compute a random offset from the randomization field value.
-
-        Range is [0, abs(value)], sign preserved. Returns 0 if value is
-        None or 0.
-        """
-        if value is None or value.value == 0:
-            return 0
-        raw = value.value
-        magnitude = abs(raw)
-        sign = 1 if raw > 0 else -1
-        return sign * random.randint(0, magnitude)
-
     def override_start_offset(
         self,
         mrid: bytes,

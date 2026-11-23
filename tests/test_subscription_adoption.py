@@ -18,7 +18,7 @@ from lxml import etree
 from py20305.client.csip_client import CsipClient
 from py20305.client.http import Sep2Client
 from py20305.client.state import EndDeviceState
-from py20305.subscription.manager import SubscriptionManager
+from py20305.subscription.manager import SubscriptionManager, notification_uri_key
 
 NS = "urn:ieee:std:2030.5:ns"
 #: Parses request bodies without resolving entities or reaching the network.
@@ -232,6 +232,28 @@ class TestAdoptExisting:
         assert fake.deletes == []
         assert fake.posts == [(FSA, OURS)]
 
+    @pytest.mark.parametrize(
+        "echoed",
+        [
+            pytest.param("https://client.example.com:10443/notify/", id="trailing-slash"),
+            pytest.param("HTTPS://Client.Example.COM:10443/notify", id="scheme-and-host-case"),
+            pytest.param("https://client.example.com:10443/%6Eotify", id="percent-encoding"),
+        ],
+    )
+    async def test_our_subscription_is_adopted_when_the_server_normalizes_its_uri(
+        self, aiohttp_server, echoed
+    ):
+        fake = FakeSubscriptionServer([("/edev/1/sub/1", FSA, echoed)])
+        base_url = await _serve(aiohttp_server, fake)
+
+        async with Sep2Client(base_url) as http:
+            mgr = SubscriptionManager(http, OURS)
+            result = await mgr.adopt_existing(SUB_LIST, DESIRED)
+            await mgr.subscribe(SUB_LIST, FSA, "FSAList")
+
+        assert result.adopted == 1
+        assert fake.posts == []
+
     async def test_a_tracked_subscription_is_kept_and_other_copies_removed(self, aiohttp_server):
         fake = FakeSubscriptionServer([("/edev/1/sub/1", FSA, OURS), ("/edev/1/sub/3", FSA, OURS)])
         base_url = await _serve(aiohttp_server, fake)
@@ -442,3 +464,39 @@ class TestShutdown:
         await client.shutdown(unsubscribe=True)
 
         assert fake.deletes == ["/edev/1/sub/100"]
+
+
+class TestNotificationUriKey:
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("https://h.example.com/notify", "https://h.example.com/notify/"),
+            ("https://h.example.com/notify", "HTTPS://H.EXAMPLE.COM/notify"),
+            ("https://h.example.com/notify", "https://h.example.com:443/notify"),
+            ("http://h.example.com/notify", "http://h.example.com:80/notify"),
+            ("https://h.example.com/a%2fb", "https://h.example.com/a%2Fb"),
+            ("https://h.example.com/notify", "https://h.example.com/%6Eotify"),
+            ("https://[FE80::1]:8443/notify", "https://[fe80::1]:8443/notify"),
+        ],
+    )
+    def test_equivalent_forms_have_the_same_key(self, a: str, b: str):
+        assert notification_uri_key(a) == notification_uri_key(b)
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("https://h.example.com/notify", "https://other.example.com/notify"),
+            ("https://h.example.com/notify", "http://h.example.com/notify"),
+            ("https://h.example.com/notify", "https://h.example.com:8443/notify"),
+            ("https://h.example.com/notify", "https://h.example.com/Notify"),
+            ("https://h.example.com/notify?a=1", "https://h.example.com/notify?a=2"),
+        ],
+    )
+    def test_different_endpoints_have_different_keys(self, a: str, b: str):
+        assert notification_uri_key(a) != notification_uri_key(b)
+
+    def test_none_and_unparseable_uris_are_returned_unchanged(self):
+        assert notification_uri_key(None) is None
+        assert notification_uri_key("https://h.example.com:bad/notify") == (
+            "https://h.example.com:bad/notify"
+        )
