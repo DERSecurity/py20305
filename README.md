@@ -193,6 +193,10 @@ wrote. See [Testing](https://dersecurity.github.io/py20305/testing/).
 
 See [CONTRIBUTING.md](https://github.com/DERSecurity/py20305/blob/main/CONTRIBUTING.md).
 
+The repository is mirrored, read-only, to
+[Codeberg](https://codeberg.org/DERSecurity/py20305), which receives `main` and every
+tag after each change here. Open issues and pull requests on GitHub.
+
 ## License
 
 Apache-2.0. See [LICENSE](https://github.com/DERSecurity/py20305/blob/main/LICENSE) and [NOTICE](https://github.com/DERSecurity/py20305/blob/main/NOTICE).
