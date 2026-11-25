@@ -343,15 +343,33 @@ def implemented_modes2(connector: object) -> int:
     support. A connector's own ``supported_modes2()`` can start from this and
     clear the bits its device cannot apply.
     """
-    from py20305.connectors.base import BaseConnector
+    from py20305.connectors.dispatcher import ConnectorDispatcher
     from py20305.events.modes_bitmask import MODES2_BIT_OF_ELEMENT
 
     bits = 0
     for element, bit in MODES2_BIT_OF_ELEMENT.items():
-        method = f"update_{snake_case(element)}"
-        own = getattr(type(connector), method, None)
-        if own is not None and own is getattr(BaseConnector, method, None):
-            continue
-        if getattr(connector, method, None) is not None:
+        method, _reason = ConnectorDispatcher.control_support(
+            connector, f"update_{snake_case(element)}"
+        )
+        if method is not None:
+            bits |= 1 << bit
+    return bits
+
+
+def implemented_doe_modes(connector: object) -> int:
+    """Return the CSIP-AUS DOE control bitmap of the limits ``connector`` implements.
+
+    Bit 0 is opModExpLimW, bit 1 opModImpLimW, bit 2 opModGenLimW and bit 3
+    opModLoadLimW (the ``DOEControlType`` bitmap in ``csipaus-ext.xsd``). A limit
+    counts when the dispatcher would deliver it to the connector, so inheriting
+    the base class's no-op is not support, and a plugin-backed connector counts
+    the limits its live offer carries.
+    """
+    from py20305.connectors.dispatcher import ConnectorDispatcher
+
+    bits = 0
+    for bit, element in enumerate(DOE_ELEMENTS):
+        method, _reason = ConnectorDispatcher.control_support(connector, element.method)
+        if method is not None:
             bits |= 1 << bit
     return bits

@@ -103,7 +103,8 @@ asyncio.run(main())
 ```
 
 `connect()` performs discovery and registration. `run()` polls and applies
-events until cancelled. `shutdown()` drains in-flight work.
+events until cancelled. `shutdown()` drains in-flight work, within bounds, so
+an unreachable server cannot hold it for long.
 
 ## Point it at real hardware
 

@@ -194,9 +194,11 @@ class TestRsaPeerHandshake:
         with pytest.raises(
             (aiohttp.ClientConnectorError, aiohttp.ClientConnectorSSLError, ssl.SSLError)
         ):
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, ssl=ctx) as resp:
-                    await resp.read()
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(url, ssl=ctx) as resp,
+            ):
+                await resp.read()
 
     async def test_additional_ciphers_unblocks_rsa_peer(self, rsa_tls_server: TlsFixture) -> None:
         """Opting into ECDHE-RSA-AES256-GCM-SHA384 lets the handshake complete."""

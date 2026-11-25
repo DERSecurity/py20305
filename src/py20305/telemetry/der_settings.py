@@ -27,9 +27,10 @@ from py20305.telemetry.scale_factor import (
     to_watt_hour,
 )
 
-# CSIP-AUS DOE control bitmap default: opModExpLimW (bit 0, export limit) |
-# opModImpLimW (bit 1, import limit) = 0x03. Used when the connector doesn't
-# report which DOE modes are enabled.
+# CSIP-AUS DOE control bitmap: opModExpLimW (bit 0) | opModImpLimW (bit 1) |
+# opModGenLimW (bit 2) | opModLoadLimW (bit 3). The export and import limits,
+# 0x03, are the fallback for a caller that does not pass the limits the
+# connector implements.
 _DEFAULT_DOE_MODES_ENABLED = 0x03
 
 #: DERControlType2 defines bits 0 to 9; the rest are reserved.
@@ -42,6 +43,7 @@ def build_der_settings(
     *,
     csip_aus_mode: bool = False,
     modes_supported2: int | None = None,
+    doe_modes_implemented: int | None = None,
     profile: ServerProfile | None = None,
 ) -> Dersettings:
     """Build a ``Dersettings`` model from connector configuration data.
@@ -56,6 +58,11 @@ def build_der_settings(
         modes_supported2: The DERControlType2 bits the connector supports.
             ``modesEnabled2`` is limited to them, since a mode the device cannot
             apply is not enabled on it.
+        doe_modes_implemented: The CSIP-AUS DOE limits the connector implements
+            (see :func:`py20305.connectors.modes.implemented_doe_modes`). The
+            connector applies every one of them, so they are the
+            ``doeModesEnabled`` value when the configuration has none. Without
+            it, that value defaults to the export and import limits.
         profile: The server's schema profile. It limits ``modesEnabled2`` to the
             bits the profile permits.
 
@@ -97,20 +104,20 @@ def build_der_settings(
     ut = updated_time if updated_time is not None else int(time.time())
 
     # CSIP-AUS extension: doeModesEnabled (the enabled DOE control bitmap, 4
-    # bits). Connector-provided via "doeModesEnabled"; defaults to export +
-    # import active-power limits when absent. Rides in the DERSettings wildcard
-    # slot, only in CSIP-AUS mode.
+    # bits). Connector-provided via "doeModesEnabled"; when absent, the limits
+    # the connector implements, because it applies each of them when commanded
+    # and a mode cannot be enabled on a device that does not implement it. Rides
+    # in the DERSettings wildcard slot, only in CSIP-AUS mode.
     other_element: list[object] = []
     if csip_aus_mode:
         doe = configuration.get("doeModesEnabled")
         # Reject bool (a subclass of int) and mask to the 4 defined bits so
         # reserved bits are never set and a bad/negative connector value can't
         # overflow to_bytes and crash the settings cycle.
-        doe_bits = (
-            doe
-            if isinstance(doe, int) and not isinstance(doe, bool)
-            else _DEFAULT_DOE_MODES_ENABLED
+        fallback = (
+            _DEFAULT_DOE_MODES_ENABLED if doe_modes_implemented is None else doe_modes_implemented
         )
+        doe_bits = doe if isinstance(doe, int) and not isinstance(doe, bool) else fallback
         other_element.append(DoeModesEnabled(value=(doe_bits & 0x0F).to_bytes(1, "big")))
 
     return Dersettings(

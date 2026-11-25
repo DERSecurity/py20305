@@ -83,7 +83,8 @@ server:
   `supported_modes2()` when it implements a method it cannot honor on the
   device.
 - **`extensions`** are schemas in other namespaces. `auto` detects CSIP-AUS from
-  the namespaces the server declares.
+  the namespaces the server declares, on every discovery. A list replaces
+  detection: `[]` sends no CSIP-AUS elements to a server that declares them.
 
 Inbound, the client accepts any element either edition defines and logs, at
 INFO, each element the server sends that its base does not define and which
@@ -133,6 +134,15 @@ schedule and reported to the server:
 
 A device configured as a meter reports its readings only; see [Meters](#meters).
 
+If the server answers a readings POST with 400 or 404, it no longer knows the
+device's MirrorUsagePoint, for example after it restarted with a new resource
+tree. The client then POSTs the MirrorUsagePoint again in the same cycle and
+posts that cycle's readings to the new one, so nothing is lost beyond the
+refused POST. It makes one re-POST per cycle: if the re-POST fails or the
+readings are refused again, the next cycle tries again. A 403 is not retried;
+it means another client owns the MirrorUsagePoint, and the device stays
+blocked until it is restarted.
+
 `der_resource_put_policy: on_change` replaces the two DER resource rates. It
 PUTs DERCapability and DERSettings once each, at startup, and then only when
 the content changes. A changed DERCapability also resends DERSettings. A
@@ -146,6 +156,13 @@ a new one to the list when the server answers 404 or 405; the default, `post`,
 re-POSTs it to the list. `subscription.backstop_poll_seconds` (default 900)
 sets how often a subscribed resource is still polled, in case notifications
 stop; it is never faster than the resource's pollRate.
+
+On shutdown the client DELETEs its subscriptions, all at once, and waits at
+most 2 s for the answers (`CsipClient.shutdown(subscription_cancel_timeout=...)`);
+a subscription the server has not confirmed by then stays on the server. The
+notification listener then stops, waiting at most 2 s for a notification still
+being received (`NotificationServer(shutdown_timeout=...)`). An unreachable or
+unresponsive server therefore no longer holds a stop for the HTTP timeouts.
 
 The server has the final say on the posting rate: an `EndDevice.postRate` above
 zero replaces `post_rate_seconds` for that device, which is what IEEE 2030.5

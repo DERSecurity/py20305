@@ -12,7 +12,13 @@ from py20305.client.errors import Sep2ConnectionError, Sep2ProtocolError
 from py20305.client.timebase import ServerTimebase
 from py20305.connectors.base import BaseConnector, ConnectorConnectionError, Reading
 from py20305.connectors.reading import reading_identity
-from py20305.models.sep import MirrorUsagePointList
+from py20305.models.sep import (
+    MirrorUsagePoint,
+    MirrorUsagePointList,
+    MRidtype,
+    RoleFlagsType,
+    ServiceKind,
+)
 from py20305.readings import DirectConnectorSource, Quality
 from py20305.server_profile import Edition, ServerProfile
 from py20305.telemetry.manager import DeviceTelemetryState, TelemetryManager
@@ -2502,3 +2508,153 @@ class TestMeterDevices:
         href = await manager._discover_mup_href(manager._devices[SAMPLE_LFDI])
 
         assert href == "/mup/2"
+
+
+def _post_script(mock_client, outcomes):
+    """Make ``post_bytes`` answer each call with the next item of ``outcomes``.
+
+    An exception is raised, a string is returned as the Location. Every call is
+    recorded as ``(path, body)`` in the list returned.
+    """
+    calls: list[tuple[str, bytes]] = []
+    pending = list(outcomes)
+
+    async def post_bytes(path, body):
+        calls.append((path, body))
+        outcome = pending.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    mock_client.post_bytes = post_bytes
+    return calls
+
+
+class TestMupRecreatedInTheRefusedCycle:
+    """A refused readings POST re-POSTs the MUP and posts the readings in the same cycle."""
+
+    @pytest.mark.parametrize("status", [404, 400])
+    @pytest.mark.asyncio
+    async def test_a_refused_readings_post_is_followed_by_a_mup_re_post_and_the_readings(
+        self, manager, mock_client, status
+    ):
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        calls = _post_script(
+            mock_client, [Sep2ProtocolError("refused", status), "/mup/new", "/mup/new/ok"]
+        )
+
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert [path for path, _ in calls] == ["/mup/device1", MUP_LIST_HREF, "/mup/new"]
+        state = manager.get_device_state(SAMPLE_LFDI)
+        assert state.mup_posted is True
+        assert state.mup_href == "/mup/new"
+        assert b"MirrorMeterReading" in calls[2][1]
+        # The same readings are posted again, not a later acquisition.
+        assert calls[2][1] == calls[0][1]
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_second_refusal_makes_no_further_re_post_and_resets_the_state(
+        self, manager, mock_client
+    ):
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        calls = _post_script(
+            mock_client,
+            [Sep2ProtocolError("refused", 404), "/mup/new", Sep2ProtocolError("refused", 400)],
+        )
+
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert [path for path, _ in calls] == ["/mup/device1", MUP_LIST_HREF, "/mup/new"]
+        state = manager.get_device_state(SAMPLE_LFDI)
+        assert state.mup_posted is False
+        assert state.mup_href is None
+        await manager.shutdown()
+
+    @pytest.mark.parametrize(
+        "failure",
+        [Sep2ProtocolError("unavailable", 503), Sep2ConnectionError("unreachable")],
+    )
+    @pytest.mark.asyncio
+    async def test_a_failed_re_post_ends_the_cycle_and_the_next_cycle_retries(
+        self, manager, mock_client, failure
+    ):
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        calls = _post_script(
+            mock_client, [Sep2ProtocolError("refused", 404), failure, "/mup/new"]
+        )
+
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert [path for path, _ in calls] == ["/mup/device1", MUP_LIST_HREF]
+        assert manager.get_device_state(SAMPLE_LFDI).mup_posted is False
+
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert [path for path, _ in calls] == ["/mup/device1", MUP_LIST_HREF, MUP_LIST_HREF]
+        assert manager.get_device_state(SAMPLE_LFDI).mup_href == "/mup/new"
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_readings_403_still_blocks_the_device_without_a_re_post(
+        self, manager, mock_client
+    ):
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        calls = _post_script(mock_client, [Sep2ProtocolError("forbidden", 403)])
+
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert [path for path, _ in calls] == ["/mup/device1"]
+        assert manager.get_device_state(SAMPLE_LFDI).telemetry_blocked is True
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_re_post_without_a_location_posts_to_the_discovered_mup(
+        self, manager, mock_client
+    ):
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        calls = _post_script(
+            mock_client, [Sep2ProtocolError("refused", 404), None, "/mup/found/ok"]
+        )
+        found = MirrorUsagePoint(
+            href="/mup/found",
+            m_rid=MRidtype(value=mup_mrid(SAMPLE_LFDI.lower())),
+            device_lfdi=bytes.fromhex(SAMPLE_LFDI),
+            role_flags=RoleFlagsType(value=b"\x00\x49"),
+            service_category_kind=ServiceKind(value=0),
+            status=1,
+        )
+        mock_client.get_list = AsyncMock(
+            return_value=[MirrorUsagePointList(mirror_usage_point=[found], all=1, results=1)]
+        )
+
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        assert [path for path, _ in calls] == ["/mup/device1", MUP_LIST_HREF, "/mup/found"]
+        await manager.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_readings_after_the_re_post_advertise_the_read_back_rate(
+        self, manager, mock_client
+    ):
+        now = 1_700_000_000
+        manager._timebase.now = MagicMock(return_value=float(now))
+        mock_client.get = AsyncMock(return_value=MagicMock(post_rate=300))
+        manager.start_metering(SAMPLE_LFDI, post_rate=300)
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+        calls = _post_script(
+            mock_client, [Sep2ProtocolError("refused", 404), "/mup/new", "/mup/new/ok"]
+        )
+        mock_client.get = AsyncMock(return_value=MagicMock(post_rate=30))
+
+        await manager._metering_cycle(SAMPLE_LFDI.lower())
+
+        advertised = {int(v) for v in re.findall(r"nextUpdateTime>(\d+)<", calls[2][1].decode())}
+        assert advertised == {now + 30}
+        await manager.shutdown()

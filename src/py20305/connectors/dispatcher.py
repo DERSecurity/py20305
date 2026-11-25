@@ -8,6 +8,7 @@ modes translation layer.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
 from collections.abc import Callable
@@ -16,9 +17,11 @@ from typing import TYPE_CHECKING, Any
 from py20305.commands import (
     AllowAllCommands,
     CommandGate,
+    CommandIntercept,
     CommandNotPermittedError,
     CommandObserver,
     CommandOrigin,
+    InterceptedWrite,
     NullCommandObserver,
 )
 from py20305.connectors.base import BaseConnector, ScheduleNotification
@@ -114,6 +117,7 @@ class ConnectorDispatcher:
         command_gate: CommandGate | None = None,
         telemetry: DeviceTelemetryEmitter | None = None,
         write_history: WriteHistory | None = None,
+        command_intercept: CommandIntercept | None = None,
     ) -> None:
         """
         Args:
@@ -128,6 +132,10 @@ class ConnectorDispatcher:
                 Optional and disabled by default.
             write_history: Keeps each write, with the mRIDs that caused it, in
                 the operations history. Optional; can also be attached later.
+            command_intercept: Offered each permitted write that names a device
+                by LFDI, before the connector. A write the intercept takes is
+                not applied to the connector. Omitted, every write goes to the
+                connector. See :class:`~py20305.commands.CommandIntercept`.
         """
         self._registry = registry
         self._lfdi_resolver = lfdi_resolver
@@ -138,6 +146,7 @@ class ConnectorDispatcher:
         self._commands = NullCommandObserver() if command_observer is None else command_observer
         self._telemetry = telemetry
         self._write_history = write_history
+        self._intercept = command_intercept
         # Devices already reported as having no connector. A server can list a
         # device this process has no connector for, and every control aimed at
         # it reaches the lookup below, so without this the same warning is
@@ -425,7 +434,7 @@ class ConnectorDispatcher:
         refused: list[str] = []
         unimplemented: list[str] = []
         for method_name, params in translations:
-            method, reason = self._control_support(connector, method_name)
+            method, reason = self.control_support(connector, method_name)
             if method is not None:
                 logger.debug("  %s.%s(%s)", connector.connector_name, method_name, params)
                 applied = await self._apply_one(
@@ -434,6 +443,7 @@ class ConnectorDispatcher:
                     params,
                     lfdi=lfdi,
                     origin=origin,
+                    kind="control",
                     label=label,
                     applied_mrid=derc_mrid,
                     cause_mrid=derc_mrid,
@@ -476,14 +486,19 @@ class ConnectorDispatcher:
         lfdi: str | None,
         origin: str,
         label: str,
+        kind: str = "control",
         connector: BaseConnector | None = None,
         applied_mrid: bytes | None = None,
         cause_mrid: bytes | None = None,
     ) -> bool:
         """Apply one translated mode and report it to the command observer.
 
-        Returns True when the control reached the connector, False when the gate
-        refused it. The DERControl and named-control callers raise
+        ``kind`` names the apply path for the command intercept, as
+        :class:`~py20305.commands.InterceptedWrite` lists them.
+
+        Returns True when the control reached the connector or the command
+        intercept took it, False when the gate refused it. The DERControl and
+        named-control callers raise
         ``CommandNotPermittedError`` on a refusal; the default-control and clear
         callers report it and go on.
 
@@ -548,6 +563,22 @@ class ConnectorDispatcher:
             # that predates the gate and is handled below -- so the choice is to
             # let it through and say so rather than to fail closed by accident.
             logger.debug("Ungated %s on %s: no LFDI to resolve authority for", control, label)
+        if (
+            lfdi
+            and self._intercept is not None
+            and await self._intercepted(
+                self._intercept,
+                lfdi,
+                control,
+                params,
+                origin=origin,
+                kind=kind,
+                label=label,
+                applied_mrid=applied_mrid,
+                cause_mrid=cause_mrid,
+            )
+        ):
+            return True
         issued_at = time.time()
         # A bound method carries its connector, so the device's address and
         # protocol are reachable without widening every call site. A caller
@@ -622,6 +653,70 @@ class ConnectorDispatcher:
             logger.debug("Applied %s to %s with no LFDI; not recorded", control, label)
         return True
 
+    # One keyword per field of the write.
+    async def _intercepted(  # pylint: disable=too-many-arguments
+        self,
+        intercept: CommandIntercept,
+        lfdi: str,
+        control: str,
+        params: dict[str, Any],
+        *,
+        origin: str,
+        kind: str,
+        label: str,
+        applied_mrid: bytes | None,
+        cause_mrid: bytes | None,
+    ) -> bool:
+        """Offer one permitted write to the command intercept. Return True if it took the write.
+
+        A taken write is kept in the write history as ``intercepted``. The
+        command observer and the telemetry emitter receive nothing, because no
+        write reached the device. An exception is kept as a failed write and
+        re-raised, as a connector failure is.
+        """
+        write = InterceptedWrite(
+            lfdi=lfdi,
+            control=control,
+            params=copy.deepcopy(params),
+            origin=origin,
+            kind=kind,
+            applied_mrid=applied_mrid,
+            cause_mrid=cause_mrid,
+        )
+        at = time.time()
+        try:
+            taken = await intercept.intercept(write)
+        except Exception as exc:
+            self._keep_write(
+                label,
+                control,
+                params,
+                outcome="failed",
+                at=at,
+                lfdi=lfdi,
+                origin=origin,
+                applied_mrid=applied_mrid,
+                cause_mrid=cause_mrid,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise
+        if not taken:
+            return False
+        logger.debug("Intercepted %s for %s (%s)", control, label, kind)
+        self._keep_write(
+            label,
+            control,
+            params,
+            outcome="intercepted",
+            at=at,
+            lfdi=lfdi,
+            origin=origin,
+            applied_mrid=applied_mrid,
+            cause_mrid=cause_mrid,
+        )
+        return True
+
     async def apply_operation(
         self,
         lfdi: str,
@@ -653,11 +748,11 @@ class ConnectorDispatcher:
         if connector is None:
             raise ConnectorError(f"no connector for LFDI {lfdi}")
         method_name = f"update_{control}"
-        method, _reason = self._control_support(connector, method_name)
+        method, _reason = self.control_support(connector, method_name)
         if method is None:
             raise ConnectorError(f"connector for {lfdi} does not implement {method_name}")
         applied = await self._apply_one(
-            method, method_name, params, lfdi=lfdi, origin=origin, label=lfdi
+            method, method_name, params, lfdi=lfdi, origin=origin, kind="operation", label=lfdi
         )
         if not applied:
             raise CommandNotPermittedError(
@@ -739,7 +834,7 @@ class ConnectorDispatcher:
         logger.debug("Applying DDERC fallback to %s (%d mode(s))", label, len(translations))
         unimplemented: list[str] = []
         for method_name, params in translations:
-            method, reason = self._control_support(connector, method_name)
+            method, reason = self.control_support(connector, method_name)
             if method is not None:
                 await self._apply_one(
                     method,
@@ -747,6 +842,7 @@ class ConnectorDispatcher:
                     params,
                     lfdi=lfdi,
                     origin=origin,
+                    kind="default_control",
                     label=label,
                     applied_mrid=dderc_mrid,
                     cause_mrid=cause_mrid,
@@ -921,10 +1017,10 @@ class ConnectorDispatcher:
         )
 
     @staticmethod
-    def _control_support(
-        connector: BaseConnector, method_name: str
+    def control_support(
+        connector: object, method_name: str
     ) -> tuple[Callable[[dict[str, Any]], Any] | None, str | None]:
-        """``(bound method, reason)``. ``reason`` is None when implemented.
+        """Return ``(bound method, reason)``. ``reason`` is None when implemented.
 
         ``BaseConnector`` declares every ``update_*`` method as a concrete method that
         return ``None``, so ``getattr`` finds one whether or not the connector
@@ -1101,7 +1197,7 @@ class ConnectorDispatcher:
             if entry is not None:
                 calls.setdefault(entry[0], entry[1])
         for method_name, params in calls.items():
-            method, _reason = self._control_support(connector, method_name)
+            method, _reason = self.control_support(connector, method_name)
             if method is None:
                 continue
             logger.debug("  %s: %s disabled at event end", label, method_name)
@@ -1111,6 +1207,8 @@ class ConnectorDispatcher:
                 params,
                 lfdi=lfdi,
                 origin=CommandOrigin.EVENT_END,
+                # Withdrawing a mode is a clear, whatever caused it.
+                kind="clear",
                 label=label,
                 cause_mrid=cause_mrid,
             )
@@ -1144,6 +1242,7 @@ class ConnectorDispatcher:
                 {},
                 lfdi=lfdi,
                 origin=CommandOrigin.COMMS_LOSS,
+                kind="clear",
                 label=label,
                 # The lambda has no ``__self__``; without this the clear would
                 # report as generic with no destination -- losing exactly the
@@ -1159,7 +1258,7 @@ class ConnectorDispatcher:
             # any other write. Taking an inherited no-op for an implementation
             # would file twenty commands that reached no register, for a device
             # that implements a handful of modes.
-            method, _reason = self._control_support(connector, method_name)
+            method, _reason = self.control_support(connector, method_name)
             if method is not None:
                 await self._apply_one(
                     method,
@@ -1167,6 +1266,7 @@ class ConnectorDispatcher:
                     params,
                     lfdi=lfdi,
                     origin=CommandOrigin.COMMS_LOSS,
+                    kind="clear",
                     label=label,
                     cause_mrid=cause_mrid,
                 )

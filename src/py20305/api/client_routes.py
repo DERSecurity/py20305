@@ -84,6 +84,9 @@ def create_client_router(
             "offset_seconds": {"type": "number", "nullable": True},
             "age_seconds": {"type": "number", "nullable": True},
             "href": {"type": "string", "nullable": True},
+            "scope": {"type": "string", "enum": ["global", "fsa"], "nullable": True},
+            "fsa_href": {"type": "string", "nullable": True},
+            "spread_seconds": {"type": "number", "nullable": True},
             "timebase_enabled": {"type": "boolean", "nullable": True},
         },
         "required": ["current_time", "source"],
@@ -99,7 +102,11 @@ def create_client_router(
                     "A Time resource has been observed; the reading is server-true. "
                     "Only `current_time` and `source` are guaranteed: the time zone "
                     "fields are null whenever no Time resource is currently held, "
-                    "which happens for the duration of a rediscovery."
+                    "which happens for the duration of a rediscovery. `scope` is "
+                    "`global` when the DeviceCapability's Time resource answered "
+                    "and `fsa` when the head-end links Time only from its "
+                    "FunctionSetAssignments, in which case `fsa_href` names the FSA "
+                    "and `spread_seconds` is how far the FSAs' observations differ."
                 ),
                 "content": {
                     "application/json": {"schema": _TIME_JSON_SCHEMA},

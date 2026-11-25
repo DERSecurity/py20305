@@ -1,7 +1,7 @@
 # Build the wheel in one stage and install it in another, so the runtime image
 # carries neither the build backend nor the source tree -- what ships is the
 # same artifact `pip install py20305` would fetch.
-FROM python:3.12-slim AS build
+FROM python:3.13-slim AS build
 
 WORKDIR /src
 RUN pip install --no-cache-dir build
@@ -14,7 +14,7 @@ COPY src ./src
 RUN python -m build --wheel --outdir /dist
 
 
-FROM python:3.12-slim AS runtime
+FROM python:3.13-slim AS runtime
 
 # The extras a container deployment actually uses: `cli` for the configuration
 # file the entrypoint reads, `sunspec` to reach a SunSpec device.

@@ -15,7 +15,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -56,11 +56,11 @@ jobs:
       # The OIDC token is the credential; nothing else is granted.
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
 
   # Release SBOM in CycloneDX 1.6 and SPDX 2.3, attached to the GitHub
   # release rather than committed to the repository.
@@ -74,10 +74,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
 
       - uses: actions/setup-python@v5
         with:
@@ -104,6 +104,7 @@ jobs:
             --release-tag "${GITHUB_REF_NAME}" \
             --product-license "Apache-2.0" \
             --download-location "https://pypi.org/project/py20305/" \
+            --library \
             --out-dir dist/sbom
 
       - uses: actions/upload-artifact@v4
@@ -117,11 +118,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sbom
           path: dist/

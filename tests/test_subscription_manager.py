@@ -284,6 +284,40 @@ class TestCancelAll:
         await manager.cancel_all()
         mock_client.delete.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_cancel_all_abandons_an_unanswered_delete_after_the_timeout(
+        self, manager: SubscriptionManager, mock_client: AsyncMock
+    ):
+        """A server that never answers cannot hold cancel_all past its timeout."""
+        import asyncio
+
+        mock_client.post.side_effect = ["/sub/1", "/sub/2"]
+        await manager.subscribe("/edev/1/sub", "/edev/1/fsa", "FSAList")
+        await manager.subscribe("/edev/1/sub", "/edev/1/derp", "DERProgramList")
+        abandoned = asyncio.Event()
+
+        async def delete(uri: str) -> int:
+            if uri == "/sub/1":
+                return 200
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                abandoned.set()
+                raise
+            return 200
+
+        mock_client.delete = AsyncMock(side_effect=delete)
+
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        await manager.cancel_all(timeout=0.2)
+
+        assert loop.time() - start < 1.0
+        assert mock_client.delete.call_count == 2
+        # The unanswered DELETE does not outlive the call.
+        assert abandoned.is_set()
+        assert manager._subscriptions == {}
+
 
 class TestNotificationTracking:
     def test_record_notification(self, manager: SubscriptionManager):
