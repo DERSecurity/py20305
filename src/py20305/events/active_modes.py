@@ -11,6 +11,7 @@ class ActiveModeTracker:
     """Track active modes per device per event mRID.
 
     register() records which modes an event provides.
+    release() removes some of those modes without ending the registration.
     unregister() removes the event and returns modes that need DDERC fallback
     (i.e., modes no longer covered by any remaining active event).
     """
@@ -22,6 +23,25 @@ class ActiveModeTracker:
     def register(self, device_href: str, mrid: bytes, modes: frozenset[str]) -> None:
         """Record that event ``mrid`` provides ``modes`` for ``device_href``."""
         self._registry.setdefault(device_href, {})[mrid] = modes
+
+    def release(self, device_href: str, mrid: bytes, modes: frozenset[str]) -> None:
+        """Remove ``modes`` from the registration of event ``mrid`` for ``device_href``.
+
+        The counterpart of :meth:`register` for part of a registration: the
+        event keeps the modes it still provides and the registration is dropped
+        when none are left. Used when another event takes modes over, so that
+        event is the only owner and its own end releases them. Releasing modes
+        the event never registered, or for an event that has no registration,
+        does nothing.
+        """
+        device_events = self._registry.get(device_href)
+        if device_events is None or mrid not in device_events:
+            return
+        remaining = device_events[mrid] - modes
+        if remaining:
+            device_events[mrid] = remaining
+        else:
+            del device_events[mrid]
 
     def unregister(self, device_href: str, mrid: bytes) -> frozenset[str]:
         """Remove event and return modes needing DDERC fallback.
