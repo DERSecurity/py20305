@@ -114,7 +114,7 @@ class TestControlSupport:
     """An inherited base implementation is the absence of an implementation."""
 
     def test_an_overridden_mode_is_supported(self) -> None:
-        method, reason = ConnectorDispatcher._control_support(
+        method, reason = ConnectorDispatcher.control_support(
             _Implements(), "update_op_mod_fixed_w"
         )
 
@@ -122,7 +122,7 @@ class TestControlSupport:
         assert reason is None
 
     def test_an_inherited_no_op_is_unsupported_by_design(self) -> None:
-        method, reason = ConnectorDispatcher._control_support(
+        method, reason = ConnectorDispatcher.control_support(
             _InheritsEverything(), "update_op_mod_fixed_w"
         )
 
@@ -132,7 +132,7 @@ class TestControlSupport:
     def test_a_mode_that_resolves_to_nothing_is_a_missing_offer(self) -> None:
         """A plugin-backed connector supplies modes through ``__getattr__`` from
         a live offer. A mode absent there is actionable, unlike a base no-op."""
-        method, reason = ConnectorDispatcher._control_support(
+        method, reason = ConnectorDispatcher.control_support(
             _InheritsEverything(), "update_never_declared"
         )
 

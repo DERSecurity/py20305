@@ -33,9 +33,9 @@ logger = logging.getLogger(__name__)
 
 _MAX_CONTROL_TYPE = 2**32
 
-# CSIP-AUS DOE control bitmap default: all four DOE limits -- opModExpLimW (bit
-# 0) | opModImpLimW (bit 1) | opModGenLimW (bit 2) | opModLoadLimW (bit 3) =
-# 0x0F. Used when the connector doesn't report which DOE modes it supports.
+# CSIP-AUS DOE control bitmap: opModExpLimW (bit 0) | opModImpLimW (bit 1) |
+# opModGenLimW (bit 2) | opModLoadLimW (bit 3). All four, 0x0F, is the fallback
+# for a caller that does not pass the limits the connector implements.
 _DEFAULT_DOE_MODES_SUPPORTED = 0x0F
 
 
@@ -65,6 +65,7 @@ def build_der_capability(
     der_type: int = 83,
     csip_aus_mode: bool = False,
     modes_supported2: int | None = None,
+    doe_modes_implemented: int | None = None,
     profile: ServerProfile | None = None,
 ) -> Dercapability:
     """Build a ``Dercapability`` model from connector nameplate data.
@@ -78,6 +79,10 @@ def build_der_capability(
             it.
         modes_supported2: The DERControlType2 bits the connector can apply (see
             :func:`py20305.connectors.modes.modes_supported2`).
+        doe_modes_implemented: The CSIP-AUS DOE limits the connector implements
+            (see :func:`py20305.connectors.modes.implemented_doe_modes`). It is
+            the ``doeModesSupported`` value when the connector's nameplate has
+            none. Without it, that value defaults to all four limits.
         profile: The server's schema profile. It limits ``modesSupported2`` to
             the bits the profile permits, and leaves the element out when none
             remain.
@@ -111,20 +116,21 @@ def build_der_capability(
     abn_op_cat = nameplate.get("rtgAbnormalCategory")
 
     # CSIP-AUS extension: doeModesSupported (the DOE control bitmap, 4 bits).
-    # Connector-provided via "doeModesSupported"; defaults to all four DOE limits
-    # when absent. Rides in the DERCapability wildcard slot and is only attached
-    # in CSIP-AUS mode so plain 2030.5 servers are unaffected.
+    # Connector-provided via "doeModesSupported"; when absent, the limits the
+    # connector implements, since the bitmap names the modes "implemented by
+    # the device" (csipaus-ext.xsd, DOEControlType). Rides in the DERCapability
+    # wildcard slot and is only attached in CSIP-AUS mode so plain 2030.5
+    # servers are unaffected.
     other_element: list[object] = []
     if csip_aus_mode:
         doe = nameplate.get("doeModesSupported")
         # Reject bool (a subclass of int) and mask to the 4 defined bits so
         # reserved bits are never advertised and a bad/negative connector value
         # can't overflow to_bytes and crash the capability cycle.
-        doe_bits = (
-            doe
-            if isinstance(doe, int) and not isinstance(doe, bool)
-            else _DEFAULT_DOE_MODES_SUPPORTED
+        fallback = (
+            _DEFAULT_DOE_MODES_SUPPORTED if doe_modes_implemented is None else doe_modes_implemented
         )
+        doe_bits = doe if isinstance(doe, int) and not isinstance(doe, bool) else fallback
         other_element.append(DoeModesSupported(value=(doe_bits & 0x0F).to_bytes(1, "big")))
 
     return Dercapability(

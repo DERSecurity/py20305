@@ -24,7 +24,7 @@ from py20305.client.polling import PollScheduler
 from py20305.client.timebase import ServerTimebase
 from py20305.commands import CommandObserver, NullCommandObserver
 from py20305.connectors.base import ConnectorError
-from py20305.connectors.modes import modes_supported2
+from py20305.connectors.modes import implemented_doe_modes, modes_supported2
 from py20305.telemetry.der_capability import build_der_capability
 from py20305.telemetry.der_settings import build_der_settings
 from py20305.telemetry.der_status import build_der_status
@@ -58,6 +58,8 @@ class DeviceDerState:
     scheduled_keys: list[str] = field(default_factory=list)
     # Change detection cache: only PUT when connector data changes
     last_settings_data: dict[str, Any] | None = None
+    #: What else shapes the DERSettings body, as of the last PUT.
+    last_settings_inputs: tuple[Any, ...] | None = None
 
 
 class DerResourceManager:
@@ -121,7 +123,7 @@ class DerResourceManager:
         # Likewise the href and configuration DERSettings was last PUT from.
         # Compared as the connector's data, not the body, which carries
         # updatedTime.
-        self._sent_settings: dict[str, tuple[str, dict[str, Any]]] = {}
+        self._sent_settings: dict[str, tuple[str, dict[str, Any], tuple[Any, ...]]] = {}
         self._client = client
         # Server timebase for telemetry timestamp defaults. isinstance guard
         # keeps AsyncMock clients in tests (whose .timebase is a Mock)
@@ -261,6 +263,7 @@ class DerResourceManager:
                 der_type=connector.der_type,
                 csip_aus_mode=self._client.csip_aus_mode,
                 modes_supported2=modes_supported2(connector),
+                doe_modes_implemented=implemented_doe_modes(connector),
                 profile=self._client.profile,
             )
             body = to_xml(
@@ -330,10 +333,25 @@ class DerResourceManager:
         try:
             connector = await self._resolve_connector_async(lfdi)
             configuration = await self._read(connector, "fetch_configuration", lfdi)
+            # The body also depends on the limits and modes the connector
+            # implements now (a plugin's live offer can change) and on whether
+            # the server is CSIP-AUS, so a change in any of them is a change.
+            inputs = (
+                implemented_doe_modes(connector),
+                modes_supported2(connector),
+                self._client.csip_aus_mode,
+            )
             if self._put_policy == "on_change":
-                unchanged = self._sent_settings.get(lfdi) == (state.settings_href, configuration)
+                unchanged = self._sent_settings.get(lfdi) == (
+                    state.settings_href,
+                    configuration,
+                    inputs,
+                )
             else:
-                unchanged = configuration == state.last_settings_data
+                unchanged = (
+                    configuration == state.last_settings_data
+                    and inputs == state.last_settings_inputs
+                )
             if unchanged:
                 logger.debug("DERSettings unchanged for %s, skipping PUT", lfdi[:8])
                 return
@@ -343,6 +361,7 @@ class DerResourceManager:
                     updated_time=int(self._timebase.now()),
                     csip_aus_mode=self._client.csip_aus_mode,
                     modes_supported2=modes_supported2(connector),
+                    doe_modes_implemented=implemented_doe_modes(connector),
                     profile=self._client.profile,
                 )
             except ValueError as e:
@@ -374,8 +393,9 @@ class DerResourceManager:
                 ),
             )
             state.last_settings_data = configuration
+            state.last_settings_inputs = inputs
             if self._put_policy == "on_change":
-                self._sent_settings[lfdi] = (state.settings_href, configuration)
+                self._sent_settings[lfdi] = (state.settings_href, configuration, inputs)
             logger.debug("DERSettings PUT for %s", lfdi[:8])
         except Sep2ProtocolError as e:
             from py20305.diagnostics import report
