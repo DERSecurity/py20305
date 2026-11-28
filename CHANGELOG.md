@@ -9,6 +9,124 @@ below says so explicitly.
 
 Nothing yet.
 
+## [1.1.0] - 2026-11-28
+
+### Added
+
+- **The SunSpec connector writes an `opModFixedVar` with `refType` `%setMaxW` as model 704 `VarSetMod` `W_MAX_PCT` (#107).** It was declined with status 251, although model 704 has a matching mode. Model 704 does not say whether `W_MAX_PCT` is a percent of `WMax` or of `WMaxRtg`, so the base is the device's own. Closes #106.
+
+- **A client can adopt the subscriptions the server already holds for it instead of creating them again (#109).** A client that takes over from another instance of itself, with the same certificate and notification address, used to POST a further subscription for every resource, and a server that does not treat that POST as a renewal (IEEE 2030.5-2023 §8.9.3.4) delivered every notification once per set. With `subscription.adopt_existing: true` the client reads every page of its EndDevice's SubscriptionList when it connects, takes over each subscription whose notificationURI is its own and whose resource it subscribes to, and POSTs only for the rest. The notificationURI comparison ignores the case of the scheme and host, an explicit default port, percent-encoding case and a trailing slash, so a server that echoes an equivalent form is still recognized. `subscription.remove_duplicates: true` also DELETEs further copies of its own subscriptions. A subscription with any other notificationURI is never adopted or removed, nor taken as ours when the client later reconciles with the SubscriptionList, and a server that does not return the list is logged and the client subscribes as before. Embedding code can call `CsipClient.adopt_subscriptions()` or `SubscriptionManager.adopt_existing()`. Both settings are off by default. An adopted subscription is renewed at once under `renewal_method: put`, and on the renewal task's first pass under `post`.
+
+  **A client can stop without DELETEing its subscriptions (#109).** `subscription.unsubscribe_on_close: false`, or `CsipClient.shutdown(unsubscribe=False)`, leaves the subscriptions on the server, for an instance that hands over to another instance with the same identity, which adopts them. The default, `true`, keeps the DELETE on shutdown.
+
+- **`ConnectorDispatcher` takes an optional `command_intercept`, which can take a translated write before it reaches the connector (#110).** A host application implements `CommandIntercept.intercept(write)` and receives an `InterceptedWrite` (LFDI, control, parameters, origin, apply path, and the applied and causing mRIDs) after the command gate has permitted the write, for every write that names a device by LFDI. Returning `True` takes the write: the connector is not called, the command observer records nothing, no device write is reported to telemetry, the write history keeps the write with the new outcome `intercepted`, and the caller sees success. Returning `False` applies the write as before. An exception is kept in the write history as a failed write and raised to the caller. With no intercept, nothing changes.
+
+- **The SunSpec connector reports the state of charge (#111).** `SunSpecModbusConnector.fetch_monitoring()` adds `SoC`, in percent, from the first source the device has and populates: model 713 `SoC`, model 802 `SoC`, model 713 `WHAvail` over `WHRtg`, then model 124 `ChaState`. The first three are energy-based; model 124 is last because `ChaState` is a percent of the amp-hour rating. Model 802 and model 124 are read only when no earlier source gave a value, and a failed read of either is skipped for the same interval as model 713. `SunSpecConnector.fetch_status()` reports the same value as DERStatus `stateOfChargeStatus`, in hundredths of a percent.
+
+- **The repository is mirrored, read-only, to Codeberg at
+  <https://codeberg.org/DERSecurity/py20305> (#112).** A workflow pushes `main` and every
+  tag there after each change on GitHub, which gives the project a copy hosted in the EU.
+  Issues and pull requests stay on GitHub.
+
+- **Several client processes can share one subscription set (#113).** A host application that runs several client processes for one certificate has one EndDevice and one SubscriptionList at the server, and each process used to subscribe to every resource again, so the server delivered each notification once per process. `SubscriptionManager(store=...)` takes a `SubscriptionStore`; give every process the same one and a process makes no POST for a resource another process subscribed to, and classifies a notification by a record another process wrote. The manager writes each renewal, new href and server cancellation back to the store, and writes a renewal back only if no cancellation was recorded while it was in flight. A cancellation by the server with status 1 stops every process sharing the store from subscribing to that resource again until a reconnect. Records use the `to_checkpoint()` entry format, which now also carries `is_list_subscription` and `resubscribe_suppressed`. The default, `MemorySubscriptionStore`, keeps the records in the process as before. See the guide "Running one client in several processes".
+
+- **A host application can split one client's EndDevices between processes (#114).** Four optional parameters, each off by default: `CsipClient(device_filter=...)` (a callable, or a `DeviceSet` of hrefs and LFDIs) limits the EndDevices a process discovers, acts for and responds for, and a process with a filter never cancels a subscription another process may need; `CsipClient(own_end_device=False)` leaves the client's own-EndDevice work (subscription renewal, reconciliation and cancellation, EndDevice registration and re-registration, telemetry for the client's own LFDI, including a site meter mirrored under it) to another process, and sets the new `SubscriptionManager(maintains_set=False)`, so the process never renews, cancels or removes a shared subscription, even when asked to with `shutdown(unsubscribe=True)`; `NotificationServer(forward=...)` hands each notification's body to the host and answers 201 only after the host has taken it, 503 if it could not, and `CsipClient.process_notification()` acts on it in the process that reads it and raises any error from acting on it, a failed rediscovery or DERControl fetch included, so the host can retry it; `CsipClient(request_limiter=...)` is awaited before every request to the server, so processes can share one request budget; an exception from the limiter reaches the caller unchanged, without a retry.
+
+- **EndDevices can move from one client process to another without a repeated Response or control (#115).** With `CsipClient(event_state_store=...)` the event processor saves a snapshot of each EndDevice's events, randomized timing, applied default and loss-of-communications boundary to a shared `EventStateStore`, and records each Response as it is posted. `release_devices()` waits for event work already running for the devices, then hands them over without posting or writing anything, and raises if their state cannot be saved; `take_over_devices()` loads their state, rediscovers, carries each event on with its timing, applies a running event only to a device that never received it, and returns False without resuming anything when its rediscovery failed. A Response already posted for a device is not posted again even when no snapshot was saved, and a loss-of-communications boundary or opt-out carried by a device applies to that device only. Each device's randomization offsets for an event are shared through the store, so a device moved to another process keeps the timing it drew. Without a store nothing changes.
+
+- **The client reads the aggregation an EndDevice represents (#116).** IEEE 2030.5-2023 §8.7 lets an EndDevice represent several devices, with a `distribution` (AggregationDistributionType: Uniform, Prorate or Priority) that says how its controls are shared among the members. Discovery now reads, for each EndDevice that carries a non-zero `distribution` or an aggregation link, its AggregatedDeviceList and, for a Priority distribution, its AggregationPriority, as Annex C.3 describes, and reads them again on each EndDeviceList refresh and on a poll of their own at the list's `pollRate`, which a subscription never suppresses. The result is an `AggregationInfo` on the EndDevice's state, also returned by `CsipClient.aggregation(lfdi)`: the distribution, the members (with the ones the server marked disabled before removal, §8.7.3.1) and the priority order. A list or a priority that cannot be read, including on a timeout, is logged; the previous read's members and priority are kept. `CsipClient.register_aggregated_device` POSTs a member to an AggregatedDeviceList, after an `sFDI` query (§8.7.3.2) so a member the list already holds is never posted again. Sharing a control across the members stays with the application; see the guide "Aggregations".
+
+### Changed
+
+- **CI tests a locked set of dependencies, and the release SBOM says so (#98).** `uv.lock` pins the versions CI installs, so a new upstream release cannot change what CI tests until a Dependabot pull request updates the lock. The lock does not ship: `pip install py20305` still resolves the ranges in `pyproject.toml`, and a weekly `Latest dependencies` workflow tests the newest versions those ranges allow. Set up a development environment with `uv sync --extra dev`. The release SBOM now records its dependency resolution as `tested-lock`: the versions the lock pins and the test suite runs against, which a consumer resolving the ranges may not get.
+
+- **The default `doeModesSupported` and `doeModesEnabled` follow the DOE limits a connector implements (#99, closes #62).**
+  A connector that did not return the bitmaps made a CSIP-AUS server read all four limits as supported
+  and the export and import limits as enabled, whether or not it implemented them. Both now default to
+  the limits whose `update_op_mod_*_lim_w` method the connector overrides (a plugin-backed connector
+  counts the limits its live offer carries), so a connector implementing none reports `0`. A connector
+  that implements all four now defaults `doeModesEnabled` to `0x0F` instead of `0x03`. A value the
+  connector returns still wins.
+
+- **A DefaultDERControl now sets the modes no active event controls, including on a device that has an event running (#100).** IEEE 2030.5-2023 §10.10.4.2.1 manages each control mode by the default when no active DERControl holds it. The initial default pass used to leave out every device with an active event, so a default that arrived or changed during an event reached none of its modes until the event ended. It now sends each device the default without the modes the running events hold there, as the end-of-event fallback already does, and a default naming only held modes writes nothing. A default that names no control mode still waits for the device's events to end. A mode is also left out when the default of a higher-priority program names it, and a mode freed after the default was written without it is written on the next poll. This changes what the client writes to a device during an event. Closes #64.
+
+- **Each EndDevice now draws its own event randomization (#115).** This changes what a single-process client does too. Before, a client drew one randomizeStart and one randomizeDuration offset per event and moved every EndDevice it acts for as one block. IEEE 2030.5-2023 §10.2.3.2.2 and §10.2.3.2.3 have each device draw its own, to keep a group of devices from acting at the same moment (§10.2.3.1). Each device is now dispatched, answered for with ACTIVE and COMPLETED, and fallen back to its DefaultDERControl at its own randomized start and end; the event is ACTIVE from the first device's start to the last device's end, and supersession compares each device's own window. A successive event starts on each device where the earlier one ended on it (§10.2.2.3 rule m.1), and an event received after its start begins on each device at the current time plus that device's start offset (rule k), which the client did not apply before. A device whose own window has already ended when the event arrives is answered EXPIRED and not dispatched (rule j). Events without randomization behave as before. Under a `group_lookup` the program's devices share one draw. `EventStateStore.claim_offsets` and `forget_offsets` now take the device href, and `RandomizationCache` keys its offsets by event and device.
+
+- **The container image is built on Python 3.13 (#124).** The base moves from
+  `python:3.12-slim` to `python:3.13-slim`, the top of the range this project
+  supports and tests. An image built before this change keeps working; nothing
+  in the client's behavior depends on the interpreter's minor version, and the
+  wheel installed inside the image is the same one PyPI serves. The pinned
+  development and documentation dependencies and the workflow actions move to
+  their current releases in the same change.
+
+### Fixed
+
+- **A client built from `CsipClient` alone now writes CSIP-AUS extensions to a CSIP-AUS server (#99, closes #79).**
+  Discovery detected CSIP-AUS but never copied the result to `Sep2Client.csip_aus_mode`, so the
+  DERCapability PUT carried no `doeModesSupported` unless the embedding application set the flag
+  itself. The HTTP client now follows what each discovery detects, so rediscovery picks up a server
+  that adds or drops the CSIP-AUS declaration. A value assigned to `Sep2Client.csip_aus_mode`, or
+  implied by a configured `extensions` list, still wins over detection in both directions. Assigning
+  `None` returns the flag to following discovery. An embedding application that copied
+  `state.csip_aus_mode` into `Sep2Client.csip_aus_mode` after `connect()` should drop the copy, since
+  an assigned value now pins the flag.
+
+  **A refused readings POST no longer costs two posting intervals of readings (#99, closes #90).**
+  A 400 or 404 on the readings POST dropped that cycle's readings, and the next cycle only re-created
+  the MirrorUsagePoint. The cycle now re-POSTs the MirrorUsagePoint once and posts the same readings
+  to the new location, with `nextUpdateTime` from the read-back postRate. A second refusal or a
+  failed re-POST resets the state and retries on the next cycle as before, and a 403 still blocks
+  the device.
+
+  **`GET /api/v1/time` answers when the head-end publishes Time only on its FunctionSetAssignments (#99, closes #11).**
+  With no DeviceCapability Time the client held one observation per FSA and no global one, and the
+  endpoint answered 503. It now answers from the FSA observation with the lowest `quality`, preferring
+  one still being renewed and then the most recent. The response gains `scope` (`global` or `fsa`),
+  `fsa_href` and `spread_seconds`, the largest difference between the FSA offsets, counting only
+  fresh observations while any is fresh; `local_time` and the time zone fields come from that FSA's
+  Time resource. A rediscovery that cannot read an EndDevice's FSA list keeps the observations of the
+  FSAs that device listed before. The 503 for no observation of any scope is unchanged.
+
+- **A device withdrawn from a DERProgram stops receiving that program's controls on the next program poll (#100).** The refresh used to prune whole programs only, so a device whose function set assignment was withdrawn kept being a dispatch target until a full rediscovery. `DeviceMapping` gains `remove_pair`, and the refresh drops each (program, device) pair no current assignment names. A device whose program list could not be read or was not served keeps its pairs, and a device mapped through the DeviceCapability program list is not unmapped. Closes #13.
+
+  **The event that takes a mode from a superseded event can release it when it ends (#100).** The superseded event kept its registration for the modes taken from it until it ended, so when the superseding event ended first, or a third event was running on the device, the mode stayed on the device. `ActiveModeTracker.release` removes named modes from one registration, and supersession now calls it. Closes #60.
+
+  **A control whose every mode the connector does not implement is answered as rejected, not reported ACTIVE (#100).** The dispatcher raises `ModeNotSupportedError` when a DERControl or DefaultDERControl translates to at least one mode and the connector implements none of them, which is reported as status 251 (252 for a 2018 server). A control that applies at least one mode behaves as before. A default control with no implemented mode is no longer retried and warned about on every poll. Closes #63.
+
+- **The SunSpec Modbus connector reports and writes the IEEE 2030.5 values it was getting wrong, and declines controls it cannot apply (#101).**
+  DERCapability and DERSettings `modesSupported` and `modesEnabled` are now the DERControlType
+  bits of the controls the connector applies, not the SunSpec `CtrlModes` bits, and
+  `rtgNormalCategory` and `rtgAbnormalCategory` count from 1 as IEEE 2030.5 numbers them. A
+  curve's `yRefType` now selects the SunSpec curve reference, and a curve whose `yRefType` has
+  no SunSpec equivalent is declined. A volt-var curve with no `vRef` writes 100% of nominal
+  instead of 0, `autonomousVRefTimeConstant` is written in seconds instead of hundredths of a
+  second, and a frequency droop `pMin` is written as a percent of the rating instead of a raw
+  watts value. An unsupported `opModFixedVar` `refType`, and an `opModTargetW` on a device
+  with no percent base, are declined with status 251 instead of reported as applied. Curve and
+  droop functions are enabled after the curve is written and adopted, so a refused write no
+  longer leaves one enabled on its previous curve. An `opModMaxLimW` percent stays a percent of
+  the device's own maximum power while an `opModMaxLimWInject` limit is in force, so the two no
+  longer compound, and clearing `opModMaxLimWInject` returns the discharge rate limit to its
+  rating. Writes to model 704 registers a device does not implement were already declined by
+  an earlier release.
+
+- **A device withdrawn from a DERProgram no longer keeps a running event's control (#107).** The end-of-event release walked the program's current devices, so a device withdrawn during the event kept the event's setpoints and its tracker registration after the event ended. The release now covers every device the event is registered on, and a withdrawal found by the program poll ends the control on that device at once (IEEE 2030.5-2023 §8.8.3): the event's modes are disabled where no other default carries them and the default that now governs the device is applied, while the event keeps running on its other devices. No response is posted for the withdrawn device, because the standard has no status for a withdrawal. Events cancelled because their whole program was removed release their modes the same way. `refresh_der_programs` takes an optional `withdrawn` list that receives the dropped pairs. Closes #102.
+
+  **A DefaultDERControl mode comes from the lowest-primacy default that names it, at the end of an event as well as at the first pass (#107).** The fallback sent one program's default per device and the default tracker blocked a lower-priority default whole, so a mode only a lower-priority program's default named was never applied (IEEE 2030.5-2023 §10.10.4.2.1). One selection now serves both paths. Only the lowest-primacy default carries the settings that are not modes, such as `setGradW`. Closes #103.
+
+  **Overlapping events that carry CSIP-AUS limits supersede mode by mode (#107).** `opModExpLimW`, `opModImpLimW`, `opModGenLimW` and `opModLoadLimW` were invisible to supersession, so two overlapping events carrying only limits were compared as equal and superseded each other even for different limits, and no superseded modes were recorded. They now supersede only for a limit they share (CSIP-AUS v1.1a §5.2.4.1, IEEE 2030.5-2023 §10.2.2.3 rule q). Events with no CSIP-AUS elements are compared as before. Closes #104.
+
+  **The SunSpec connector declines an `opModMaxLimWInject` with no percent base and an `opModMaxLimWAbsorb` with no absorb capability (#107).** Both wrote nothing and returned normally, so the server was told the control was in force. They are now answered with status 251 (252 for a 2018 server). Closes #105.
+
+  **A negative `opModFixedVar` `%setMaxW` setpoint is declined, and a missing `refType` is no longer read as `%setMaxW` (#107).** IEEE 2030.5-2023 makes a negative `%setMaxW` value a percent of `%setMaxChargeRateW`, which no model 704 `VarSetMod` expresses. Closes #106.
+
+- **A cancelled event's delayed fallback to the DefaultDERControl now runs (#115).** When a running event is cancelled, IEEE 2030.5 §10.2.3.3 has the client wait out the greater of the absolute randomizeStart and randomizeDuration before falling back. The timer that waits it out skipped its callback because the event was already cancelled, so the fallback never ran and the device stayed on the cancelled control until the event left the store. Finished timers were also never forgotten, so a pending-timer check stayed true for the life of the event and held back the default for the whole program. Both are fixed, and the fallback now counts as event work, so a process handing its devices over waits for its writes before saving their state.
+
+### Security
+
+- **Dependabot now proposes every new dependency release, not only security fixes (#98).** A weekly pull request per ecosystem groups the minor and patch releases of the locked Python dependencies, the GitHub Actions and the container base image. Each major release gets its own pull request.
+
 ## [1.0.2] - 2026-11-16
 
 ### Fixed
