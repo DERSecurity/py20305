@@ -511,7 +511,11 @@ class BaseConnector:
 
     async def notification_price(self, notification: ScheduleNotification) -> None:
         """The active pricing interval (TimeTariffInterval) changed. Relay-only:
-        the connector decides whether to act on the price."""
+        the connector decides whether to act on the price.
+
+        Transition ``active`` carries the new interval's prices. Transition
+        ``completed`` or ``cancelled`` reports that the active interval ended
+        with no interval after it; its payload is the ended interval's."""
         return None
 
     async def notification_drlc(self, notification: ScheduleNotification) -> None:

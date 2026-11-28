@@ -367,3 +367,119 @@ async def test_shutdown_cancels_pending_relay_tasks():
     assert proc._relay_tasks
     await proc.shutdown()
     assert not proc._relay_tasks
+
+
+@pytest.mark.asyncio
+async def test_next_run_delay_is_time_until_next_interval_start():
+    state = _state([_interval(b"\xaa", 0), _interval(b"\xbb", HOUR)])
+    proc, _, _ = _make(state, [NS(consumption_tariff_interval=[_cti(1)])], now=100)
+    await proc.process_tariffs()
+    await _drain(proc)
+    assert proc.next_run_delay() == HOUR - 100
+
+
+@pytest.mark.asyncio
+async def test_next_run_delay_is_time_until_active_interval_end():
+    state = _state([_interval(b"\xaa", 0, 2 * HOUR), _interval(b"\xbb", 3 * HOUR)])
+    proc, _, _ = _make(state, [NS(consumption_tariff_interval=[_cti(1)])], now=100)
+    await proc.process_tariffs()
+    await _drain(proc)
+    assert proc.next_run_delay() == 2 * HOUR - 100
+
+
+@pytest.mark.asyncio
+async def test_next_run_delay_none_when_no_boundary_remains():
+    state = _state([_interval(b"\xaa", 0)])
+    proc, _, _ = _make(state, [NS(consumption_tariff_interval=[_cti(1)])], now=2 * HOUR)
+    await proc.process_tariffs()
+    await _drain(proc)
+    assert proc.next_run_delay() is None
+
+
+@pytest.mark.asyncio
+async def test_next_run_delay_ignores_cancelled_interval():
+    cancelled = _interval(b"\xbb", HOUR)
+    cancelled.event_status = NS(current_status=2)
+    state = _state([cancelled])
+    proc, _, _ = _make(state, [NS(consumption_tariff_interval=[_cti(1)])], now=100)
+    await proc.process_tariffs()
+    assert proc.next_run_delay() is None
+
+
+@pytest.mark.asyncio
+async def test_next_run_delay_follows_timebase_change():
+    state = _state([_interval(b"\xbb", HOUR)])
+    proc, _, tb = _make(state, [NS(consumption_tariff_interval=[_cti(1)])], now=100)
+    await proc.process_tariffs()
+    tb.t = HOUR - 10  # the server clock stepped forward
+    assert proc.next_run_delay() == 10
+
+
+@pytest.mark.asyncio
+async def test_failed_price_fetch_sets_short_retry_with_backoff():
+    state = _state([_interval(b"\xaa", 0)])
+    http = _FakeHttp([NS(consumption_tariff_interval=[_cti(5)])], fail_times=2)
+    proc = TariffProcessor(http, state, _FakeDispatcher(), timebase=_FakeTimebase(100))
+
+    await proc.process_tariffs()
+    first = proc.next_run_delay()
+    assert first is not None and 4 < first <= 5
+    await proc.process_tariffs()
+    second = proc.next_run_delay()
+    assert second is not None and 9 < second <= 10
+    await proc.process_tariffs()  # the fetch succeeds: no retry is due
+    await _drain(proc)
+    assert proc.next_run_delay() == HOUR - 100
+
+
+@pytest.mark.asyncio
+async def test_relays_completed_when_active_interval_ends_without_successor():
+    state = _state([_interval(b"\xaa", 0)])
+    proc, disp, tb = _make(state, [NS(consumption_tariff_interval=[_cti(7)])], now=100)
+    await proc.process_tariffs()
+    await _drain(proc)
+    tb.t = HOUR  # the interval's end; nothing follows it
+    await proc.process_tariffs()
+    await _drain(proc)
+
+    assert [(n.mrid, n.transition, n.status) for _, n in disp.calls] == [
+        ("aa", "active", "active"),
+        ("aa", "completed", "completed"),
+    ]
+    ended = disp.calls[1][1]
+    assert ended.end == HOUR
+    assert ended.affected_lfdis == ["11"]
+
+
+@pytest.mark.asyncio
+async def test_relays_cancelled_when_active_interval_cancelled_early():
+    interval = _interval(b"\xaa", 0)
+    state = _state([interval])
+    proc, disp, _ = _make(state, [NS(consumption_tariff_interval=[_cti(7)])], now=100)
+    await proc.process_tariffs()
+    await _drain(proc)
+    interval.event_status = NS(current_status=2)  # server cancelled it mid-interval
+    await proc.process_tariffs()
+    await _drain(proc)
+
+    ended = disp.calls[-1][1]
+    assert (ended.mrid, ended.transition, ended.status) == ("aa", "cancelled", "cancelled")
+    assert ended.current_status == 2
+
+
+@pytest.mark.asyncio
+async def test_process_tariffs_survives_profiles_cleared_during_price_fetch():
+    # Rediscovery clears tariff_profiles in place. A run that is awaiting a price
+    # fetch at that moment must finish without "dictionary changed size".
+    state = _state([_interval(b"\xaa", 0)])
+    proc, disp, _ = _make(state, [NS(consumption_tariff_interval=[_cti(1)])], now=100)
+    fetch = proc._http.get_list
+
+    async def clearing_get_list(path: str, model_type: type) -> list[Any]:
+        state.tariff_profiles.clear()
+        return await fetch(path, model_type)
+
+    proc._http.get_list = clearing_get_list  # type: ignore[method-assign]
+    await proc.process_tariffs()
+    await _drain(proc)
+    assert [n.mrid for _, n in disp.calls] == ["aa"]

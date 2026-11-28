@@ -399,12 +399,20 @@ async def _discover_tariff_profile(
     return tp_state
 
 
-async def _discover_tariffs_for_fsa(client: Sep2Client, fsa: Any, state: DiscoveredState) -> None:
-    """Follow an FSA's ``TariffProfileListLink`` and populate ``state.tariff_profiles``.
+async def _discover_tariffs_for_fsa(
+    client: Sep2Client,
+    fsa: Any,
+    state: DiscoveredState,
+    profiles: dict[str, TariffProfileState] | None = None,
+) -> None:
+    """Follow an FSA's ``TariffProfileListLink`` and add its profiles to *profiles*.
 
-    Opt-in: the caller only invokes this when ``state.pricing_enabled`` is set.
-    A missing link is a no-op (the FSA doesn't advertise pricing).
+    *profiles* defaults to ``state.tariff_profiles``. Opt-in: the caller only
+    invokes this when ``state.pricing_enabled`` is set. A missing link is a
+    no-op (the FSA doesn't advertise pricing).
     """
+    if profiles is None:
+        profiles = state.tariff_profiles
     tp_list_href = _extract_href(fsa.tariff_profile_list_link)
     if not tp_list_href:
         return
@@ -433,9 +441,9 @@ async def _discover_tariffs_for_fsa(client: Sep2Client, fsa: Any, state: Discove
             # at the same /tp), so skip profiles already discovered from an
             # earlier FSA: avoids re-fetching the RateComponent/interval subtree
             # and keeps discovered_from_fsa_href deterministic (first FSA wins).
-            if not tp.href or tp.href in state.tariff_profiles:
+            if not tp.href or tp.href in profiles:
                 continue
-            state.tariff_profiles[tp.href] = await _discover_tariff_profile(
+            profiles[tp.href] = await _discover_tariff_profile(
                 client, tp, tp.href, fsa.href
             )
 
@@ -1225,13 +1233,18 @@ async def refresh_tariffs(client: Sep2Client, state: DiscoveredState) -> None:
     picked up and expired ones drop out. No-op unless pricing is enabled. The
     walk dedupes within this refresh (the global tariff tree is reachable from
     every FSA), so each profile is fetched once.
+
+    The new tree is built in a separate dict and assigned when the walk
+    completes. Readers never see a partly built tree, and a walk that raises
+    leaves the previous tree in place.
     """
     if not state.pricing_enabled:
         return
-    state.tariff_profiles.clear()
-    for edev_state in state.end_devices.values():
-        for fsa in edev_state.fsa_list:
-            await _discover_tariffs_for_fsa(client, fsa, state)
+    profiles: dict[str, TariffProfileState] = {}
+    for edev_state in list(state.end_devices.values()):
+        for fsa in list(edev_state.fsa_list):
+            await _discover_tariffs_for_fsa(client, fsa, state, profiles)
+    state.tariff_profiles = profiles
 
 
 async def refresh_der_programs(client: Sep2Client, state: DiscoveredState) -> list[str]:

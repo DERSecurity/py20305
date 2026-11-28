@@ -108,6 +108,10 @@ _MAX_REDISCOVERY_PASSES = 5
 # How often a deferred notification re-poll checks whether rediscovery finished.
 _REDISCOVERY_WAIT_INTERVAL_S = 0.1
 
+# Longest sleep of the tariff boundary timer between clock checks. Re-checking
+# lets a wall-clock step or a new server time offset move the firing time.
+_TARIFF_TIMER_TICK_S = 1.0
+
 # After this many consecutive poll failures, treat a subsequent recovery
 # as "the upstream server probably restarted" and trigger full
 # rediscovery instead of just re-subscribing. Rationale: a single
@@ -306,6 +310,14 @@ class CsipClient:
         self._tariff_processor = TariffProcessor(
             self._http, self._state, self._dispatcher, timebase=self._timebase
         )
+        #: Serializes tariff refreshes and processing. Re-polls from the
+        #: scheduler, from notifications and from the boundary timer would
+        #: otherwise interleave, and an older read could be relayed after a
+        #: newer one.
+        self._tariff_lock = asyncio.Lock()
+        #: Runs the tariff processor at the next interval boundary. See
+        #: _arm_tariff_timer().
+        self._tariff_timer: asyncio.Task[None] | None = None
         self._subscription_manager = subscription_manager
         self._notification_server = notification_server
         self._on_structural_change = on_structural_change
@@ -1391,9 +1403,65 @@ class CsipClient:
 
     async def _do_poll_tariff(self) -> None:
         """Pricing poll: re-walk the tariff tree, then relay any active-interval
-        price change to connectors. No-op unless pricing is enabled."""
-        await refresh_tariffs(self._http, self._state)
-        await self._tariff_processor.process_tariffs()
+        price change to connectors. No-op unless pricing is enabled.
+
+        Waits for a running tariff re-poll to finish rather than skipping, so
+        this run reads the newest server state. Then arms the boundary timer.
+        """
+        async with self._tariff_lock:
+            await refresh_tariffs(self._http, self._state)
+            await self._tariff_processor.process_tariffs()
+        self._arm_tariff_timer()
+
+    def _arm_tariff_timer(self) -> None:
+        """Start the timer that re-runs the tariff processor when it is next due.
+
+        Replaces any pending timer. Starts none when the processor has nothing
+        due (no later interval boundary and no price fetch to retry) or after
+        shutdown started.
+        """
+        pending = self._tariff_timer
+        self._tariff_timer = None
+        if pending is not None and pending is not asyncio.current_task():
+            pending.cancel()
+        if self._shutdown_event.is_set() or self._tariff_processor.next_run_delay() is None:
+            return
+        self._tariff_timer = asyncio.create_task(
+            self._run_tariff_timer(), name="tariff-boundary-timer"
+        )
+
+    async def _run_tariff_timer(self) -> None:
+        """Run the tariff processor at its next interval boundary, then re-arm.
+
+        Processing uses the schedule already fetched; it does not refresh the
+        tariff tree. It waits for a running rediscovery and a running tariff
+        re-poll to finish first.
+        """
+        while True:
+            delay = self._tariff_processor.next_run_delay()
+            if delay is None:
+                return
+            if delay <= 0:
+                break
+            await asyncio.sleep(min(delay, _TARIFF_TIMER_TICK_S))
+        while self._rediscovery_lock.locked():
+            await asyncio.sleep(_REDISCOVERY_WAIT_INTERVAL_S)
+        try:
+            async with self._tariff_lock:
+                await self._tariff_processor.process_tariffs()
+        except Exception:
+            logger.warning("Tariff processing at an interval boundary failed", exc_info=True)
+        self._arm_tariff_timer()
+
+    async def _cancel_tariff_timer(self) -> None:
+        """Cancel the tariff boundary timer and wait for it to stop."""
+        task = self._tariff_timer
+        self._tariff_timer = None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     async def _do_poll_derp_targeted(
         self, subscribed_resource: str, *, strict: bool = False
@@ -1655,11 +1723,10 @@ class CsipClient:
         if all_fsa - subscribed_fsa:
             active_poll_keys.discard("fsa")
 
-        # The tariff processor is poll-driven for active-interval transitions: it
-        # has no event timers (unlike DERControl), so an interval that simply
-        # becomes active by wall-clock produces no server change and no
-        # notification. Keep the tariff poll running even when subscribed -- the
-        # subscription only accelerates pickup of schedule *edits* between polls.
+        # Keep the tariff poll running even when subscribed. The boundary timer
+        # relays interval starts and ends from the schedule already fetched; the
+        # poll re-reads the schedule and re-arms that timer, and the
+        # subscription only speeds up pickup of schedule edits between polls.
         active_poll_keys.discard("tariff")
 
         # Suppress keys covered by subscriptions
@@ -2596,6 +2663,7 @@ class CsipClient:
         # is about to close.
         await self._stop_comm_loss_simulation_expiry()
         await self._cancel_notification_followups()
+        await self._cancel_tariff_timer()
         if self._renewal_task and not self._renewal_task.done():
             self._renewal_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
