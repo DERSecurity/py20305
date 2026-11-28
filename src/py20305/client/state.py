@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from py20305.models.sep.sep import (
     DefaultDercontrol,
@@ -20,6 +21,9 @@ from py20305.models.sep.sep import (
     Time,
     TimeTariffInterval1,
 )
+
+if TYPE_CHECKING:
+    from py20305.client.aggregation import AggregationInfo
 
 
 @dataclass
@@ -73,6 +77,8 @@ class EndDeviceState:
     subscription_list_href: str | None = None
     fsa_list_subscribable: bool = False
     derp_list_subscribable: bool = False
+    #: The aggregation the EndDevice represents (IEEE 2030.5-2023 §8.7), or None.
+    aggregation: AggregationInfo | None = None
 
 
 @dataclass

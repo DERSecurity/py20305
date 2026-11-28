@@ -69,6 +69,7 @@ nav:
       - Management API: api.md
       - Observers: observers.md
       - Operations history: history.md
+      - Aggregations: aggregations.md
       - Running in several processes: scale-out.md
       - Running in a container: docker.md
       - Testing: testing.md

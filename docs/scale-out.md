@@ -49,9 +49,10 @@ process and pass `own_end_device=False` to the rest. The work is:
   SubscriptionList, and checking restored subscriptions at connect;
 - renewing the subscriptions it adopts and removing duplicate ones;
 - cancelling subscriptions, at rediscovery and at shutdown;
-- registering EndDevices (`register_end_device` raises `RuntimeError` in a
-  process without the work), and re-registering the client's own EndDevice
-  after a loss of communications;
+- registering EndDevices and aggregation members (`register_end_device` and
+  `register_aggregated_device` raise `RuntimeError` in a process without the
+  work), and re-registering the client's own EndDevice after a loss of
+  communications;
 - the DERCapability, DERSettings and DERStatus PUTs and the MirrorUsagePoint
   posts a `TelemetryCoordinator` makes for the client's own LFDI.
 

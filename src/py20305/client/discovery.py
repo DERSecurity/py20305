@@ -11,6 +11,7 @@ from typing import Any
 
 from lxml import etree
 
+from py20305.client.aggregation import aggregation_poll_rate, read_aggregation
 from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
 from py20305.client.http import Sep2Client
 from py20305.client.poll_rate import DEFAULT_POLL_RATE, normalize_poll_rate
@@ -632,6 +633,10 @@ async def discover(
             if reg_href:
                 edev_state.registration_href = reg_href
 
+            # An EndDevice that represents an aggregation: its AggregatedDeviceList
+            # and, for a Priority distribution, its AggregationPriority (Annex C.3).
+            edev_state.aggregation = await read_aggregation(client, edev)
+
             # 5a. DER list (optional; server may advertise link without resource).
             # Contained per device: one EndDevice's unreadable DER list must not
             # abort the walk for every other device, and at startup a raise here
@@ -1081,9 +1086,64 @@ async def refresh_end_device_lists(client: Sep2Client, state: DiscoveredState) -
                 # Update the device object and LFDI
                 state.end_devices[edev_href].device = edev
                 state.end_devices[edev_href].lfdi = edev.l_fdi or b""
+                # The distribution, members and priority may change (§8.7.3.1:
+                # a member is disabled before it is removed).
+                edev_state = state.end_devices[edev_href]
+                edev_state.aggregation = await read_aggregation(
+                    client, edev, edev_state.aggregation
+                )
 
     register_device_prefixes(client, state)
     logger.debug("Refreshed EndDevice list with %d devices", len(state.end_devices))
+
+
+def aggregations_poll_interval(state: DiscoveredState) -> int | None:
+    """Return the shortest poll interval of the discovered aggregations, or None."""
+    fallback = state.poll_rates.get("edev") or DEFAULT_POLL_RATE
+    rates = [
+        rate
+        for edev_state in state.end_devices.values()
+        if edev_state.aggregation is not None
+        and (rate := aggregation_poll_rate(edev_state.aggregation, fallback)) is not None
+    ]
+    return min(rates) if rates else None
+
+
+async def refresh_aggregations(
+    client: Sep2Client, state: DiscoveredState, last_read: dict[str, float], now: float
+) -> None:
+    """Read again each aggregation whose poll interval has elapsed.
+
+    This runs on its own schedule, so an aggregation stays current while a
+    subscription suppresses the EndDeviceList poll. ``last_read`` maps an
+    EndDevice href to the monotonic time of its last read here; an EndDevice
+    with no entry is due. A read that fails keeps the previous members and
+    priority. A read that an EndDeviceList refresh overtook is dropped.
+    """
+    fallback = state.poll_rates.get("edev") or DEFAULT_POLL_RATE
+    for edev_href, edev_state in list(state.end_devices.items()):
+        info = edev_state.aggregation
+        if info is None:
+            continue
+        rate = aggregation_poll_rate(info, fallback)
+        if rate is None:
+            continue
+        previous = last_read.get(edev_href)
+        # One second of slack, so a tick that wakes just early still reads.
+        if previous is not None and now - previous < rate - 1:
+            continue
+        device = edev_state.device
+        fresh = await read_aggregation(client, device, info)
+        last_read[edev_href] = now
+        # An EndDeviceList refresh or a rediscovery may have replaced the
+        # EndDevice or its aggregation while this read was in flight. Its data
+        # is newer, so this read is dropped.
+        if (
+            state.end_devices.get(edev_href) is edev_state
+            and edev_state.device is device
+            and edev_state.aggregation is info
+        ):
+            edev_state.aggregation = fresh
 
 
 async def refresh_function_set_assignments(

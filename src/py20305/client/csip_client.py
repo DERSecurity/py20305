@@ -14,7 +14,9 @@ from typing import TYPE_CHECKING, Any
 from py20305.audit import AuditEmitter
 from py20305.client.discovery import (
     _extract_href,
+    aggregations_poll_interval,
     discover,
+    refresh_aggregations,
     refresh_der_controls,
     refresh_der_controls_for_program,
     refresh_der_programs,
@@ -58,6 +60,7 @@ from py20305.subscription.notification_server import (
 )
 
 if TYPE_CHECKING:
+    from py20305.client.aggregation import AggregationInfo
     from py20305.client.request_budget import RequestLimiter
     from py20305.events.shared_state import EventStateStore
     from py20305.history import History
@@ -235,6 +238,8 @@ class CsipClient:
         self._reconcile_interval_seconds = reconcile_interval_seconds
         self._renewal_interval_seconds = renewal_interval_seconds
         self._scheduler = self._new_scheduler()
+        # Monotonic time each aggregation EndDevice was last read by the "adev" poll.
+        self._aggregation_reads: dict[str, float] = {}
         self._shutdown_event = asyncio.Event()
         self._rediscovery_lock = asyncio.Lock()
         self._state_ready = asyncio.Event()
@@ -481,6 +486,82 @@ class CsipClient:
     def timebase(self) -> ServerTimebase:
         return self._timebase
 
+    def aggregation(self, lfdi: str) -> AggregationInfo | None:
+        """Return the aggregation the discovered EndDevice ``lfdi`` represents, or None.
+
+        None when no discovered EndDevice has that LFDI or the EndDevice
+        describes no aggregation (IEEE 2030.5-2023 §8.7). Read from the
+        discovered state: the EndDevice's ``distribution``, its
+        AggregatedDeviceList and, for a Priority distribution, its
+        AggregationPriority (Annex C.3), as of the last discovery or EndDevice
+        list refresh.
+        """
+        wanted = bytes.fromhex(lfdi)
+        for edev_state in self._state.end_devices.values():
+            if edev_state.lfdi == wanted:
+                return edev_state.aggregation
+        return None
+
+    async def register_aggregated_device(
+        self,
+        *,
+        aggregated_device_list_href: str,
+        lfdi: str,
+        device_category: int | None = None,
+        check_duplicate: bool = True,
+    ) -> str | None:
+        """POST an AggregatedDevice to an AggregatedDeviceList and return its ``Location``.
+
+        IEEE 2030.5-2023 §8.7.1 lets a client create an AggregatedDevice by a POST
+        to the list, where the server allows it (Annex A.2.5.2: POST optional).
+        ``lfdi`` is a 40-hex string; the ``sFDI`` is derived from it. With
+        ``check_duplicate``, the list is first read with the ``sFDI`` query
+        string parameter (§8.7.3.2), and an LFDI the list already holds raises
+        ``ValueError``: clients SHALL NOT POST an AggregatedDevice the list
+        already contains (§8.7.3.1). Raises ``Sep2ProtocolError`` on a server
+        rejection status and ``RuntimeError`` in a process without
+        own-EndDevice duties (see :attr:`own_end_device`).
+        """
+        if not self._own_end_device:
+            raise RuntimeError(
+                "this client process does not do own-EndDevice work; register devices "
+                "from the process that does"
+            )
+        from py20305.models.sep.sep import (
+            AggregatedDevice,
+            AggregatedDeviceList,
+            DeviceCategoryType,
+            Sfditype,
+            TimeType,
+        )
+        from py20305.security.identity import compute_sfdi
+
+        # An LFDI is 160 bits: 40 hex characters. A shorter or longer string
+        # would register a different identity.
+        try:
+            lfdi_bytes = bytes.fromhex(lfdi)
+        except ValueError:
+            raise ValueError(f"lfdi must be 40 hexadecimal characters, got {lfdi!r}") from None
+        if len(lfdi_bytes) != 20 or len(lfdi) != 40:
+            raise ValueError(f"lfdi must be 40 hexadecimal characters, got {lfdi!r}")
+        sfdi = compute_sfdi(lfdi)
+        if device_category is not None and not 0 <= device_category < 2**32:
+            raise ValueError("device_category must be between 0 and 4294967295 (32-bit bitmap)")
+        if check_duplicate:
+            separator = "&" if "?" in aggregated_device_list_href else "?"
+            query = f"{aggregated_device_list_href}{separator}sFDI={sfdi}"
+            for page in await self._http.get_list(query, AggregatedDeviceList):
+                if any(device.l_fdi == lfdi_bytes for device in page.aggregated_device):
+                    raise ValueError(f"An AggregatedDevice with LFDI {lfdi} is already listed")
+        device = AggregatedDevice(
+            l_fdi=lfdi_bytes,
+            s_fdi=Sfditype(value=sfdi),
+            changed_time=TimeType(value=int(self._timebase.now())),
+        )
+        if device_category is not None:
+            device.device_category = DeviceCategoryType(value=device_category.to_bytes(4, "big"))
+        return await self._http.post(aggregated_device_list_href, device)
+
     async def run_redirect_probe(self) -> dict[str, Any]:
         """Run ERR-001 HTTP-to-HTTPS redirect probe using this client's session."""
         from py20305.client.redirect_probe import run_redirect_probe
@@ -665,6 +746,8 @@ class CsipClient:
         fsa_rate = rates.get("fsa")
         if fsa_rate is not None:
             self._scheduler.schedule("fsa", fsa_rate, self._poll_fsa)
+
+        self._schedule_aggregation_poll()
 
         derp_rate = rates.get("derp")
         if derp_rate is not None:
@@ -1223,6 +1306,34 @@ class CsipClient:
             "Polling edev: refreshing end device lists for %d devices", len(self._state.end_devices)
         )
         await refresh_end_device_lists(self._http, self._state)
+        # A refresh can add or remove an aggregation or change its list's pollRate.
+        self._schedule_aggregation_poll()
+
+    def _schedule_aggregation_poll(self) -> None:
+        """Schedule the "adev" poll at the shortest aggregation poll interval.
+
+        The AggregatedDeviceList and AggregationPriority are never subscribed,
+        so this poll is never suppressed: an aggregation stays current while a
+        subscription suppresses the EndDeviceList poll. Each run reads only the
+        aggregations whose own interval has elapsed.
+        """
+        interval = aggregations_poll_interval(self._state)
+        if interval is None:
+            return
+        if "adev" in self._scheduler.active_keys:
+            self._scheduler.set_interval("adev", interval)
+        else:
+            self._scheduler.schedule("adev", interval, self._poll_aggregations)
+
+    async def _poll_aggregations(self) -> None:
+        await self._poll_with_404_recovery(self._do_poll_aggregations)
+
+    async def _do_poll_aggregations(self) -> None:
+        await refresh_aggregations(
+            self._http, self._state, self._aggregation_reads, time.monotonic()
+        )
+        # A read can change a list's pollRate, and so the poll's interval.
+        self._schedule_aggregation_poll()
 
     def _subscribed_fsa_hrefs(self) -> set[str]:
         """FSA list hrefs with an active subscription -- rule (r): don't poll them."""
