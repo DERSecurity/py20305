@@ -164,6 +164,37 @@ notification listener then stops, waiting at most 2 s for a notification still
 being received (`NotificationServer(shutdown_timeout=...)`). An unreachable or
 unresponsive server therefore no longer holds a stop for the HTTP timeouts.
 
+`subscription.adopt_existing: true` is for a client that takes over from
+another instance of itself, such as a standby that replaces a failed primary
+with the same certificate and the same `notification_external_host` and port.
+Both instances are then the same EndDevice to the server, and without adoption
+the new one POSTs a further subscription for every resource; a server that does
+not treat that POST as a renewal (IEEE 2030.5-2023 §8.9.3.4) keeps both, and
+each notification arrives once per set. With adoption, the client reads every
+page of its EndDevice's SubscriptionList when it connects, takes over each
+subscription whose notificationURI is its own and whose resource it would
+subscribe to, and POSTs only for the resources left. An adopted subscription's
+last renewal time is unknown: with `renewal_method: put` it is renewed at once;
+with `post` it is renewed on the renewal task's first pass, because a re-POST to
+a server that does not treat it as a renewal would create another copy.
+`subscription.remove_duplicates: true` also DELETEs the further
+subscriptions of its own it finds for a resource it adopted. A subscription
+with any other notificationURI is never adopted or removed. The comparison
+ignores differences a server may introduce when it echoes the URI: the case of
+the scheme and host, an explicit default port, percent-encoding case, and a
+trailing slash. If the server does
+not return its SubscriptionList, the client logs a warning and subscribes as it
+would without adoption. Embedding code can call
+`CsipClient.adopt_subscriptions()` itself.
+
+`subscription.unsubscribe_on_close: false` is the other half of a handover: the
+instance that stops leaves its subscriptions on the server for the instance
+that adopts them, instead of DELETEing them at shutdown. The default, `true`,
+DELETEs them as described above. If an instance that hands over does DELETE
+them, the adopting instance's SubscriptionList check creates them again at the
+list's pollRate, and notifications sent in between are lost. Embedding code can
+decide per stop with `CsipClient.shutdown(unsubscribe=False)`.
+
 The server has the final say on the posting rate: an `EndDevice.postRate` above
 zero replaces `post_rate_seconds` for that device, which is what IEEE 2030.5
 specifies. A server exposing no MirrorUsagePointList stops the readings only —
@@ -348,6 +379,17 @@ Either signal reverts the device to the DefaultDERControl and POSTs "The event
 has been cancelled" when the event's `responseRequired` asks for it. Cancelling
 an event that is already running applies the wind-down randomization §10.2.3.3
 requires, so the revert can land later than the cancellation that caused it.
+
+An event with `randomizeStart` or `randomizeDuration` is randomized per device,
+as IEEE 2030.5-2023 §10.2.3.2.2 and §10.2.3.2.3 require: each EndDevice the
+client acts for draws its own offsets, so the devices of one event start and
+end at different moments rather than as one block, and each device's ACTIVE
+and COMPLETED Responses are posted at its own start and end. An event received
+after its start begins on each device at the current time plus that device's
+start offset (§10.2.2.3 rule k), and a successive event starts on each device
+where the earlier one ended on it (rule m). A device whose own randomized
+window has already ended when the event arrives is not dispatched and is
+answered EXPIRED (rule j).
 
 Removal is acted on only when the list was fetched completely. A DERControl
 fetch that fails or does not parse leaves the client holding no list rather than

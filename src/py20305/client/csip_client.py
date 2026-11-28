@@ -7,7 +7,7 @@ import contextlib
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +33,7 @@ from py20305.client.http import Sep2Client
 from py20305.client.poll_rate import DEFAULT_POLL_RATE, normalize_poll_rate
 from py20305.client.polling import PollScheduler
 from py20305.client.retry import RetryPolicy
+from py20305.client.scope import DeviceFilter
 from py20305.client.state import DiscoveredState
 from py20305.client.timebase import ServerTimebase, observe_time_resource
 from py20305.client.tls import TlsConfig
@@ -43,6 +44,7 @@ from py20305.events.tariff import TariffProcessor
 from py20305.observers import Observers
 from py20305.server_profile import ServerProfile, profile_for_constructor
 from py20305.subscription.manager import (
+    AdoptionResult,
     StoredNotification,
     SubscriptionManager,
 )
@@ -56,7 +58,10 @@ from py20305.subscription.notification_server import (
 )
 
 if TYPE_CHECKING:
+    from py20305.client.request_budget import RequestLimiter
+    from py20305.events.shared_state import EventStateStore
     from py20305.history import History
+    from py20305.models.sep.sep import Notification
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +147,15 @@ def _needs_poll_recovery(exc: Exception, *, is_global: bool) -> bool:
 
 
 class CsipClient:
-    """Async IEEE 2030.5 CSIP client with discovery, polling, and shutdown."""
+    """Async IEEE 2030.5 CSIP client with discovery, polling, and shutdown.
+
+    Several processes can act as one client; see the guide "Running one client
+    in several processes". ``device_filter`` limits the EndDevices this process
+    acts for, ``own_end_device`` says whether it does the client's own-EndDevice
+    work, and ``request_limiter`` paces its requests against a shared budget.
+    ``event_state_store`` shares the event state of each EndDevice, so another
+    process can take a device over (see :meth:`take_over_devices`).
+    """
 
     def __init__(
         self,
@@ -175,6 +188,10 @@ class CsipClient:
         fsa_stale_seconds: float | None = None,
         pricing_enabled: bool = False,
         server_2018_compat: bool | None = None,
+        device_filter: DeviceFilter | None = None,
+        own_end_device: bool = True,
+        request_limiter: RequestLimiter | None = None,
+        event_state_store: EventStateStore | None = None,
     ) -> None:
         #: Application-level server timebase :
         #: time-of-day-sensitive operations follow the head-end's Time resource;
@@ -193,8 +210,14 @@ class CsipClient:
             always_send_alarm_status=always_send_alarm_status,
             request_headers=request_headers,
             timebase=self._timebase,
+            request_limiter=request_limiter,
         )
         self._state = DiscoveredState()
+        #: The EndDevices this process acts for; None is every one.
+        self._device_filter = device_filter
+        #: Whether this process does the client's own-EndDevice work. See
+        #: the ``own_end_device`` property.
+        self._own_end_device = own_end_device
         #: Pricing function set opt-in (config-driven). Preserved across
         #: rediscovery (state.clear() keeps it) and gates tariff discovery/poll.
         self._state.pricing_enabled = pricing_enabled
@@ -264,6 +287,7 @@ class CsipClient:
             comms_loss=self._comms_loss,
             timebase=self._timebase,
             audit=self._audit,
+            state_store=event_state_store,
         )
         #: Pricing function set: relays active-interval prices to connectors.
         #: Constructed unconditionally but only driven by the tariff poll when
@@ -276,6 +300,15 @@ class CsipClient:
         self._on_structural_change = on_structural_change
         self._on_rediscovered: Callable[[], Awaitable[None]] | None = None
         self._on_device_removed = on_device_removed
+        #: The exception that ended the last failed rediscovery pass, or None.
+        self._rediscovery_error: Exception | None = None
+        #: Rediscovery passes started, and the number of the last one that
+        #: completed. take_over_devices checks a pass started after it did.
+        self._rediscovery_passes = 0
+        self._last_completed_pass = 0
+        #: The hrefs this process acted for when the running rediscovery began.
+        #: A lifecycle notification during the rediscovery is matched against it.
+        self._scope_before_rediscovery: set[str] = set()
         self._dcap_path = dcap_path
         #: LFDI hex -> expected registration PIN. Verified once during the
         #: initial connect() discovery (not on rediscovery). Empty/None
@@ -293,6 +326,34 @@ class CsipClient:
         #: emit a WARNING ~96 times/day. Reset to False once a link is discovered so a
         #: subsequent server-side fix is also logged (and a regression re-warns).
         self._no_sub_link_warned = False
+
+    @property
+    def device_filter(self) -> DeviceFilter | None:
+        """The filter choosing the EndDevices this process acts for; None is every one.
+
+        Read at each discovery, so a filter whose answers change (a
+        :class:`~py20305.client.scope.DeviceSet` the host edits) takes effect at
+        the next rediscovery.
+        """
+        return self._device_filter
+
+    @property
+    def own_end_device(self) -> bool:
+        """Whether this process does the work of the client's own EndDevice.
+
+        That work is: renewing the subscriptions, reconciling them with the
+        server's SubscriptionList, checking restored subscriptions at connect,
+        renewing adopted subscriptions and removing duplicate ones, cancelling
+        subscriptions at rediscovery and at shutdown, registering EndDevices,
+        re-registering the client's own EndDevice after a loss of
+        communications, and the telemetry a
+        :class:`~py20305.telemetry.coordinator.TelemetryCoordinator` posts for
+        the client's own LFDI. True, the default, does all of it.
+        When several processes act as one client, give it to one of them.
+        A process without it still creates subscriptions for the resources it
+        needs that nobody has subscribed to yet.
+        """
+        return self._own_end_device
 
     @property
     def dispatcher(self) -> ControlDispatcher:
@@ -355,7 +416,13 @@ class CsipClient:
         ``__init__`` -- construction order forces attachment to come second.
         Attach before ``connect()``: auto-subscription and poll suppression
         consult the manager during connection.
+
+        In a client without own-EndDevice work (see :attr:`own_end_device`)
+        this sets the manager's ``maintains_set`` to False, so the manager
+        never renews, cancels or removes the shared subscriptions.
         """
+        if not self._own_end_device:
+            manager.maintains_set = False
         self._subscription_manager = manager
         if notification_server is not None:
             self._notification_server = notification_server
@@ -439,8 +506,14 @@ class CsipClient:
         Raises ``ValueError`` for a missing EndDeviceList href or, when
         ``check_duplicate``, an LFDI the server already lists (IEEE 2030.5 §8.5.3:
         clients SHALL NOT POST a duplicate EndDevice). Raises ``Sep2ProtocolError``
-        on a server rejection status.
+        on a server rejection status. Raises ``RuntimeError`` in a process
+        without own-EndDevice duties (see :attr:`own_end_device`).
         """
+        if not self._own_end_device:
+            raise RuntimeError(
+                "this client process does not do own-EndDevice work; register EndDevices "
+                "from the process that does"
+            )
         from py20305.models.sep.sep import (
             DeviceCategoryType,
             EndDevice,
@@ -510,23 +583,62 @@ class CsipClient:
             self._state,
             registration_pins=self._registration_pins,
             dcap_path=self._dcap_path,
+            device_filter=self._device_filter,
         )
         # Capture the client's own LFDI for comms-loss self-reregistration.
         # Cert-derived and stable across reset_session, so a single capture holds.
         if self._own_lfdi is None:
             self._own_lfdi = self._http.client_lfdi
         if self._subscription_manager:
-            if self._subscription_manager.active_subscriptions:
+            if self._own_end_device and self._subscription_manager.active_subscriptions:
                 valid, removed = await self._subscription_manager.validate_restored_subscriptions()
                 logger.info("Subscription validation: %d valid, %d removed", valid, removed)
+            if self._subscription_manager.adopt_on_connect:
+                await self.adopt_subscriptions()
             await self._auto_subscribe()
             self._update_poll_suppression()
-            if self._subscription_manager.active_subscriptions:
-                self._renewal_task = asyncio.create_task(
-                    self._subscription_manager.start_renewal_task(
-                        self._shutdown_event, interval_seconds=self._renewal_interval_seconds
-                    )
-                )
+            self._start_renewal_task()
+
+    def _start_renewal_task(self) -> None:
+        """Start the subscription renewal task, in a process with own-EndDevice duties."""
+        mgr = self._subscription_manager
+        if mgr is None or not self._own_end_device or not mgr.active_subscriptions:
+            return
+        self._renewal_task = asyncio.create_task(
+            mgr.start_renewal_task(
+                self._shutdown_event, interval_seconds=self._renewal_interval_seconds
+            )
+        )
+
+    async def adopt_subscriptions(
+        self, *, remove_duplicates: bool | None = None
+    ) -> AdoptionResult | None:
+        """Take over the subscriptions the server already holds for this client.
+
+        Calls :meth:`SubscriptionManager.adopt_existing` with this client's
+        SubscriptionList and the resources it subscribes to. ``connect()`` calls
+        this before creating subscriptions when the manager was built with
+        ``adopt_on_connect``. ``remove_duplicates`` defaults to the manager's
+        setting.
+
+        Returns None when no subscription manager is attached or discovery has
+        found no SubscriptionListLink.
+        """
+        mgr = self._subscription_manager
+        if mgr is None:
+            return None
+        sub_list_href = self._find_agg_sub_href()
+        if sub_list_href is None:
+            return None
+        if remove_duplicates is None:
+            remove_duplicates = mgr.remove_duplicates
+        result = await mgr.adopt_existing(
+            sub_list_href,
+            self._compute_desired_subscriptions(),
+            remove_duplicates=remove_duplicates,
+        )
+        self._update_poll_suppression()
+        return result
 
     async def run(self) -> None:
         """Start polling and block until shutdown is signaled."""
@@ -598,7 +710,11 @@ class CsipClient:
         # SubscriptionList and re-establishes any locally-active subscription it's
         # missing. Runs only when subscriptions exist; never subscription-
         # suppressed (the SubscriptionList itself isn't subscribed -- rule (r)).
-        if self._reconcile_enabled and self._subscription_manager is not None:
+        if (
+            self._reconcile_enabled
+            and self._own_end_device
+            and self._subscription_manager is not None
+        ):
             sub_rate = self._sub_poll_rate()
             if sub_rate is not None:
                 self._scheduler.schedule("sub", sub_rate, self._poll_sub_reconcile)
@@ -778,7 +894,7 @@ class CsipClient:
         #    re-poll below is what actually resumes control). The client method
         #    (unlike the web layer) does not refuse the own LFDI;
         #    check_duplicate=False avoids re-fetching the list we just checked.
-        if self._own_lfdi is not None:
+        if self._own_lfdi is not None and self._own_end_device:
             try:
                 if await self._server_lists_end_device(self._own_lfdi):
                     logger.info(
@@ -1163,12 +1279,15 @@ class CsipClient:
         await refresh_tariffs(self._http, self._state)
         await self._tariff_processor.process_tariffs()
 
-    async def _do_poll_derp_targeted(self, subscribed_resource: str) -> bool:
+    async def _do_poll_derp_targeted(
+        self, subscribed_resource: str, *, strict: bool = False
+    ) -> bool:
         """Fetch controls for the single program that owns *subscribed_resource*.
 
         Returns True if a targeted refresh was performed, False if the
         resource could not be resolved to a known program (caller should
-        fall back to full re-poll).
+        fall back to full re-poll). ``strict`` raises a failed fetch instead
+        of skipping it.
         """
         program_href = self._state.find_program_for_resource(subscribed_resource)
         if program_href is None:
@@ -1183,7 +1302,9 @@ class CsipClient:
             program_href,
             subscribed_resource,
         )
-        found = await refresh_der_controls_for_program(self._http, self._state, program_href)
+        found = await refresh_der_controls_for_program(
+            self._http, self._state, program_href, strict=strict
+        )
         if found:
             await self._event_processor.process_controls(program_href)
         return found
@@ -1435,11 +1556,16 @@ class CsipClient:
                 self._scheduler.unsuppress(key)
 
     def _find_agg_sub_href(self) -> str | None:
-        """Find the client device's SubscriptionListLink href."""
+        """Find the client device's SubscriptionListLink href.
+
+        Falls back to the one discovery recorded from an EndDevice the device
+        filter left out, so a process acting for none of the EndDevices that
+        carry the link can still subscribe.
+        """
         for edev_state in self._state.end_devices.values():
             if edev_state.subscription_list_href:
                 return edev_state.subscription_list_href
-        return None
+        return self._state.subscription_list_href
 
     def _compute_desired_subscriptions(self) -> set[tuple[str, str]]:
         """Return the set of (subscribed_resource, resource_type) tuples to subscribe to.
@@ -1528,8 +1654,120 @@ class CsipClient:
                 continue
             await mgr.subscribe(agg_sub_href, resource, rtype)
 
-    async def _handle_notification(self, notification: object) -> None:
+    async def process_notification(self, notification: bytes | Notification) -> bool:
+        """Process one notification received by any process acting as this client.
+
+        For a host that receives notifications in one process and processes them
+        in another: the listener's ``forward`` hands the raw body to the host,
+        the host queues it, and the process acting for the affected EndDevice
+        calls this with it. ``notification`` is the raw XML body as the server
+        sent it, or a parsed Notification.
+
+        Returns True when this process acted on the notification, False when it
+        did not: it concerns no EndDevice this process acts for (see
+        :meth:`acts_for_resource`), or a loss-of-communications simulation is
+        running, during which notifications are dropped as the listener drops
+        them. A host can therefore deliver every notification to every process.
+
+        Raises ``ValueError`` when the body is not a valid Notification. An
+        error while acting on it (a failed GET, or a failed rediscovery the
+        notification started) is raised to the caller, so the host can keep the
+        notification and retry it; a retry is not skipped as a duplicate. A
+        notification that arrives while a rediscovery is running is left to
+        that rediscovery and counts as acted on.
+        """
+        from py20305.models.sep.sep import Notification
+        from py20305.subscription.notification_server import (
+            parse_notification,
+            validate_notification,
+        )
+
+        if isinstance(notification, Notification):
+            parsed = notification
+        else:
+            try:
+                parsed = parse_notification(notification)
+            except Exception as exc:
+                raise ValueError(f"not a valid IEEE 2030.5 Notification: {exc}") from exc
+            if not validate_notification(parsed, notification):
+                raise ValueError("not a valid IEEE 2030.5 Notification: xsi:type mismatch")
+        if self._http.comm_loss_simulation.active:
+            logger.info(
+                "Notification for %s dropped: comms-loss simulation active",
+                parsed.subscribed_resource or "<unknown>",
+            )
+            return False
+        return await self._handle_notification(parsed, raise_failures=True)
+
+    def acts_for_resource(self, href: str) -> bool:
+        """Return whether a notification about ``href`` concerns this process.
+
+        Always True without a device filter. With one, True for the
+        EndDeviceList, for the EndDevices this process acts for and their
+        FunctionSetAssignmentsLists, for the DERProgramLists of their
+        FunctionSetAssignments, for their DERPrograms with their DERControlLists
+        and DefaultDERControls, and for the Pricing resources it reads. Also
+        True while a rediscovery is running, because the discovered state is
+        being rebuilt then and the rediscovery deals with what arrives. A
+        notification that reports a resource cancelled, moved, changed or
+        deleted is not left to a running rediscovery: the client matches it
+        against the EndDevices this process acted for when the rediscovery
+        began, and those it has found since. After a rediscovery that failed,
+        the hrefs this process acted for before it still count, so a
+        notification retried after the failure is not dropped.
+        """
+        if self._device_filter is None or self._rediscovery_lock.locked():
+            return True
+        return href in self._scope()
+
+    def _scope(self) -> set[str]:
+        """Return the hrefs this process acts for, with the earlier scope when it applies.
+
+        The earlier scope applies while a rediscovery runs and after one that
+        failed, because the discovered state is then incomplete.
+        """
+        scope = self._scoped_resource_hrefs()
+        if self._rediscovery_lock.locked() or self._rediscovery_error is not None:
+            scope |= self._scope_before_rediscovery
+        return scope
+
+    def _acts_for_notification(self, href: str, status: int) -> bool:
+        """Return whether a notification with ``status`` about ``href`` concerns this process."""
+        if self._device_filter is None or status == STATUS_DEFAULT:
+            return self.acts_for_resource(href)
+        return href in self._scope()
+
+    def _scoped_resource_hrefs(self) -> set[str]:
+        """Return the hrefs a notification may name that concern this process."""
+        state = self._state
+        hrefs: set[str | None] = set()
+        if state.dcap is not None:
+            hrefs.add(_extract_href(state.dcap.end_device_list_link))
+        for edev_href, edev_state in state.end_devices.items():
+            hrefs.add(edev_href)
+            hrefs.add(_extract_href(edev_state.device.function_set_assignments_list_link))
+            for fsa in edev_state.fsa_list:
+                hrefs.add(fsa.href)
+                hrefs.add(_extract_href(fsa.derprogram_list_link))
+                hrefs.add(_extract_href(fsa.tariff_profile_list_link))
+        for program_href, derp_state in state.der_programs.items():
+            hrefs.add(program_href)
+            hrefs.add(_extract_href(derp_state.program.dercontrol_list_link))
+            hrefs.add(_extract_href(derp_state.program.default_dercontrol_link))
+        for tp_href, tp_state in state.tariff_profiles.items():
+            hrefs.add(tp_href)
+            for rc_state in tp_state.rate_components:
+                hrefs.add(rc_state.tti_list_href)
+        return {href for href in hrefs if href}
+
+    async def _handle_notification(
+        self, notification: object, *, raise_failures: bool = False
+    ) -> bool:
         """Process a received IEEE 2030.5 notification.
+
+        Returns False when the notification was not acted on.
+        ``raise_failures`` raises the error of a rediscovery the notification
+        started and that failed, instead of only reporting it.
 
         Routes STATUS_DEFAULT notifications based on subscribed_resource path:
         - DERControlList changes (/derc): re-poll DERPs (fast path)
@@ -1541,11 +1779,18 @@ class CsipClient:
 
         if not isinstance(notification, Notification):
             logger.warning("Unexpected notification type: %s", type(notification))
-            return
+            return False
 
         mgr = self._subscription_manager
         if mgr is None:
-            return
+            return False
+
+        if not self._acts_for_notification(notification.subscribed_resource, notification.status):
+            logger.debug(
+                "Ignoring notification for %s: no EndDevice this process acts for",
+                notification.subscribed_resource,
+            )
+            return False
 
         # Dedup: skip if we already processed this resource recently.
         # Only STATUS_DEFAULT (data-change) notifications are deduped. Lifecycle
@@ -1578,7 +1823,7 @@ class CsipClient:
             ):
                 self._rediscovery_pending = True
             logger.debug("Ignoring duplicate notification for %s", notification.subscribed_resource)
-            return
+            return False
 
         # List/non-list filter: non-list subscriptions should not fire on list changes
         if not mgr.should_process_notification(
@@ -1588,7 +1833,7 @@ class CsipClient:
                 "Ignoring notification (list/non-list filter) for %s",
                 notification.subscribed_resource,
             )
-            return
+            return False
 
         import time
 
@@ -1601,7 +1846,16 @@ class CsipClient:
                     created_at=time.time(),
                 )
             )
-            await self._route_default_notification(notification.subscribed_resource, resource_type)
+            try:
+                await self._route_default_notification(
+                    notification.subscribed_resource,
+                    resource_type,
+                    raise_failures=raise_failures,
+                )
+            except Exception:
+                # Let a redelivery of this notification through the dedup window.
+                mgr.forget_notification(notification.subscribed_resource)
+                raise
         elif notification.status == STATUS_CANCELLED:
             # Server cancelled with no further info (rule n, status=1). Honour it:
             # stop treating the sub as active and DON'T auto-re-subscribe -- fall
@@ -1630,17 +1884,35 @@ class CsipClient:
                         new_resource_uri=notification.new_resource_uri,
                     )
                 )
-            if self._on_structural_change:
-                await self._on_structural_change()
-            else:
-                await self.trigger_rediscovery()
+            await self._rediscover_for_notification(raise_failures)
         elif notification.status == STATUS_DEFINITION_CHANGED:
             mgr.mark_cancelled(notification.subscription_uri)
             self._update_poll_suppression()
         elif notification.status == STATUS_RESOURCE_DELETED:
             mgr.mark_cancelled(notification.subscription_uri)
             self._update_poll_suppression()
-            await self._handle_resource_deleted(notification.subscribed_resource)
+            await self._handle_resource_deleted(
+                notification.subscribed_resource, raise_failures=raise_failures
+            )
+        return True
+
+    async def _rediscover_for_notification(self, raise_failures: bool) -> None:
+        """Rediscover after a structural notification.
+
+        Calls the structural-change callback instead when one is set. With
+        ``raise_failures``, raises the error of a rediscovery pass that failed.
+        A call that joins a rediscovery already running returns at once: that
+        rediscovery runs again and handles the change.
+        """
+        if self._on_structural_change:
+            await self._on_structural_change()
+            return
+        joined = self._rediscovery_lock.locked()
+        if await self.trigger_rediscovery() or joined or not raise_failures:
+            return
+        if self._rediscovery_error is not None:
+            raise self._rediscovery_error
+        raise RuntimeError("rediscovery failed")
 
     def _is_structural(self, resource_path: str, resource_type: str | None = None) -> bool:
         """Classify a notification as structural (EndDevice/FSA -> rediscovery).
@@ -1720,22 +1992,24 @@ class CsipClient:
         return path.endswith("/tti") or path.endswith("/tp")
 
     async def _route_default_notification(
-        self, subscribed_resource: str, resource_type: str | None = None
+        self,
+        subscribed_resource: str,
+        resource_type: str | None = None,
+        *,
+        raise_failures: bool = False,
     ) -> None:
         """Route a STATUS_DEFAULT notification based on resource type.
 
         ``resource_type`` (the subscription's topology-derived type) drives the
         classification when known; otherwise the path heuristic is the fallback.
+        ``raise_failures`` raises the error of a rediscovery that failed.
         """
         if self._is_structural(subscribed_resource, resource_type):
             logger.info(
                 "Structural change notification for %s, triggering rediscovery",
                 subscribed_resource,
             )
-            if self._on_structural_change:
-                await self._on_structural_change()
-            else:
-                await self.trigger_rediscovery()
+            await self._rediscover_for_notification(raise_failures)
         else:
             # Skip re-poll if rediscovery is in progress — the device mapping
             # is in flux and process_controls would produce incorrect results.
@@ -1774,7 +2048,12 @@ class CsipClient:
                 mgr = self._subscription_manager
                 if mgr:
                     mgr.record_notification_ancestry(subscribed_resource)
-                if await self._do_poll_derp_targeted(subscribed_resource):
+                targeted = (
+                    self._do_poll_derp_targeted(subscribed_resource, strict=True)
+                    if raise_failures
+                    else self._do_poll_derp_targeted(subscribed_resource)
+                )
+                if await targeted:
                     return
                 logger.info(
                     "Targeted fetch failed for %s, falling back to full re-poll",
@@ -1787,11 +2066,13 @@ class CsipClient:
             )
             await self._do_poll_derp()
 
-    async def _handle_resource_deleted(self, subscribed_resource: str) -> None:
+    async def _handle_resource_deleted(
+        self, subscribed_resource: str, *, raise_failures: bool = False
+    ) -> None:
         """Handle STATUS_RESOURCE_DELETED notification.
 
         If the deleted resource is an EndDevice, call the device-removal callback.
-        Otherwise trigger rediscovery.
+        Otherwise trigger rediscovery; ``raise_failures`` raises its error if it fails.
         """
         path = subscribed_resource.rstrip("/")
         parts = path.strip("/").split("/")
@@ -1805,10 +2086,7 @@ class CsipClient:
 
         # Other resource deletions trigger rediscovery
         logger.info("Resource deleted: %s, triggering rediscovery", subscribed_resource)
-        if self._on_structural_change:
-            await self._on_structural_change()
-        else:
-            await self.trigger_rediscovery()
+        await self._rediscover_for_notification(raise_failures)
 
     async def trigger_rediscovery(self) -> bool:
         """Re-run discovery and restart polling. Safe to call concurrently.
@@ -1843,6 +2121,8 @@ class CsipClient:
             while True:
                 self._rediscovery_pending = False
                 passes += 1
+                self._rediscovery_passes += 1
+                this_pass = self._rediscovery_passes
                 logger.info("Rediscovery: resetting polls (preserving event processor)")
                 await self._scheduler.cancel_all()
                 self._scheduler = self._new_scheduler()
@@ -1854,6 +2134,10 @@ class CsipClient:
                     self._renewal_task = None
                 # Remember active programs before clearing state
                 previous_programs = set(self._state.der_programs.keys())
+                # Taken only from state a pass rebuilt: after a failed pass the
+                # state is incomplete, and the earlier scope still applies.
+                if self._device_filter is not None and self._rediscovery_error is None:
+                    self._scope_before_rediscovery = self._scoped_resource_hrefs()
                 # Signal that state is being rebuilt — event timers that fire
                 # during this window will wait until discover() repopulates it.
                 self._state_ready.clear()
@@ -1877,6 +2161,7 @@ class CsipClient:
                             self._http,
                             self._state,
                             dcap_path=self._dcap_path,
+                            device_filter=self._device_filter,
                         )
                     finally:
                         # Always unblock timer callbacks — if discover() failed they will
@@ -1892,8 +2177,16 @@ class CsipClient:
                             # structural change and rediscover again -- an infinite
                             # loop. The periodic renewal task owns subscription
                             # lifetime; rediscovery only reconciles membership.
+                            # A process acting for some of the EndDevices sees only
+                            # the resources it needs, so a subscription it does not
+                            # want may be another process's. Only the process with
+                            # own-EndDevice work, acting for every EndDevice,
+                            # cancels what it does not want.
                             result = await self._subscription_manager.reconcile(
-                                agg_sub_href, desired, renew_kept=False
+                                agg_sub_href,
+                                desired,
+                                renew_kept=False,
+                                cancel_unwanted=self._maintains_whole_set(),
                             )
                             logger.info(
                                 "Subscription reconciliation: kept=%d cancelled=%d"
@@ -1910,20 +2203,18 @@ class CsipClient:
                             # (a stale URI otherwise 404s on a later cancel/renew).
                             # reestablish_missing=False: adopt-only, no re-POST -- a
                             # re-POST here risks the rediscovery<->echo loop.
+                            # Only records for resources this process wants are
+                            # dropped: it cannot subscribe to the others again.
                             await self._subscription_manager.reconcile_with_server(
-                                agg_sub_href, reestablish_missing=False
+                                agg_sub_href,
+                                reestablish_missing=False,
+                                resources={resource for resource, _ in desired},
                             )
-                        else:
+                        elif self._maintains_whole_set():
                             # No subscription list or no desired subs; cancel remaining
                             await self._subscription_manager.cancel_all()
                         self._update_poll_suppression()
-                        if self._subscription_manager.active_subscriptions:
-                            self._renewal_task = asyncio.create_task(
-                                self._subscription_manager.start_renewal_task(
-                                    self._shutdown_event,
-                                    interval_seconds=self._renewal_interval_seconds,
-                                )
-                            )
+                        self._start_renewal_task()
                     # Re-fetch FSA and program hierarchy to catch resources added between
                     # discover() and subscription creation (same race as DERControl refresh).
                     await refresh_function_set_assignments(self._http, self._state)
@@ -1943,6 +2234,8 @@ class CsipClient:
                     for href in list(self._state.der_programs):
                         await self._event_processor.process_controls(href)
                     self._start_polls()
+                    self._rediscovery_error = None
+                    self._last_completed_pass = this_pass
                     logger.info("Rediscovery complete")
                 except Exception as exc:
                     # Re-arm the scheduler so the connectivity heartbeat (and polls)
@@ -1962,6 +2255,7 @@ class CsipClient:
                         details={"error": str(exc)},
                         exc_info=True,
                     )
+                    self._rediscovery_error = exc
                     self._start_polls()
                     return False
                 if not self._rediscovery_pending:
@@ -1995,14 +2289,93 @@ class CsipClient:
             await self._on_rediscovered()
         return True
 
+    def _maintains_whole_set(self) -> bool:
+        """Return whether this process may cancel subscriptions it does not want.
+
+        True only with own-EndDevice work and no device filter: a process that
+        acts for some EndDevices does not know what the others need.
+        """
+        return self._own_end_device and self._device_filter is None
+
+    async def take_over_devices(self, device_hrefs: Iterable[str]) -> bool:
+        """Start acting for EndDevices another process stopped acting for.
+
+        The host first makes this client's device filter accept the devices,
+        and the other process releases them (:meth:`release_devices`). This
+        loads their event state from the shared event state store, rediscovers
+        so the devices' programs and controls are read from the server again,
+        and then applies any running event a device never received. Events the
+        previous process handled are carried on, not started again: no
+        Response already posted is posted again, and no control already applied
+        is applied again. A change the server made while no process acted for
+        the devices is found by the rediscovery, as is one a notification
+        reports while it runs.
+
+        Returns False when no rediscovery pass that started after this call
+        completed, when the last pass failed, or when the rediscovery did not
+        find every device; nothing is
+        resumed then, and the call can be made again to complete the take-over.
+        Without an event state store the devices are rediscovered and treated
+        as new, as a fresh client would treat them.
+        """
+        hrefs = list(device_hrefs)
+        started_before = self._rediscovery_passes
+        self._event_processor.load_devices(hrefs)
+        await self.trigger_rediscovery()
+        # A rediscovery already running coalesces this one into a further pass;
+        # wait for that pass, so the devices are mapped before they are resumed.
+        async with self._rediscovery_lock:
+            pass
+        if self._last_completed_pass <= started_before or self._rediscovery_error is not None:
+            logger.warning(
+                "Take-over incomplete: the rediscovery failed; running events are not "
+                "applied to the EndDevices taken over yet"
+            )
+            return False
+        if not all(href in self._state.end_devices for href in hrefs):
+            logger.warning(
+                "Take-over incomplete: not every EndDevice taken over was discovered; "
+                "running events are not applied to them yet"
+            )
+            return False
+        await self._event_processor.resume_devices(hrefs)
+        return True
+
+    async def release_devices(self, device_hrefs: Iterable[str]) -> bool:
+        """Stop acting for EndDevices another process will take over.
+
+        The host first makes this client's device filter reject the devices.
+        This stops new event work for them, waits for work already running for
+        them to finish, saves their event state to the shared event state
+        store, forgets the events that concern only them without a Response or
+        a write to a device, and rediscovers without them. Subscriptions stay
+        as they are. Returns what :meth:`trigger_rediscovery` returns.
+
+        Raises the store's error when their event state cannot be saved. The
+        devices then stay with this process; the host puts them back in its
+        device filter, or calls this again.
+        """
+        await self._event_processor.release_devices(device_hrefs)
+        return await self.trigger_rediscovery()
+
     async def shutdown(
-        self, timeout: float = 10.0, *, subscription_cancel_timeout: float | None = 2.0
+        self,
+        timeout: float = 10.0,
+        *,
+        subscription_cancel_timeout: float | None = 2.0,
+        unsubscribe: bool | None = None,
     ) -> None:
         """Gracefully stop polling, event timers, and close the HTTP session.
 
         ``timeout`` bounds the wait for the poll tasks. ``subscription_cancel_timeout``
         bounds the DELETEs that cancel this client's subscriptions; ``None`` waits
         for every one. See :meth:`SubscriptionManager.cancel_all`.
+
+        ``unsubscribe`` decides whether those DELETEs are sent; ``None`` uses the
+        subscription manager's ``unsubscribe_on_close``. Pass False when another
+        instance with the same identity takes over and adopts the subscriptions.
+        A process without own-EndDevice work sends none even when asked: other
+        processes share its subscriptions.
         """
         self._shutdown_event.set()
         # Before anything is torn down. An expiry firing later would call
@@ -2015,7 +2388,17 @@ class CsipClient:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._renewal_task
         if self._subscription_manager:
-            await self._subscription_manager.cancel_all(timeout=subscription_cancel_timeout)
+            if unsubscribe is None:
+                unsubscribe = (
+                    self._own_end_device and self._subscription_manager.unsubscribe_on_close
+                )
+            if unsubscribe:
+                await self._subscription_manager.cancel_all(timeout=subscription_cancel_timeout)
+            else:
+                logger.info(
+                    "Leaving %d subscription(s) on the server at shutdown",
+                    len(self._subscription_manager.active_subscriptions),
+                )
         if self._notification_server:
             await self._notification_server.stop()
         await self._event_processor.shutdown()

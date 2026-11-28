@@ -216,6 +216,10 @@ class DiscoveredState:
     device_mapping: DeviceMapping = field(default_factory=DeviceMapping)
     poll_rates: dict[str, int | None] = field(default_factory=dict)
     csip_aus_mode: bool = False
+    #: The SubscriptionListLink of the first EndDevice listed that has one,
+    #: whether or not a device filter left that EndDevice out of
+    #: ``end_devices``. The client subscribes there.
+    subscription_list_href: str | None = None
 
     #: Pricing function set (opt-in). When False, the tariff tree is not
     #: discovered or polled. Populated from the client configuration at init.
@@ -252,6 +256,7 @@ class DiscoveredState:
         self.device_mapping = DeviceMapping()
         self.poll_rates.clear()
         self.csip_aus_mode = False
+        self.subscription_list_href = None
         # pricing_enabled is a config flag (set at client init), not discovered
         # state -- preserve it across rediscovery.
         self.fsa_time.clear()

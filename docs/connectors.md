@@ -693,7 +693,9 @@ client does not emit yet.
 
 Each hook receives a `ScheduleNotification`: the `stream`, the `transition` and
 `status` that fired it, the control's `mrid`, `program_href` and `primacy`, the
-post-randomization `start` / `duration` / `end`, the `affected_lfdis` the event
+post-randomization `start` / `duration` / `end` (spanning every device's own
+randomized window, since each device draws its own offsets), the
+`affected_lfdis` the event
 scopes to, the `randomization` window, and a stream-specific `payload`. For
 `price` the payload carries the tariff profile's price multiplier and the active
 interval's consumption blocks; the relay is global and does not actuate, so the

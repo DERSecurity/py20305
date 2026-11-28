@@ -120,6 +120,14 @@ class DdercTracker:
         for key in to_remove:
             del self._applied[key]
 
+    def entries_for(self, lfdi: bytes) -> list[tuple[str, bytes, int]]:
+        """Return ``(derp_path, mrid, primacy)`` for each DDERC applied to ``lfdi``."""
+        return [
+            (path, entry.mrid, entry.primacy)
+            for (who, path), entry in self._applied.items()
+            if who == lfdi
+        ]
+
     def clear(self) -> None:
         """Clear all tracking state."""
         self._applied.clear()

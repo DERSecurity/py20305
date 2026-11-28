@@ -75,6 +75,15 @@ def _time_overlaps(a: EventRecord, b: EventRecord) -> bool:
     return a.start < b.end and b.start < a.end
 
 
+def _windows_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    """Check if two half-open ``(start, end)`` windows overlap.
+
+    An empty window, such as a late start capped at the event's end, holds no
+    time and overlaps nothing.
+    """
+    return a[0] < a[1] and b[0] < b[1] and a[0] < b[1] and b[0] < a[1]
+
+
 def compute_supersession(
     events: list[EventRecord],
     program_to_devices: dict[str, set[str]],
@@ -164,10 +173,17 @@ def compute_supersession(
                 else:
                     winner, loser = b, a
 
-            # Compute affected devices: intersection of both programs' device sets
+            # Affected devices: those both programs reach on which the two
+            # events overlap. Each device has its own randomized window (IEEE
+            # 2030.5-2023 §10.2.3.2), so two events can overlap on one device
+            # and not on another.
             devs_winner = program_to_devices.get(winner.program_href, set())
             devs_loser = program_to_devices.get(loser.program_href, set())
-            affected = frozenset(devs_winner & devs_loser)
+            affected = frozenset(
+                d
+                for d in devs_winner & devs_loser
+                if _windows_overlap(winner.window(d), loser.window(d))
+            )
 
             if affected:
                 results.append(

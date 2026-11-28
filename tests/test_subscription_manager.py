@@ -16,6 +16,11 @@ from py20305.subscription.manager import (
 )
 
 
+def _records(mgr: SubscriptionManager) -> dict[str, SubscriptionState]:
+    """Return the manager's subscription records keyed by subscription href."""
+    return {s.subscription_uri: s for s in mgr.store.values()}
+
+
 @pytest.fixture
 def mock_client() -> AsyncMock:
     client = AsyncMock()
@@ -274,7 +279,7 @@ class TestCancelAll:
 
         mock_client.delete.side_effect = Sep2ProtocolError("500", 500)
         await manager.cancel_all()
-        assert len(manager._subscriptions) == 0
+        assert len(_records(manager)) == 0
 
     @pytest.mark.asyncio
     async def test_cancel_all_empty_is_noop(
@@ -316,7 +321,7 @@ class TestCancelAll:
         assert mock_client.delete.call_count == 2
         # The unanswered DELETE does not outlive the call.
         assert abandoned.is_set()
-        assert manager._subscriptions == {}
+        assert _records(manager) == {}
 
 
 class TestNotificationTracking:
@@ -887,12 +892,15 @@ class TestReconcileWithServer:
 
     @staticmethod
     def _page(resource_to_href):
-        """Build a SubscriptionList page from a {subscribed_resource: href} map."""
+        """Build a SubscriptionList page of our subscriptions from a {resource: href} map."""
         from types import SimpleNamespace
 
         return SimpleNamespace(
             subscription=[
-                SimpleNamespace(subscribed_resource=r, href=h) for r, h in resource_to_href.items()
+                SimpleNamespace(
+                    subscribed_resource=r, href=h, notification_uri="https://h:10443/notify"
+                )
+                for r, h in resource_to_href.items()
             ]
         )
 
@@ -907,7 +915,7 @@ class TestReconcileWithServer:
                 resource_type="EndDeviceList",
                 notification_uri=mgr._notification_uri,
             )
-            mgr._subscriptions[st.subscription_uri] = st
+            mgr.store.put(st)
         return client, mgr
 
     @pytest.mark.asyncio
@@ -918,7 +926,7 @@ class TestReconcileWithServer:
         n = await mgr.reconcile_with_server("/api/v2/edev/AGG/sub")
         assert n == 1
         assert client.post.call_count == 1  # exactly one re-subscribe (B)
-        assert "/sub/B" not in mgr._subscriptions  # stale local entry dropped
+        assert "/sub/B" not in _records(mgr)  # stale local entry dropped
 
     @pytest.mark.asyncio
     async def test_all_present_is_a_no_op(self):
@@ -938,9 +946,9 @@ class TestReconcileWithServer:
         n = await mgr.reconcile_with_server("/sub")
         assert n == 0  # nothing re-established
         client.post.assert_not_awaited()  # adopting a URI must not re-POST
-        assert "/sub/A" not in mgr._subscriptions  # stale URI dropped
-        assert "/sub/A-NEW" in mgr._subscriptions  # server URI adopted
-        assert mgr._subscriptions["/sub/A-NEW"].subscribed_resource == "/api/v2/edev"
+        assert "/sub/A" not in _records(mgr)  # stale URI dropped
+        assert "/sub/A-NEW" in _records(mgr)  # server URI adopted
+        assert _records(mgr)["/sub/A-NEW"].subscribed_resource == "/api/v2/edev"
         assert [s.subscription_uri for s in mgr.active_subscriptions] == ["/sub/A-NEW"]
 
     @pytest.mark.asyncio
@@ -952,7 +960,7 @@ class TestReconcileWithServer:
         n = await mgr.reconcile_with_server("/sub")
         assert n == 0
         client.post.assert_not_awaited()  # not treated as missing -> no re-POST
-        assert "/sub/A" in mgr._subscriptions  # kept as-is (no href to adopt)
+        assert "/sub/A" in _records(mgr)  # kept as-is (no href to adopt)
 
     @pytest.mark.asyncio
     async def test_reestablish_missing_false_empty_server_list_drops_nothing(self):
@@ -963,8 +971,8 @@ class TestReconcileWithServer:
         n = await mgr.reconcile_with_server("/sub", reestablish_missing=False)
         assert n == 0
         client.post.assert_not_awaited()
-        assert "/sub/A" in mgr._subscriptions
-        assert "/sub/B" in mgr._subscriptions
+        assert "/sub/A" in _records(mgr)
+        assert "/sub/B" in _records(mgr)
         assert len(mgr.active_subscriptions) == 2  # nothing dropped
 
     @pytest.mark.asyncio
@@ -978,9 +986,9 @@ class TestReconcileWithServer:
         n = await mgr.reconcile_with_server("/sub", reestablish_missing=False)
         assert n == 0  # nothing re-established (no re-POST)
         client.post.assert_not_awaited()
-        assert "/sub/A-NEW" in mgr._subscriptions  # A adopted
-        assert "/sub/A" not in mgr._subscriptions  # A's stale URI gone
-        assert "/sub/B" not in mgr._subscriptions  # B dropped (server no longer has it)
+        assert "/sub/A-NEW" in _records(mgr)  # A adopted
+        assert "/sub/A" not in _records(mgr)  # A's stale URI gone
+        assert "/sub/B" not in _records(mgr)  # B dropped (server no longer has it)
         assert [s.subscription_uri for s in mgr.active_subscriptions] == ["/sub/A-NEW"]
 
     @pytest.mark.asyncio
@@ -1010,5 +1018,5 @@ class TestReconcileWithServer:
         client.post = AsyncMock(side_effect=Sep2ProtocolError("rejected", 500))
         n = await mgr.reconcile_with_server("/sub")
         assert n == 0
-        assert "/sub/A" in mgr._subscriptions  # restored
+        assert "/sub/A" in _records(mgr)  # restored
         assert len(mgr.active_subscriptions) == 1

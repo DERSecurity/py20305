@@ -126,3 +126,4 @@ writing a connector of your own.
 - [Connecting devices](connectors.md) — connectors, and how to write one
 - [Management API](api.md) — observing a running client over HTTP
 - [Observers](observers.md) — records of exchanges, connections and anomalies
+- [Running in several processes](scale-out.md) — one client split across processes

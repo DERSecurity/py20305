@@ -37,6 +37,7 @@ from py20305.client.errors import (
     Sep2TlsError,
 )
 from py20305.client.exchange import ExchangeScope, NullScope, endpoint
+from py20305.client.request_budget import LimiterFailure
 from py20305.client.retry import RetryPolicy, with_retry
 from py20305.client.timebase import ServerTimebase
 from py20305.client.tls import (
@@ -84,6 +85,7 @@ def _parse_body(body: bytes, model_type: type[T], path: str) -> T:
 
 
 if TYPE_CHECKING:
+    from py20305.client.request_budget import RequestLimiter
     from py20305.client.traffic_recorder import TrafficRecorder
 
 logger = logging.getLogger(__name__)
@@ -229,6 +231,7 @@ class Sep2Client:
         timebase: ServerTimebase | None = None,
         observers: Observers | None = None,
         server_2018_compat: bool | None = None,
+        request_limiter: RequestLimiter | None = None,
     ) -> None:
         """Initialize Sep2Client.
 
@@ -252,6 +255,10 @@ class Sep2Client:
                 how exchanges are captured. May also be attached after
                 construction through the ``observers`` property. None reports
                 nothing.
+            request_limiter: Awaited before each request to the server, retries
+                included, so several processes can share one request budget
+                (see :mod:`py20305.client.request_budget`). None sends each
+                request at once.
         """
         self._base_url = base_url.rstrip("/")
         self._retry = retry or RetryPolicy()
@@ -341,6 +348,7 @@ class Sep2Client:
 
         self._observers = observers if observers is not None else NO_OBSERVERS
         self._observer_guard = ObserverGuard("exchange observer")
+        self._request_limiter = request_limiter
 
     @property
     def observers(self) -> Observers:
@@ -741,8 +749,21 @@ class Sep2Client:
             )
             self._gated_session = None
         if self._gated_session is None or self._gated_session.session is not self._session:
-            self._gated_session = GatedSession(self._session, self._comm_loss_simulation)
+            self._gated_session = GatedSession(
+                self._session, self._comm_loss_simulation, self._request_limiter
+            )
         return self._gated_session
+
+    @property
+    def request_limiter(self) -> RequestLimiter | None:
+        """The limiter awaited before each request, or None for no limit."""
+        return self._request_limiter
+
+    @request_limiter.setter
+    def request_limiter(self, limiter: RequestLimiter | None) -> None:
+        self._request_limiter = limiter
+        if self._gated_session is not None:
+            self._gated_session.limiter = limiter
 
     @property
     def host(self) -> str:
@@ -892,8 +913,15 @@ class Sep2Client:
         self._silence_simulated = None
 
     async def _retry_observed(self, do_fn: Callable[[], Awaitable[T]]) -> T:
-        """Run one logical request through retry."""
-        return await with_retry(self._retry, do_fn, peer=self._server_host)
+        """Run one logical request through retry.
+
+        An exception from the request limiter is raised to the caller as the
+        limiter raised it, without a retry: no request reached the server.
+        """
+        try:
+            return await with_retry(self._retry, do_fn, peer=self._server_host)
+        except LimiterFailure as failure:
+            raise failure.error from None
 
     async def _send_tracked(self, do_fn: Callable[[], Awaitable[T]]) -> T:
         """Run a non-GET request via retry, recording connectivity health once
@@ -1105,6 +1133,8 @@ class Sep2Client:
                         "headers": headers,
                         "body": body,
                     }
+            except LimiterFailure as failure:
+                raise failure.error from None
             except (aiohttp.ClientError, OSError) as exc:
                 exchange.failed(exc)
                 self._record_contact(reachable=False, error=exc)
@@ -1179,6 +1209,8 @@ class Sep2Client:
                         "headers": resp_headers,
                         "body": resp_body,
                     }
+            except LimiterFailure as failure:
+                raise failure.error from None
             except (aiohttp.ClientError, OSError) as exc:
                 exchange.failed(exc)
                 self._record_traffic_response(verb, path, status=None, error=str(exc))

@@ -114,6 +114,7 @@ Swap in `SunSpecDeviceConfig` when you have one. Full walkthrough in the
 | **Subscriptions** | Subscribe/notify as an alternative to polling, with a notification listener |
 | **Runner** | A CLI, config file, connection retry and signal-handled shutdown |
 | **Management API** | Optional HTTP API for observing and nudging a running client |
+| **Several processes as one client** | For an embedding application: split the EndDevices between processes, share the subscription set, the event state and the request budget, hand notifications from the listener to the process acting for the device, and move devices between processes without repeating a Response or a control |
 | **Observers** | Optional hooks that hand an embedding application a record of every HTTP exchange, connection event, protocol anomaly, device read and write, and audit record |
 
 ## Standards

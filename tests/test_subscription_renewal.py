@@ -81,7 +81,7 @@ class TestRenewSubscriptionLostCallback:
             resource_type="DERControlList",
             notification_uri=mgr._notification_uri,
         )
-        mgr._subscriptions[state.subscription_uri] = state
+        mgr.store.put(state)
 
         result = await mgr.renew(state.subscription_uri)
         # Let the fire-and-forget task run.
@@ -107,7 +107,7 @@ class TestRenewSubscriptionLostCallback:
             resource_type="DERControlList",
             notification_uri=mgr._notification_uri,
         )
-        mgr._subscriptions[state.subscription_uri] = state
+        mgr.store.put(state)
 
         result = await mgr.renew(state.subscription_uri)
         await asyncio.sleep(0)
@@ -134,7 +134,7 @@ class TestRenewSubscriptionLostCallback:
             resource_type="DERControlList",
             notification_uri=mgr._notification_uri,
         )
-        mgr._subscriptions[state.subscription_uri] = state
+        mgr.store.put(state)
 
         result = await mgr.renew(state.subscription_uri)
         await asyncio.sleep(0)
@@ -157,7 +157,7 @@ class TestRenewSubscriptionLostCallback:
             resource_type="DERControlList",
             notification_uri=mgr._notification_uri,
         )
-        mgr._subscriptions[state.subscription_uri] = state
+        mgr.store.put(state)
 
         result = await mgr.renew(state.subscription_uri)
         assert result is False
@@ -400,32 +400,38 @@ class TestNotificationAncestryDedup:
 class TestNotificationFiltering:
     def test_list_subscription_processes_all(self, mgr: SubscriptionManager):
         # Manually add a list subscription
-        mgr._subscriptions["/sub/1"] = SubscriptionState(
-            subscription_uri="/sub/1",
-            subscribed_resource="/edev/1/derc",
-            notification_uri="https://localhost/notify",
-            resource_type="DERControlList",
-            is_list_subscription=True,
+        mgr.store.put(
+            SubscriptionState(
+                subscription_uri="/sub/1",
+                subscribed_resource="/edev/1/derc",
+                notification_uri="https://localhost/notify",
+                resource_type="DERControlList",
+                is_list_subscription=True,
+            )
         )
         assert mgr.should_process_notification("/sub/1", "/edev/1/derc/42")
 
     def test_non_list_rejects_different_resource(self, mgr: SubscriptionManager):
-        mgr._subscriptions["/sub/1"] = SubscriptionState(
-            subscription_uri="/sub/1",
-            subscribed_resource="/edev/1/dderc",
-            notification_uri="https://localhost/notify",
-            resource_type="DefaultDERControl",
-            is_list_subscription=False,
+        mgr.store.put(
+            SubscriptionState(
+                subscription_uri="/sub/1",
+                subscribed_resource="/edev/1/dderc",
+                notification_uri="https://localhost/notify",
+                resource_type="DefaultDERControl",
+                is_list_subscription=False,
+            )
         )
         assert not mgr.should_process_notification("/sub/1", "/edev/1/derc/list")
 
     def test_non_list_accepts_same_resource(self, mgr: SubscriptionManager):
-        mgr._subscriptions["/sub/1"] = SubscriptionState(
-            subscription_uri="/sub/1",
-            subscribed_resource="/edev/1/dderc",
-            notification_uri="https://localhost/notify",
-            resource_type="DefaultDERControl",
-            is_list_subscription=False,
+        mgr.store.put(
+            SubscriptionState(
+                subscription_uri="/sub/1",
+                subscribed_resource="/edev/1/dderc",
+                notification_uri="https://localhost/notify",
+                resource_type="DefaultDERControl",
+                is_list_subscription=False,
+            )
         )
         assert mgr.should_process_notification("/sub/1", "/edev/1/dderc")
 

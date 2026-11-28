@@ -1209,10 +1209,14 @@ class TestCancellationWindDown:
         assert wind_down == 0
 
     @pytest.mark.asyncio
-    async def test_cancellation_of_active_schedules_delayed_fallback(self, shutdown: asyncio.Event):
+    async def test_cancellation_of_active_schedules_delayed_fallback(
+        self, shutdown: asyncio.Event, monkeypatch: pytest.MonkeyPatch
+    ):
         """When active event with randomization is cancelled, DDERC is delayed."""
         now = int(time.time())
-        # Start far enough in the past that even max randomization (+30s) keeps it active
+        # A late event starts at now plus its drawn start offset (IEEE 2030.5
+        # §10.2.2.3 rule k); a zero draw makes it active at once.
+        monkeypatch.setattr("py20305.events.randomization.random.randint", lambda _a, _b: 0)
         derc = _make_derc(
             0x01, start=now - 100, duration=3600, randomize_start=30, randomize_duration=0
         )
