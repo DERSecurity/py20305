@@ -340,6 +340,28 @@ class TestDuplicateNotification:
         mgr.is_duplicate_notification("/derc/1")
         assert not mgr.is_duplicate_notification("/derc/2")
 
+    def test_followup_delay_none_without_a_processed_notification(
+        self, mgr: SubscriptionManager
+    ):
+        assert mgr.followup_delay("/derp") is None
+
+    def test_followup_delay_is_time_left_in_window(self, mgr: SubscriptionManager):
+        mgr.is_duplicate_notification("/derp")
+        delay = mgr.followup_delay("/derp")
+        assert delay is not None
+        assert 0 < delay <= mgr._DEDUP_WINDOW
+
+    def test_followup_delay_none_after_forget(self, mgr: SubscriptionManager):
+        mgr.is_duplicate_notification("/derp")
+        mgr.forget_notification("/derp")
+        assert mgr.followup_delay("/derp") is None
+
+    def test_followup_skipped_once_for_ancestry_entry(self, mgr: SubscriptionManager):
+        """The first notification a targeted fetch suppressed needs no follow-up; later ones do."""
+        mgr.record_notification_ancestry("/edev/1/derp/3/derc")
+        assert mgr.followup_delay("/edev/1/derp") is None
+        assert mgr.followup_delay("/edev/1/derp") is not None
+
 
 class TestNotificationAncestryDedup:
     """Tests for hierarchical dedup after targeted fetch."""

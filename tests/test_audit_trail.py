@@ -44,6 +44,8 @@ from py20305.models.sep.sep import (
 )
 from py20305.observers import AuditRecord, DeviceOperation, DeviceRecord
 from py20305.server_profile import Edition, ServerProfile
+from tests.contact_time import set_last_contact
+
 
 LFDI_1 = b"\xaa" * 20
 LFDI_2 = b"\xbb" * 20
@@ -956,7 +958,7 @@ class TestCommsLossRecords:
         client._comms_loss.active = True
         boundary = int(time.time()) + 3600
         client._comms_loss.resume_after_epoch = boundary
-        client._http._last_contact_epoch = int(time.time())
+        set_last_contact(client, 0)
         seen_at_repoll: list[list[str]] = []
 
         async def repoll() -> bool:
@@ -1015,7 +1017,7 @@ class TestCommsLossRecords:
             await processor.process_controls("/derp/1")
             return True
 
-        client._http._last_contact_epoch = int(time.time())
+        set_last_contact(client, 0)
         with (
             patch.object(
                 client, "_server_lists_end_device", new_callable=AsyncMock, return_value=True

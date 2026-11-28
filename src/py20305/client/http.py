@@ -301,6 +301,10 @@ class Sep2Client:
         # telemetry PUT/POST -- refreshes this. Retained (mirrors
         # _last_contact_epoch now) for the connectivity probe and status surface.
         self._last_validated_epoch: int | None = None
+        # time.monotonic() of the same round-trip. Elapsed-time checks use it, so
+        # a wall-clock step (NTP, an operator setting the clock) cannot fake or
+        # hide a silence.
+        self._last_contact_monotonic: float | None = None
         self._consecutive_failures = 0
         # Responses received this session, so a caller can tell whether a piece
         # of work it ran reached the server at all.
@@ -815,6 +819,15 @@ class Sep2Client:
         on."""
         return self._last_validated_epoch
 
+    def seconds_since_contact(self) -> float | None:
+        """Return the seconds since the last reachable round-trip, or ``None`` if none.
+
+        Measured on the monotonic clock, so a wall-clock step does not change it.
+        """
+        if self._last_contact_monotonic is None:
+            return None
+        return max(0.0, time.monotonic() - self._last_contact_monotonic)
+
     @property
     def contacts(self) -> int:
         """Number of responses received from the server since this client was created.
@@ -905,6 +918,7 @@ class Sep2Client:
             self._consecutive_failures += 1
             return
         self._last_contact_epoch = int(time.time())
+        self._last_contact_monotonic = time.monotonic()
         self._contacts += 1
         self._consecutive_failures = 0
         self._server_alive = True
@@ -964,6 +978,7 @@ class Sep2Client:
         self._last_error = None
         self._last_contact_epoch = None
         self._last_validated_epoch = None
+        self._last_contact_monotonic = None
         self._consecutive_failures = 0
 
     def update_ca_trust(self, ca_cert_path: str) -> None:

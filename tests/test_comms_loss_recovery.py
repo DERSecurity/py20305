@@ -29,6 +29,8 @@ from py20305.models.sep.sep import (
     Sfditype,
     TimeType,
 )
+from tests.contact_time import set_last_contact
+
 
 PROGRAM_HREF = "/derp/1"
 DEVICE_HREF = "/edev/1"
@@ -90,7 +92,7 @@ async def test_full_comms_loss_cycle():
     assert rec is not None and rec.state == EventState.ACTIVE
 
     # --- Enter: sustained silence trips the detector ---
-    client._http._last_contact_epoch = now - 1000
+    set_last_contact(client, 1000)
     with patch.object(client._dispatcher, "apply_default_control", new_callable=AsyncMock):
         await client._comms_loss_probe()
     assert client._comms_loss.active is True
@@ -99,7 +101,7 @@ async def test_full_comms_loss_cycle():
 
     # --- Recover: fresh contact reregisters, re-polls, and clears the mode ---
     client._own_lfdi = "aa" * 20
-    client._http._last_contact_epoch = now
+    set_last_contact(client, 0)
     with (
         # Utility head-end: the EndDevice was removed during the outage.
         patch.object(
