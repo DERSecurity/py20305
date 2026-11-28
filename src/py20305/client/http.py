@@ -37,6 +37,7 @@ from py20305.client.errors import (
     Sep2TlsError,
 )
 from py20305.client.exchange import ExchangeScope, NullScope, endpoint
+from py20305.client.request_budget import LimiterFailure
 from py20305.client.retry import RetryPolicy, with_retry
 from py20305.client.timebase import ServerTimebase
 from py20305.client.tls import (
@@ -84,6 +85,7 @@ def _parse_body(body: bytes, model_type: type[T], path: str) -> T:
 
 
 if TYPE_CHECKING:
+    from py20305.client.request_budget import RequestLimiter
     from py20305.client.traffic_recorder import TrafficRecorder
 
 logger = logging.getLogger(__name__)
@@ -229,6 +231,7 @@ class Sep2Client:
         timebase: ServerTimebase | None = None,
         observers: Observers | None = None,
         server_2018_compat: bool | None = None,
+        request_limiter: RequestLimiter | None = None,
     ) -> None:
         """Initialize Sep2Client.
 
@@ -252,6 +255,10 @@ class Sep2Client:
                 how exchanges are captured. May also be attached after
                 construction through the ``observers`` property. None reports
                 nothing.
+            request_limiter: Awaited before each request to the server, retries
+                included, so several processes can share one request budget
+                (see :mod:`py20305.client.request_budget`). None sends each
+                request at once.
         """
         self._base_url = base_url.rstrip("/")
         self._retry = retry or RetryPolicy()
@@ -264,7 +271,9 @@ class Sep2Client:
         # (and tests) compare sessions by identity to detect a rebuild.
         self._gated_session: GatedSession | None = None
         self._traffic_recorder = traffic_recorder
-        self._csip_aus_mode = False
+        # What discovery saw, and what the caller forced; a forced value wins.
+        self._csip_aus_detected = False
+        self._csip_aus_override: bool | None = None
         self._csipaus_namespace = NS_CSIPAUS
         self._timebase = timebase or ServerTimebase()
         #: What the operator configured; the base may still be ``auto``.
@@ -339,6 +348,7 @@ class Sep2Client:
 
         self._observers = observers if observers is not None else NO_OBSERVERS
         self._observer_guard = ObserverGuard("exchange observer")
+        self._request_limiter = request_limiter
 
     @property
     def observers(self) -> Observers:
@@ -567,12 +577,32 @@ class Sep2Client:
 
     @property
     def csip_aus_mode(self) -> bool:
-        """Whether CSIP-AUS namespace should be included in XML payloads."""
-        return self._csip_aus_mode
+        """Whether CSIP-AUS extensions are written in XML payloads.
+
+        A value the caller assigned, or the configured extension list, decides.
+        Without one, this is what discovery last detected from the server's
+        DeviceCapability.
+        """
+        if self._csip_aus_override is not None:
+            return self._csip_aus_override
+        return self._csip_aus_detected
 
     @csip_aus_mode.setter
-    def csip_aus_mode(self, value: bool) -> None:
-        self._csip_aus_mode = value
+    def csip_aus_mode(self, value: bool | None) -> None:
+        """Force CSIP-AUS extensions on or off, or pass None to follow discovery again.
+
+        While a forced value is set, discovery does not change the result.
+        """
+        self._csip_aus_override = value
+
+    def observe_csip_aus_detection(self, detected: bool) -> None:
+        """Record whether discovery found CSIP-AUS on the server.
+
+        Each discovery replaces the previous detection, so a server that stops
+        declaring CSIP-AUS turns the extensions off again. A value forced
+        through ``csip_aus_mode`` is not touched.
+        """
+        self._csip_aus_detected = detected
 
     @property
     def csipaus_namespace(self) -> str:
@@ -719,8 +749,21 @@ class Sep2Client:
             )
             self._gated_session = None
         if self._gated_session is None or self._gated_session.session is not self._session:
-            self._gated_session = GatedSession(self._session, self._comm_loss_simulation)
+            self._gated_session = GatedSession(
+                self._session, self._comm_loss_simulation, self._request_limiter
+            )
         return self._gated_session
+
+    @property
+    def request_limiter(self) -> RequestLimiter | None:
+        """The limiter awaited before each request, or None for no limit."""
+        return self._request_limiter
+
+    @request_limiter.setter
+    def request_limiter(self, limiter: RequestLimiter | None) -> None:
+        self._request_limiter = limiter
+        if self._gated_session is not None:
+            self._gated_session.limiter = limiter
 
     @property
     def host(self) -> str:
@@ -870,8 +913,15 @@ class Sep2Client:
         self._silence_simulated = None
 
     async def _retry_observed(self, do_fn: Callable[[], Awaitable[T]]) -> T:
-        """Run one logical request through retry."""
-        return await with_retry(self._retry, do_fn, peer=self._server_host)
+        """Run one logical request through retry.
+
+        An exception from the request limiter is raised to the caller as the
+        limiter raised it, without a retry: no request reached the server.
+        """
+        try:
+            return await with_retry(self._retry, do_fn, peer=self._server_host)
+        except LimiterFailure as failure:
+            raise failure.error from None
 
     async def _send_tracked(self, do_fn: Callable[[], Awaitable[T]]) -> T:
         """Run a non-GET request via retry, recording connectivity health once
@@ -1083,6 +1133,8 @@ class Sep2Client:
                         "headers": headers,
                         "body": body,
                     }
+            except LimiterFailure as failure:
+                raise failure.error from None
             except (aiohttp.ClientError, OSError) as exc:
                 exchange.failed(exc)
                 self._record_contact(reachable=False, error=exc)
@@ -1157,6 +1209,8 @@ class Sep2Client:
                         "headers": resp_headers,
                         "body": resp_body,
                     }
+            except LimiterFailure as failure:
+                raise failure.error from None
             except (aiohttp.ClientError, OSError) as exc:
                 exchange.failed(exc)
                 self._record_traffic_response(verb, path, status=None, error=str(exc))
@@ -1346,7 +1400,7 @@ class Sep2Client:
         """POST a resource. Returns the Location header if present."""
         body = to_xml(
             resource,
-            include_csipaus=self._csip_aus_mode,
+            include_csipaus=self.csip_aus_mode,
             csipaus_namespace=self._csipaus_namespace,
             profile=self._profile,
         )
@@ -1420,7 +1474,7 @@ class Sep2Client:
         """PUT a resource. Returns the HTTP status code."""
         body = to_xml(
             resource,
-            include_csipaus=self._csip_aus_mode,
+            include_csipaus=self.csip_aus_mode,
             csipaus_namespace=self._csipaus_namespace,
             profile=self._profile,
         )

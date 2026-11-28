@@ -209,3 +209,33 @@ async def test_delayed_callback_stays_on_local_clock():
 
     callback.assert_not_awaited()
     await mgr.cancel_all()
+
+
+@pytest.mark.asyncio
+async def test_a_delayed_callback_fires_for_a_cancelled_event():
+    """The wind-down before a cancelled event's default fallback runs after the
+    event is CANCELLED, so the state check must not skip it."""
+    shutdown = asyncio.Event()
+    mgr = EventTimerManager(shutdown)
+    callback = AsyncMock()
+    record = _make_record(state=EventState.CANCELLED)
+
+    mgr.schedule_delayed_callback(record, 0, callback, "wind-down")
+    await asyncio.sleep(0.2)
+
+    callback.assert_awaited_once_with(record)
+    await mgr.cancel_all()
+
+
+@pytest.mark.asyncio
+async def test_a_timer_that_fired_is_no_longer_pending():
+    shutdown = asyncio.Event()
+    mgr = EventTimerManager(shutdown)
+    record = _make_record(start=int(time.time()))
+
+    mgr.schedule_activation(record, AsyncMock())
+    assert mgr.has_pending(record.mrid)
+    await asyncio.sleep(0.2)
+
+    assert not mgr.has_pending(record.mrid)
+    await mgr.cancel_all()

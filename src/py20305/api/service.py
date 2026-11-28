@@ -94,6 +94,9 @@ def unavailable_time_body(*, enabled: bool | None = None) -> dict[str, Any]:
         "offset_seconds": None,
         "age_seconds": None,
         "href": None,
+        "scope": None,
+        "fsa_href": None,
+        "spread_seconds": None,
         "timebase_enabled": enabled,
     }
 
@@ -222,6 +225,14 @@ class ClientAPIService:
         yet, and every derived field is then ``None`` -- deliberately, rather
         than serving the raw local clock, which is the value most likely to be
         wrong and the one a caller is least able to detect.
+
+        ``scope`` says which Time resource answered. ``"global"`` is the one
+        DeviceCapability links. A head-end that links Time only from its
+        FunctionSetAssignments (IEEE 2030.5 §9.2.3) leaves no global
+        observation, and the reading then comes from one FSA's Time resource:
+        ``scope`` is ``"fsa"``, ``fsa_href`` names the FSA and ``href`` its Time
+        resource. ``spread_seconds`` is how far the FSA observations disagree
+        with one another, so a consumer can judge the choice.
         """
         timebase = getattr(self._client.http, "timebase", None)
         # isinstance rather than truthiness: tests stub http with Mocks, and a
@@ -229,17 +240,20 @@ class ClientAPIService:
         if not isinstance(timebase, ServerTimebase):
             return unavailable_time_body(enabled=None)
 
-        snapshot = timebase.snapshot()
-        observation = snapshot.get("global")
-        server_now = timebase.server_now()
-        if server_now is None or observation is None:
-            return unavailable_time_body(enabled=bool(snapshot.get("enabled")))
+        enabled = timebase.enabled
+        head_end = timebase.head_end_time()
+        if head_end is None:
+            return unavailable_time_body(enabled=enabled)
+        observation = head_end.observation
+        server_now = head_end.server_now
 
         # round, not int: the server's currentTime is integral, so the
         # fractional part here is local time elapsed since the observation.
         # Truncating it would bias every reading low by up to a second.
         current_time = round(server_now)
-        tz_offset, dst_offset, dst_active = self._local_offsets(current_time)
+        tz_offset, dst_offset, dst_active = self._local_offsets(
+            current_time, self._time_resource_for(head_end.fsa_href)
+        )
         local_time: int | None = None
         if tz_offset is not None:
             applied_dst = (dst_offset or 0) if dst_active else 0
@@ -251,28 +265,41 @@ class ClientAPIService:
             "tz_offset": tz_offset,
             "dst_offset": dst_offset,
             "dst_active": dst_active,
-            "quality": observation.get("quality"),
+            "quality": observation.quality,
             "source": "server",
-            "offset_seconds": observation.get("offset_seconds"),
-            "age_seconds": observation.get("age_seconds"),
-            "href": observation.get("href") or None,
+            "offset_seconds": round(observation.offset, 3),
+            "age_seconds": round(head_end.age_seconds, 1),
+            "href": observation.href or None,
+            "scope": "global" if head_end.fsa_href is None else "fsa",
+            "fsa_href": head_end.fsa_href,
+            "spread_seconds": head_end.spread_seconds,
             # Whether this client *applies* the offset to its own scheduling.
             # Independent of the reading above: the offset is observed and
             # reported either way, so a consumer syncing a clock is not
             # silently switched to local time by an operator's troubleshooting
             # setting.
-            "timebase_enabled": bool(snapshot.get("enabled")),
+            "timebase_enabled": enabled,
         }
 
-    def _local_offsets(self, current_time: int) -> tuple[int | None, int | None, bool]:
-        """Return ``(tz_offset, dst_offset, dst_active)`` from the last Time resource.
+    def _time_resource_for(self, fsa_href: str | None) -> object | None:
+        """Return the last Time resource fetched for the global scope or for one FSA."""
+        if fsa_href is None:
+            return getattr(self._client.state, "time", None)
+        fsa_time = getattr(self._client.state, "fsa_time", None)
+        entry = fsa_time.get(fsa_href) if isinstance(fsa_time, dict) else None
+        return entry[1] if entry else None
+
+    @staticmethod
+    def _local_offsets(
+        current_time: int, time_resource: object | None
+    ) -> tuple[int | None, int | None, bool]:
+        """Return ``(tz_offset, dst_offset, dst_active)`` from a Time resource.
 
         Whether daylight saving is in effect is decided against the server's own
         ``dstStartTime``/``dstEndTime`` instants rather than a local tz database,
         which the head-end may disagree with. Per IEEE 2030.5 a zero
         ``dstOffset`` means those two instants carry no meaning and are ignored.
         """
-        time_resource = getattr(self._client.state, "time", None)
         tz_offset = _as_int(getattr(time_resource, "tz_offset", None))
         dst_offset = _as_int(getattr(time_resource, "dst_offset", None))
         if not dst_offset:

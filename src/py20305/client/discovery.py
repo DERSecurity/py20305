@@ -14,6 +14,7 @@ from lxml import etree
 from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
 from py20305.client.http import Sep2Client
 from py20305.client.poll_rate import DEFAULT_POLL_RATE, normalize_poll_rate
+from py20305.client.scope import DeviceFilter
 from py20305.client.state import (
     DerProgramState,
     DeviceMapping,
@@ -489,6 +490,7 @@ async def discover(
     *,
     registration_pins: dict[str, int] | None = None,
     dcap_path: str = "/dcap",
+    device_filter: DeviceFilter | None = None,
 ) -> None:
     """Run full hierarchical discovery: dcap -> sdev -> edev -> der -> fsa -> derp.
 
@@ -501,7 +503,14 @@ async def discover(
         registration_pins: Optional mapping from LFDI hex -> expected PIN
             for registration verification.
         dcap_path: Path to DeviceCapability resource (default: /dcap).
+        device_filter: Walk only the EndDevices this accepts (see
+            :mod:`py20305.client.scope`). An EndDevice it rejects is left out
+            of ``state.end_devices`` and nothing below it is fetched; its
+            SubscriptionListLink is still recorded. None walks every EndDevice.
     """
+    # Kept for an EndDevice whose FSA list fails to read: the FSAs it named
+    # before are still the best knowledge of what it is assigned.
+    previous_fsa_hrefs = {href: set(fsas) for href, fsas in state.previous_fsa_hrefs.items()}
     state.clear()
 
     # 1. Device Capability (with raw body for CSIP-AUS detection)
@@ -515,9 +524,12 @@ async def discover(
     if b"csipaus" in raw_dcap:
         state.csip_aus_mode = True
         logger.info("CSIP-AUS mode detected from server dcap response")
+    # The HTTP client writes the extensions on what discovery saw, unless the
+    # caller forced the flag.
+    client.observe_csip_aus_detection(state.csip_aus_mode)
     client.csipaus_namespace = _declared_csipaus_namespace(raw_dcap)
     # Extensions named in the configuration replace what the server declares.
-    # The HTTP client's flag is set too: the serializer and the DER resource
+    # The HTTP client's flag is forced too: the serializer and the DER resource
     # manager read it to decide whether to send the CSIP-AUS elements.
     configured = client.profile.extensions
     if configured is not None:
@@ -608,6 +620,12 @@ async def discover(
                         logger.debug(
                             "Could not read SubscriptionList pollRate, using default: %s", exc
                         )
+                if state.subscription_list_href is None:
+                    state.subscription_list_href = sub_list_href
+
+            if device_filter is not None and not device_filter(edev_href, lfdi.hex()):
+                logger.debug("EndDevice %s is outside this client's device filter", edev_href)
+                continue
 
             # Registration link (for PIN verification)
             reg_href = _extract_href(edev.registration_link)
@@ -653,6 +671,7 @@ async def discover(
 
             # 5b. FSA list (optional; server may advertise link without resource)
             fsa_href = _extract_href(edev.function_set_assignments_list_link)
+            fsa_list_read = True
             if fsa_href:
                 try:
                     fsa_pages = await client.get_list(fsa_href, FunctionSetAssignmentsList)
@@ -664,6 +683,7 @@ async def discover(
                             exc.status_code,
                         )
                         fsa_pages = []
+                        fsa_list_read = False
                     else:
                         raise
                 for fsa_page in fsa_pages:
@@ -761,10 +781,15 @@ async def discover(
                         else:
                             raise
 
-            # Gap 3: snapshot current FSA hrefs for removal detection on next poll
-            state.previous_fsa_hrefs[edev_href] = {
-                fsa.href for fsa in edev_state.fsa_list if fsa.href
-            }
+            # Snapshot the FSA hrefs for removal detection on the next poll. When
+            # the list did not read through, keep the previous snapshot: the
+            # unread list may be the one that names those FSAs.
+            if fsa_list_read:
+                state.previous_fsa_hrefs[edev_href] = {
+                    fsa.href for fsa in edev_state.fsa_list if fsa.href
+                }
+            elif edev_href in previous_fsa_hrefs:
+                state.previous_fsa_hrefs[edev_href] = previous_fsa_hrefs[edev_href]
 
             # Verify registration PIN if configured. Gate the fetch on map
             # membership so EndDevices without a configured PIN don't incur an
@@ -790,6 +815,13 @@ async def discover(
         )
 
     _set_time_poll_rate(state)
+
+    # Observations of FSAs the server stopped advertising are of no further use.
+    # The snapshot holds each device's FSAs as read now, or its previous FSAs
+    # when its list did not read through, so a failed read prunes nothing.
+    client.timebase.retain_fsas(
+        {href for hrefs in state.previous_fsa_hrefs.values() for href in hrefs}
+    )
 
     register_device_prefixes(client, state)
 
@@ -924,13 +956,18 @@ async def refresh_der_controls(client: Sep2Client, state: DiscoveredState) -> No
 
 
 async def refresh_der_controls_for_program(
-    client: Sep2Client, state: DiscoveredState, program_href: str
+    client: Sep2Client, state: DiscoveredState, program_href: str, *, strict: bool = False
 ) -> bool:
     """Re-fetch DERControl list and DefaultDERControl for a single program.
 
     Returns True if the program was found and refreshed, False if
     *program_href* is not in state (e.g. removed between notification
     and fetch).
+
+    A failed fetch is logged and skipped, and the call still returns True, so
+    a poll carries on. ``strict`` raises it instead, for a caller that hands
+    the failure back to whoever asked, so the request can be retried. A
+    DefaultDERControl the server reports absent (404, 204) is not a failure.
     """
     derp_state = state.der_programs.get(program_href)
     if derp_state is None:
@@ -954,8 +991,12 @@ async def refresh_der_controls_for_program(
             else:
                 raise
         except Sep2PayloadError as exc:
+            if strict:
+                raise
             logger.warning("Skipping DDERC targeted refresh at %s: %s", dderc_href, exc)
         except Exception:
+            if strict:
+                raise
             logger.warning(
                 "Failed to parse DDERC at %s during targeted refresh, skipping",
                 dderc_href,
@@ -974,7 +1015,7 @@ async def refresh_der_controls_for_program(
         try:
             derc_pages = await client.get_list(derc_list_href, DercontrolList)
         except Sep2ProtocolError as exc:
-            if _paging_fault(exc):
+            if _paging_fault(exc) and not strict:
                 logger.error(
                     "DERC list at %s stopped answering between pages (%s) during targeted refresh",
                     derc_list_href,
@@ -983,9 +1024,13 @@ async def refresh_der_controls_for_program(
                 return True
             raise
         except Sep2PayloadError as exc:
+            if strict:
+                raise
             logger.warning("Skipping DERControl targeted refresh: %s", exc)
             return True
         except Exception:
+            if strict:
+                raise
             logger.warning(
                 "Failed to parse DERControl list at %s during targeted refresh, skipping",
                 derc_list_href,
@@ -1141,6 +1186,17 @@ async def refresh_der_programs(client: Sep2Client, state: DiscoveredState) -> li
     list. Programs from FSAs whose DERP list returned 404 are preserved
     (we can't verify their status).
 
+    Also drops each (program, device) pair the device's current function set
+    assignments no longer name, so a device withdrawn from a program stops
+    receiving that program's controls while other devices keep it. This gives
+    the mapping a full discovery would build: a DER client discovers its
+    DERPrograms through its function set assignments (IEEE 2030.5-2023
+    §10.10.4.1). A device with no assignments is mapped from the
+    DeviceCapability program list when there is one, as full discovery does. A
+    device with a program list that could not be read, or that the server
+    answered with no list at all (404 or 204), keeps all of its pairs, because
+    the unread list may be the one that names them.
+
     Returns a list of removed program hrefs so callers can cancel events.
     """
     if not state.end_devices:
@@ -1149,6 +1205,55 @@ async def refresh_der_programs(client: Sep2Client, state: DiscoveredState) -> li
     # Track which programs are confirmed alive and which FSAs we couldn't verify.
     seen_programs: set[str] = set()
     unreachable_fsas: set[str | None] = set()
+    # The (program, device) pairs the walk found, and the devices whose pairs
+    # cannot be judged because one of their DERP lists was not read.
+    seen_pairs: set[tuple[str, str]] = set()
+    unverified_devices: set[str] = set()
+
+    async def walk(derp_pages: list[Any], edev_href: str, fsa_href: str | None) -> None:
+        """Record the programs and pairs one program list names for a device."""
+        for derp_page in derp_pages:
+            for derp in derp_page.derprogram:
+                derp_href = derp.href
+                if not derp_href:
+                    continue
+
+                seen_programs.add(derp_href)
+                seen_pairs.add((derp_href, edev_href))
+                # Outside the branches below: those ask whether the
+                # *program* is new, while the entry that needs creating is
+                # the *(program, device)* pair. A device whose new function
+                # set assignment names a program already known took the
+                # update branch and was never mapped onto it, so it received
+                # none of that program's controls until a full discovery
+                # rebuilt the mapping. Unconditional here matches what full
+                # discovery does, and is safe because `add` admits a pair
+                # once -- appending on every refresh poll would grow the
+                # dispatch target list without bound.
+                state.device_mapping.add(derp_href, edev_href)
+
+                if derp_href in state.der_programs:
+                    # Update the program object and primacy
+                    state.der_programs[derp_href].program = derp
+                    state.der_programs[derp_href].primacy = (
+                        derp.primacy.value if derp.primacy is not None else 0
+                    )
+                else:
+                    # New program discovered during refresh
+                    derp_state = await _discover_program(client, derp, derp_href)
+                    derp_state.discovered_from_fsa_href = fsa_href
+                    state.der_programs[derp_href] = derp_state
+                    logger.info(
+                        "Discovered new program %s (primacy=%d) during refresh",
+                        derp_href,
+                        derp_state.primacy,
+                    )
+
+    # The DeviceCapability program list serves a device with no assignments.
+    # Read once however many devices need it; None when it could not be read.
+    dcap_derp_href = _extract_href(state.dcap.derprogram_list_link) if state.dcap else None
+    dcap_pages: list[Any] | None = None
+    dcap_read = False
 
     for edev_href, edev_state in list(state.end_devices.items()):
         for fsa in edev_state.fsa_list:
@@ -1166,44 +1271,52 @@ async def refresh_der_programs(client: Sep2Client, state: DiscoveredState) -> li
                         exc.status_code,
                     )
                     unreachable_fsas.add(fsa.href)
+                    unverified_devices.add(edev_href)
                     continue
                 raise
 
-            for derp_page in derp_pages:
-                for derp in derp_page.derprogram:
-                    derp_href = derp.href
-                    if not derp_href:
-                        continue
+            if not derp_pages:
+                # ``get_list`` returns no page for a 404 or 204 on the first
+                # one, which is a list the server did not serve, not a list
+                # served empty. Only a served list can show a withdrawal.
+                unverified_devices.add(edev_href)
+            await walk(derp_pages, edev_href, fsa.href)
 
-                    seen_programs.add(derp_href)
-                    # Outside the branches below: those ask whether the
-                    # *program* is new, while the entry that needs creating is
-                    # the *(program, device)* pair. A device whose new function
-                    # set assignment names a program already known took the
-                    # update branch and was never mapped onto it, so it received
-                    # none of that program's controls until a full discovery
-                    # rebuilt the mapping. Unconditional here matches what full
-                    # discovery does, and is safe because `add` admits a pair
-                    # once -- appending on every refresh poll would grow the
-                    # dispatch target list without bound.
-                    state.device_mapping.add(derp_href, edev_href)
+        if not edev_state.fsa_list and dcap_derp_href:
+            if not dcap_read:
+                dcap_read = True
+                try:
+                    dcap_pages = await client.get_list(dcap_derp_href, DerprogramList)
+                except Sep2ProtocolError as exc:
+                    if not _paging_fault(exc):
+                        raise
+                    logger.error(
+                        "dcap DERProgramList at %s stopped answering between pages (%s) "
+                        "during refresh",
+                        dcap_derp_href,
+                        exc.status_code,
+                    )
+            if dcap_pages:
+                await walk(dcap_pages, edev_href, None)
+            else:
+                unverified_devices.add(edev_href)
 
-                    if derp_href in state.der_programs:
-                        # Update the program object and primacy
-                        state.der_programs[derp_href].program = derp
-                        state.der_programs[derp_href].primacy = (
-                            derp.primacy.value if derp.primacy is not None else 0
-                        )
-                    else:
-                        # New program discovered during refresh
-                        derp_state = await _discover_program(client, derp, derp_href)
-                        derp_state.discovered_from_fsa_href = fsa.href
-                        state.der_programs[derp_href] = derp_state
-                        logger.info(
-                            "Discovered new program %s (primacy=%d) during refresh",
-                            derp_href,
-                            derp_state.primacy,
-                        )
+    # Drop the pairs no current assignment names. Reconciled against what the
+    # walk saw rather than driven by which FSA disappeared: a device can reach
+    # one program through two FSAs, and withdrawing one of them leaves the pair.
+    # Only devices this walk covered are judged.
+    mapping = state.device_mapping
+    for edev_href in state.end_devices:
+        if edev_href in unverified_devices:
+            continue
+        for program_href in list(mapping.device_to_programs.get(edev_href, [])):
+            if (program_href, edev_href) not in seen_pairs:
+                logger.info(
+                    "Removing %s from program %s (no longer in its function set assignments)",
+                    edev_href,
+                    program_href,
+                )
+                mapping.remove_pair(program_href, edev_href)
 
     # Prune programs no longer in any FSA's DERP list. Preserve programs
     # from FSAs we couldn't reach (404) since we can't confirm removal.

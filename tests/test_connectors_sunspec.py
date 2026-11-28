@@ -690,3 +690,22 @@ def test_the_absorb_limit_bit_follows_the_devices_charge_rate_limit(supported: b
 
     assert bool(bits & (1 << 7)) is supported
     assert bits & ~(1 << 7) == implemented & ~(1 << 7), "the other bits are unchanged"
+
+
+async def test_status_carries_the_state_of_charge_from_the_last_monitoring_read() -> None:
+    """IEEE 2030.5 PerCent is hundredths of a percent."""
+    connector = object.__new__(SunSpecConnector)
+
+    class _Core:
+        last_state_of_charge: tuple[float, int] | None = (62.55, 1_763_400_000)
+
+        async def fetch_status(self) -> dict[str, Any]:
+            return {"readingTime": 1_763_400_000}
+
+    connector._core = _Core()
+
+    status = await connector.fetch_status()
+    assert status["stateOfChargeStatus"] == {"dateTime": 1_763_400_000, "value": 6255}
+
+    _Core.last_state_of_charge = None
+    assert "stateOfChargeStatus" not in await connector.fetch_status()

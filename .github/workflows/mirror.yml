@@ -26,7 +26,7 @@ jobs:
     if: github.repository == 'DERSecurity/py20305'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Check out the current main, not the commit that triggered the run,
           # so a re-run of an older run cannot move the mirror's main back.

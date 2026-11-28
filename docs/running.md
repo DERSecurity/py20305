@@ -83,7 +83,8 @@ server:
   `supported_modes2()` when it implements a method it cannot honor on the
   device.
 - **`extensions`** are schemas in other namespaces. `auto` detects CSIP-AUS from
-  the namespaces the server declares.
+  the namespaces the server declares, on every discovery. A list replaces
+  detection: `[]` sends no CSIP-AUS elements to a server that declares them.
 
 Inbound, the client accepts any element either edition defines and logs, at
 INFO, each element the server sends that its base does not define and which
@@ -133,6 +134,15 @@ schedule and reported to the server:
 
 A device configured as a meter reports its readings only; see [Meters](#meters).
 
+If the server answers a readings POST with 400 or 404, it no longer knows the
+device's MirrorUsagePoint, for example after it restarted with a new resource
+tree. The client then POSTs the MirrorUsagePoint again in the same cycle and
+posts that cycle's readings to the new one, so nothing is lost beyond the
+refused POST. It makes one re-POST per cycle: if the re-POST fails or the
+readings are refused again, the next cycle tries again. A 403 is not retried;
+it means another client owns the MirrorUsagePoint, and the device stays
+blocked until it is restarted.
+
 `der_resource_put_policy: on_change` replaces the two DER resource rates. It
 PUTs DERCapability and DERSettings once each, at startup, and then only when
 the content changes. A changed DERCapability also resends DERSettings. A
@@ -153,6 +163,37 @@ a subscription the server has not confirmed by then stays on the server. The
 notification listener then stops, waiting at most 2 s for a notification still
 being received (`NotificationServer(shutdown_timeout=...)`). An unreachable or
 unresponsive server therefore no longer holds a stop for the HTTP timeouts.
+
+`subscription.adopt_existing: true` is for a client that takes over from
+another instance of itself, such as a standby that replaces a failed primary
+with the same certificate and the same `notification_external_host` and port.
+Both instances are then the same EndDevice to the server, and without adoption
+the new one POSTs a further subscription for every resource; a server that does
+not treat that POST as a renewal (IEEE 2030.5-2023 §8.9.3.4) keeps both, and
+each notification arrives once per set. With adoption, the client reads every
+page of its EndDevice's SubscriptionList when it connects, takes over each
+subscription whose notificationURI is its own and whose resource it would
+subscribe to, and POSTs only for the resources left. An adopted subscription's
+last renewal time is unknown: with `renewal_method: put` it is renewed at once;
+with `post` it is renewed on the renewal task's first pass, because a re-POST to
+a server that does not treat it as a renewal would create another copy.
+`subscription.remove_duplicates: true` also DELETEs the further
+subscriptions of its own it finds for a resource it adopted. A subscription
+with any other notificationURI is never adopted or removed. The comparison
+ignores differences a server may introduce when it echoes the URI: the case of
+the scheme and host, an explicit default port, percent-encoding case, and a
+trailing slash. If the server does
+not return its SubscriptionList, the client logs a warning and subscribes as it
+would without adoption. Embedding code can call
+`CsipClient.adopt_subscriptions()` itself.
+
+`subscription.unsubscribe_on_close: false` is the other half of a handover: the
+instance that stops leaves its subscriptions on the server for the instance
+that adopts them, instead of DELETEing them at shutdown. The default, `true`,
+DELETEs them as described above. If an instance that hands over does DELETE
+them, the adopting instance's SubscriptionList check creates them again at the
+list's pollRate, and notifications sent in between are lost. Embedding code can
+decide per stop with `CsipClient.shutdown(unsubscribe=False)`.
 
 The server has the final say on the posting rate: an `EndDevice.postRate` above
 zero replaces `post_rate_seconds` for that device, which is what IEEE 2030.5
@@ -339,11 +380,78 @@ has been cancelled" when the event's `responseRequired` asks for it. Cancelling
 an event that is already running applies the wind-down randomization §10.2.3.3
 requires, so the revert can land later than the cancellation that caused it.
 
+An event with `randomizeStart` or `randomizeDuration` is randomized per device,
+as IEEE 2030.5-2023 §10.2.3.2.2 and §10.2.3.2.3 require: each EndDevice the
+client acts for draws its own offsets, so the devices of one event start and
+end at different moments rather than as one block, and each device's ACTIVE
+and COMPLETED Responses are posted at its own start and end. An event received
+after its start begins on each device at the current time plus that device's
+start offset (§10.2.2.3 rule k), and a successive event starts on each device
+where the earlier one ended on it (rule m). A device whose own randomized
+window has already ended when the event arrives is not dispatched and is
+answered EXPIRED (rule j).
+
 Removal is acted on only when the list was fetched completely. A DERControl
 fetch that fails or does not parse leaves the client holding no list rather than
 an empty one. The distinction matters: an empty list is a server that removed
 every event, and treating a failed fetch as one would revert every device on a
 single transient error.
+
+## Which devices a program controls
+
+A DERProgram controls the EndDevices whose function set assignments list it, and
+a device can reach one program through more than one assignment. Each poll of
+the program lists reads those assignments again. A device whose assignments no
+longer name a program stops receiving that program's controls while the other
+devices keep them, so withdrawing one device from a program does not wait for a
+full rediscovery.
+
+A device with no assignments is mapped from the DeviceCapability program list
+when the server has one, as at discovery. A device keeps its programs on a poll
+where one of its program lists could not be read, or the server did not serve it
+(404 or 204). The list that failed may be the one that names them, so the client
+does not treat the failure as a withdrawal; a list the server serves and that
+names nothing is a withdrawal.
+
+The withdrawal does not undo a control already applied to the device.
+
+## Superseded events and the modes they give up
+
+When a higher-priority event takes over some of an event's modes on a device,
+the event that took them owns them from then on, and its own end is what
+releases them. The superseded event keeps only the modes that were not taken. So
+when the superseding event ends first, the client releases those modes on the
+device at that moment, by applying the default's value or switching the mode off
+when no default names it. It does so whether or not the superseded event is
+still running, and whether or not another event is running on the device.
+
+## Default controls while an event runs
+
+IEEE 2030.5-2023 §10.10.4.2.1 manages a DER by the DefaultDERControl for each
+control mode that has no active DERControl. The client applies it that way. A
+device with an active event still receives the default's modes that no active
+event controls on that device, and does not receive the modes an event controls.
+A default that names only modes an active event controls writes nothing. When
+the event ends, the whole default is applied, as before.
+
+A mode goes to the default of the program with the lowest primacy that names it,
+so a default does not write a mode that the default of a higher-priority program
+also names. The client works this out from the programs as they stand, and
+writes a mode that has since been freed even when the same default was written
+before without it.
+
+A default that names no control mode is not applied to a device while an event
+is active on it.
+
+## A control the device cannot apply
+
+A DERControl may name modes the device's connector does not implement. The
+client applies the modes it can and skips the rest. When the connector
+implements none of the modes a control names, nothing is applied, so the client
+does not report the event as started. It answers with status 251 (Not
+Supported), or 252 for a server on the 2018 edition, where 251 is reserved. For
+a group of devices under one EndDevice, the answer is a rejection only when
+every device in the group rejects the control.
 
 ## Simulating a loss of communications
 

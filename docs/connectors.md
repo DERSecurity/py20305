@@ -71,6 +71,14 @@ What it reports:
   `operationalModeStatus`, the 2030.5-2023 `connectStatus` and 2030.5-2018
   `genConnectStatus` bitmaps, and the AC over- and under-voltage and over-
   and under-frequency alarms at their `alarmStatus` bits.
+- **State of charge**, as a `SoC` reading and as DERStatus
+  `stateOfChargeStatus`, from the first source the device has: model 713
+  `SoC`, model 802 `SoC` (percent of the watt-hour rating), model 713
+  `WHAvail` over `WHRtg`, then model 124 `ChaState`. Model 124 is last because
+  `ChaState` is a percent of the amp-hour rating, which can differ by several
+  percent from the energy-based figure a battery management system shows. The
+  status value comes from the last monitoring read, so its `dateTime` is that
+  read's time and can lag the status poll by up to one monitoring interval.
 
 What it applies: the volt-var, volt-watt and watt-var curves, `opModMaxLimW`
 and its inject and absorb forms, `opModFixedW`, `opModTargetW`,
@@ -307,7 +315,7 @@ reported; an explicit 0 is.
 | `rtgVNom`, `rtgMaxV`, `rtgMinV` | |
 | `rtgReactiveSusceptance`, `rtgNormalCategory`, `rtgAbnormalCategory` | |
 | `modesSupported` | DERControlType bitmap, as a Python `int` from 0 to 4294967295. Any other type or range is reported as `00000000` and logged as a warning |
-| `doeModesSupported` | CSIP-AUS extension bitmap; defaults to all four limits |
+| `doeModesSupported` | CSIP-AUS extension bitmap (bit 0 export, 1 import, 2 generation, 3 load limit). Defaults to the limits the connector implements: a connector that overrides none of the four `update_op_mod_*_lim_w` methods reports `0`. A value returned here replaces the default |
 
 | `fetch_configuration` key | Notes |
 |---|---|
@@ -319,7 +327,7 @@ reported; an explicit 0 is.
 | `setVNom`, `setMaxV`, `setMinV` | |
 | `setGradW` | |
 | `modesEnabled` | DERControlType bitmap, as a Python `int` from 0 to 4294967295. Any other type or range is left out and logged as a warning |
-| `doeModesEnabled` | CSIP-AUS extension bitmap; defaults to the export and import limits |
+| `doeModesEnabled` | CSIP-AUS extension bitmap, bits as for `doeModesSupported`. Defaults to the limits the connector implements. A value returned here replaces the default |
 
 The absorbed reactive power limits are negative numbers. IEEE 2030.5-2023 says
 of `setMaxVarNeg`: "If present, SHALL be a negative value >= rtgMaxVarNeg
@@ -655,6 +663,13 @@ unsupported, because only one of them is anybody's mistake:
 Overriding the method is what support means. A connector that overrides nothing
 is not silently credited with accepting every command.
 
+A DERControl that names several modes is applied for the modes the connector
+implements, and the rest are skipped: IEEE 2030.5-2023 §10.10.4.2.1 lets a
+client "reject or partially act upon" a control for its capabilities. A control
+none of whose modes the connector implements applies nothing, so the client
+answers it as rejected (Table 31 status 251, or 252 for a 2018 server) and does
+not report it as started.
+
 ## Reacting to the schedule
 
 The write path delivers setpoints. Separately, the client pushes a connector the
@@ -678,7 +693,9 @@ client does not emit yet.
 
 Each hook receives a `ScheduleNotification`: the `stream`, the `transition` and
 `status` that fired it, the control's `mrid`, `program_href` and `primacy`, the
-post-randomization `start` / `duration` / `end`, the `affected_lfdis` the event
+post-randomization `start` / `duration` / `end` (spanning every device's own
+randomized window, since each device draws its own offsets), the
+`affected_lfdis` the event
 scopes to, the `randomization` window, and a stream-specific `payload`. For
 `price` the payload carries the tariff profile's price multiplier and the active
 interval's consumption blocks; the relay is global and does not actuate, so the
