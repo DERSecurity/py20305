@@ -64,6 +64,16 @@ class ActiveModeTracker:
 
         return owned - still_covered
 
+    def devices_of(self, mrid: bytes) -> frozenset[str]:
+        """Return the devices event ``mrid`` is registered on.
+
+        Asked of the tracker rather than of the program's current device list
+        because the two can differ: a device withdrawn from the program while
+        the event runs is no longer in that list, but the event still holds
+        modes on it until its registration is released.
+        """
+        return frozenset(device for device, events in self._registry.items() if mrid in events)
+
     def covered(self, device_href: str, *, excluding: bytes | None = None) -> frozenset[str]:
         """Return the modes registered for ``device_href``, ignoring event ``excluding``."""
         covered: set[str] = set()

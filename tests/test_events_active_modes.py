@@ -105,3 +105,15 @@ class TestRelease:
         tracker.release("d1", b"\x99" * 16, frozenset({"x"}))
 
         assert tracker.covered("d1") == frozenset({"x"})
+
+
+def test_devices_of_lists_the_devices_an_event_is_registered_on():
+    tracker = ActiveModeTracker()
+    tracker.register("/edev/1", b"" * 16, frozenset({"a"}))
+    tracker.register("/edev/2", b"" * 16, frozenset({"a"}))
+    tracker.register("/edev/3", b"" * 16, frozenset({"a"}))
+
+    assert tracker.devices_of(b"" * 16) == {"/edev/1", "/edev/2"}
+    tracker.unregister("/edev/2", b"" * 16)
+    assert tracker.devices_of(b"" * 16) == {"/edev/1"}
+    assert tracker.devices_of(b"	" * 16) == frozenset()

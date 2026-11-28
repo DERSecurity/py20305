@@ -239,6 +239,8 @@ and controls are read from the server again, and then:
   process B, and posts the device's ACKNOWLEDGED and ACTIVE Responses;
 - carries on an event for the incoming device even when process B holds it
   as superseded on its own devices;
+- keeps a device withdrawn from an event's DERProgram withdrawn: the event's
+  modes are not registered on it again, and it is not told how the event ends;
 - starts the activation and completion timers of the events it loaded,
   after the devices are mapped, so an event due while no process acted for
   the device starts once, on the device; an event whose end passed meanwhile
