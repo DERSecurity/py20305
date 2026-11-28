@@ -31,7 +31,6 @@ from py20305.models.sep.sep import (
 )
 from tests.contact_time import set_last_contact
 
-
 PROGRAM_HREF = "/derp/1"
 DEVICE_HREF = "/edev/1"
 

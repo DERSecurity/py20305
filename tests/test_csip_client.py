@@ -27,7 +27,6 @@ from py20305.subscription.manager import SubscriptionManager
 from tests.contact_time import set_last_contact
 
 
-
 @pytest.fixture
 def client() -> CsipClient:
     return CsipClient("https://example.com")

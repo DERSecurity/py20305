@@ -46,7 +46,6 @@ from py20305.observers import AuditRecord, DeviceOperation, DeviceRecord
 from py20305.server_profile import Edition, ServerProfile
 from tests.contact_time import set_last_contact
 
-
 LFDI_1 = b"\xaa" * 20
 LFDI_2 = b"\xbb" * 20
 DDERC_MRID = b"\x20" * 16
