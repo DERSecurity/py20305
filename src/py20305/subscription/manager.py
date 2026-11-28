@@ -43,6 +43,9 @@ _SUBSCRIPTION_LOST_STATUSES: frozenset[int] = frozenset({401, 404})
 # A.2.7.2) and is handled the same way so such a server still renews.
 _PUT_RENEWAL_FALLBACK_STATUSES: frozenset[int] = frozenset({404, 405})
 
+# Longest floor on the wait between passes of the renewal loop.
+_RENEWAL_MIN_WAKE_SECONDS = 3600
+
 RenewalMethod = Literal["post", "put"]
 
 _DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
@@ -227,6 +230,12 @@ class SubscriptionManager:
         self._store: SubscriptionStore = store
         self._notifications: deque[StoredNotification] = deque(maxlen=max_notifications)
         self._dedup_cache: dict[str, float] = {}
+        # time.monotonic() of the last processed notification per resource. The
+        # monotonic clock keeps a wall-clock step from stretching the window.
+        # Dedup entries written by record_notification_ancestry() rather than by a
+        # processed notification. The targeted fetch already covered the change the
+        # first suppressed notification reports, so that one needs no follow-up.
+        self._dedup_by_ancestry: set[str] = set()
         # Resources the server has cancelled (status=1) -- auto-subscribe skips
         # these so we honour the cancellation (poll-only) instead of immediately
         # re-subscribing. Persists across rediscovery; cleared only on a genuine
@@ -1225,20 +1234,27 @@ class SubscriptionManager:
     ) -> None:
         """Run subscription renewal loop until shutdown is signaled.
 
-        Renews subscriptions that are older than ``interval_seconds``
-        (default 24h). IEEE 2030.5 server-side subscriptions expire after 36h.
+        Renews each subscription ``interval_seconds`` (default 24h) after it
+        was created or last renewed. IEEE 2030.5 server-side subscriptions
+        expire after 36h. The loop wakes when the earliest subscription is due,
+        so one created or adopted after the loop started is renewed on time
+        rather than at the following interval. Passes are at least
+        ``interval_seconds / 24`` apart, one hour at the default interval
+        (IEEE 2030.5-2023 8.9.3.4 a: renewals no more often than every hour),
+        which also spaces out retries of a failed renewal.
         Returns at once in a manager that does not maintain the set.
         """
         if not self.maintains_set:
             return
+        min_wait = min(_RENEWAL_MIN_WAKE_SECONDS, interval_seconds / 24)
+        wait = self._seconds_until_renewal_due(interval_seconds)
         while not shutdown.is_set():
             try:
-                await asyncio.wait_for(shutdown.wait(), timeout=interval_seconds)
+                await asyncio.wait_for(shutdown.wait(), timeout=max(min_wait, wait))
                 break  # shutdown signaled
             except TimeoutError:
-                pass  # interval elapsed, time to renew
+                pass  # a subscription is due
 
-            # Renew stale subscriptions
             now = time.time()
             for uri in [s.subscription_uri for s in self._store.values()]:
                 state = self._store.get(uri)
@@ -1246,6 +1262,21 @@ class SubscriptionManager:
                     age = now - state.created_at
                     if age >= interval_seconds:
                         await self.renew(uri)
+            wait = self._seconds_until_renewal_due(interval_seconds)
+
+    def _seconds_until_renewal_due(self, interval_seconds: float) -> float:
+        """Return the seconds until the earliest active subscription is due for renewal.
+
+        Return ``interval_seconds`` when no subscription is active, and 0 when
+        one is already due. The result is never more than ``interval_seconds``.
+        """
+        now = time.time()
+        wait = float(interval_seconds)
+        for state in self._store.values():
+            if state.status == "active":
+                due_in = state.created_at + interval_seconds - now
+                wait = min(wait, max(0.0, due_in))
+        return wait
 
     # ------------------------------------------------------------------
     # WP4d: Non-list vs list notification semantics
@@ -1274,19 +1305,43 @@ class SubscriptionManager:
         return state.resource_type if state is not None else None
 
     # ------------------------------------------------------------------
-    # WP4e: Duplicate notification deduplication
+    # Duplicate notification suppression
     # ------------------------------------------------------------------
 
     _DEDUP_WINDOW: float = 5.0
 
     def is_duplicate_notification(self, resource_href: str) -> bool:
-        """Check if a notification for this resource is a duplicate (within 5s window)."""
-        now = time.time()
+        """Return True if a notification for this resource was processed in the last 5 s.
+
+        Otherwise record this notification as processed and return False. A
+        suppressed notification may report a newer change than the one processed:
+        call :meth:`followup_delay` to schedule the re-poll that picks it up.
+        """
+        now = time.monotonic()
         last = self._dedup_cache.get(resource_href)
         if last is not None and now - last < self._DEDUP_WINDOW:
             return True
         self._dedup_cache[resource_href] = now
+        self._dedup_by_ancestry.discard(resource_href)
         return False
+
+    def followup_delay(self, resource_href: str) -> float | None:
+        """Return the seconds until a suppressed notification's follow-up re-poll is due.
+
+        The follow-up is due when the dedup window of ``resource_href`` ends.
+        Return None when no follow-up is needed: the resource has no dedup entry,
+        or the entry comes from a targeted fetch (see
+        :meth:`record_notification_ancestry`) and this is the first notification
+        it suppressed. That fetch already read the change; a later suppressed
+        notification may report a newer one and gets a follow-up.
+        """
+        last = self._dedup_cache.get(resource_href)
+        if last is None:
+            return None
+        if resource_href in self._dedup_by_ancestry:
+            self._dedup_by_ancestry.discard(resource_href)
+            return None
+        return max(0.0, last + self._DEDUP_WINDOW - time.monotonic())
 
     def forget_notification(self, resource_href: str) -> None:
         """Forget that a notification for ``resource_href`` was seen.
@@ -1295,6 +1350,7 @@ class SubscriptionManager:
         window is processed rather than skipped as a duplicate.
         """
         self._dedup_cache.pop(resource_href, None)
+        self._dedup_by_ancestry.discard(resource_href)
 
     def record_notification_ancestry(self, resource_href: str) -> None:
         """Record program-scope parent paths in dedup cache after a targeted fetch.
@@ -1310,11 +1366,12 @@ class SubscriptionManager:
         (e.g. conformance test BASIC-003 remove_derp + add_fsa). Suppressing them would
         swallow legitimate full-rediscovery triggers.
         """
-        now = time.time()
+        now = time.monotonic()
         path = resource_href.rstrip("/")
         parts = path.strip("/").split("/")
         for i in range(len(parts) - 1, 0, -1):
             parent = "/" + "/".join(parts[:i])
             self._dedup_cache[parent] = now
+            self._dedup_by_ancestry.add(parent)
             if parts[i - 1] == "derp":
                 break

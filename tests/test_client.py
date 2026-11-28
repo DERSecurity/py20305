@@ -268,6 +268,45 @@ async def test_get_list_404_returns_empty_list(aiohttp_server):
     assert queries == [{"s": "0", "l": "50"}]
 
 
+async def test_get_list_404_raises_list_not_found_when_absence_must_be_reported(aiohttp_server):
+    """With ``absent_as_empty=False`` a first-page 404 raises instead of returning [].
+
+    A caller can then tell a list the server does not serve from one served empty.
+    """
+
+    async def handler(request):
+        return web.Response(status=404, body=b"not found")
+
+    app = web.Application()
+    app.router.add_get("/derc", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    from py20305.client.errors import Sep2ListNotFoundError
+    from py20305.models.sep.sep import DercontrolList
+
+    async with Sep2Client(base_url) as client:
+        with pytest.raises(Sep2ListNotFoundError) as exc_info:
+            await client.get_list("/derc", DercontrolList, absent_as_empty=False)
+    assert exc_info.value.status_code == 404
+
+
+async def test_get_list_204_is_empty_when_absence_must_be_reported(aiohttp_server):
+    """``absent_as_empty=False`` changes only the 404: a 204 still means no items."""
+
+    async def handler(request):
+        return web.Response(status=204)
+
+    app = web.Application()
+    app.router.add_get("/derc", handler)
+    base_url = await _serve(aiohttp_server, app)
+
+    from py20305.models.sep.sep import DercontrolList
+
+    async with Sep2Client(base_url) as client:
+        items = await client.get_list("/derc", DercontrolList, absent_as_empty=False)
+    assert items == []
+
+
 async def test_get_list_non_404_error_propagates(aiohttp_server):
     """get_list propagates non-404 errors normally.
 

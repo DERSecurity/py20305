@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import time
@@ -18,6 +19,7 @@ from functools import cache, partial
 from typing import Any
 
 from py20305.audit import AuditEmitter
+from py20305.client.discovery import read_der_control_mrids
 from py20305.client.http import Sep2Client
 from py20305.client.state import DerProgramState, DiscoveredState
 from py20305.client.timebase import ServerTimebase
@@ -42,11 +44,16 @@ from py20305.events.supersession import compared_mode_keys, compute_supersession
 from py20305.events.timers import EventTimerManager
 from py20305.history.events import EventHistory
 from py20305.json_form import (
+    safe_serialize,
     serialize_default_der_control,
     serialize_der_control,
 )
 from py20305.models.csipaus.elements import DOE_LIMIT_NAMES, doe_element_name, doe_limits
-from py20305.models.sep.sep import DefaultDercontrol, Dercontrol1
+from py20305.models.sep.sep import (
+    DefaultDercontrol,
+    Dercontrol1,
+    RespondableSubscribableIdentifiedObject,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +70,30 @@ _DOE_ENVELOPE_NAMES = tuple(sorted(DOE_LIMIT_NAMES))
 #: reported rejected while its apply keeps running under the connector's own
 #: deadline, so the control still reaches it.
 ACTIVATION_DISPATCH_DEADLINE = 5.0
+
+#: DefaultDERControl fields left out of its content digest: identity and
+#: bookkeeping, which do not change what the device is told to do. Extension
+#: content (``other_element``, ``any_attributes``) stays in.
+_DEFAULT_BOOKKEEPING_FIELDS = (
+    frozenset(RespondableSubscribableIdentifiedObject.model_fields) | {"updated_time"}
+) - {"other_element", "any_attributes"}
+
+
+def _default_content(dderc: DefaultDercontrol) -> bytes:
+    """Return a digest of the settings a DefaultDERControl tells the device to use.
+
+    A server that modifies a default keeps its mRID and increments its version
+    (IEEE 2030.5-2023 VersionType), so the mRID cannot tell the tracker that the
+    device needs the default written again. The digest can. The version itself
+    is left out: a new version with the same settings needs no write.
+    """
+    settings = {
+        name: getattr(dderc, name)
+        for name in type(dderc).model_fields
+        if name not in _DEFAULT_BOOKKEEPING_FIELDS
+    }
+    text = json.dumps(safe_serialize(settings), sort_keys=True, default=str)
+    return hashlib.sha256(text.encode()).digest()
 
 
 def _resolve_watts(value: int, multiplier: int) -> int | float:
@@ -465,19 +496,34 @@ class EventProcessor:
         # snapshot would cancel every live event on one transient error.
         if derp_state.der_controls_complete:
             served = {derc.m_rid.value for derc in derp_state.der_controls}
-            for record in self._store.all_active_states():
-                if record.program_href != program_href or record.mrid in served:
-                    continue
-                # "before the end of their Effective Scheduled Period" is part
-                # of the rule, not a detail: a server may drop an event once it
-                # is over, and such an event completed rather than being
-                # cancelled. The record can still be ACTIVE here because
-                # _on_completion blocks on _state_ready for the length of a
-                # rediscovery, and a rediscovery ends by refreshing the list and
-                # calling this method -- cancelling would report status 6 for an
-                # event that ran its course and suppress the status 3 the
-                # blocked completion still owes.
-                if now >= record.end:
+            # "before the end of their Effective Scheduled Period" is part of
+            # the rule, not a detail: a server may drop an event once it is
+            # over, and such an event completed rather than being cancelled.
+            # The record can still be ACTIVE here because _on_completion blocks
+            # on _state_ready for the length of a rediscovery, and a rediscovery
+            # ends by refreshing the list and calling this method -- cancelling
+            # would report status 6 for an event that ran its course and
+            # suppress the status 3 the blocked completion still owes.
+            removed = [
+                record
+                for record in self._store.all_active_states()
+                if record.program_href == program_href
+                and record.mrid not in served
+                and now < record.end
+            ]
+            if removed and derp_state.der_controls_pages > 1:
+                # A server that drops or adds a control between two page reads
+                # shifts the later pages, and the read can miss a control the
+                # server still serves. Cancellation is final, so the list is
+                # read again now and only a control missing from both reads is
+                # cancelled. A failed second read cancels nothing this pass.
+                reread = await read_der_control_mrids(self._http, derp_state)
+                if self._closed:
+                    return
+                removed = [] if reread is None else [r for r in removed if r.mrid not in reread]
+            for record in removed:
+                # Another task can end the event during an await in this loop.
+                if record.state not in (EventState.SCHEDULED, EventState.ACTIVE):
                     continue
                 logger.info(
                     "Event %s removed from program %s while %s -- cancelling (rule p)",
@@ -1897,8 +1943,13 @@ class EventProcessor:
             "lfdi": lfdi.hex(),
             "events": events,
             "defaults": [
-                {"program_href": path, "mrid": mrid.hex(), "primacy": primacy}
-                for path, mrid, primacy in self._dderc_tracker.entries_for(lfdi)
+                {
+                    "program_href": path,
+                    "mrid": mrid.hex(),
+                    "primacy": primacy,
+                    "content": content.hex() if content is not None else None,
+                }
+                for path, mrid, primacy, content in self._dderc_tracker.entries_for(lfdi)
             ],
             "comms_loss": {
                 "active": self._comms_loss.active,
@@ -2046,8 +2097,13 @@ class EventProcessor:
             for entry in snapshot.get("events", []):
                 self._merge_event(dev_href, entry)
             for entry in snapshot.get("defaults", []):
+                content = entry.get("content")
                 self._dderc_tracker.record_application(
-                    lfdi, entry["program_href"], bytes.fromhex(entry["mrid"]), entry["primacy"]
+                    lfdi,
+                    entry["program_href"],
+                    bytes.fromhex(entry["mrid"]),
+                    entry["primacy"],
+                    content=bytes.fromhex(content) if content else None,
                 )
             resume_after = snapshot.get("comms_loss", {}).get("resume_after")
             if resume_after is not None:
@@ -2447,7 +2503,9 @@ class EventProcessor:
         # For each device, find the highest-priority program with a DDERC.
         # A shared device may belong to multiple programs; on event completion,
         # it should revert to the best (lowest primacy number) DDERC available.
-        dderc_targets: list[tuple[str, bytes, DerProgramState, DefaultDercontrol]] = []
+        # Each target: device href, LFDI, program, the default as sent, and the
+        # content digest of the program's whole default.
+        dderc_targets: list[tuple[str, bytes, DerProgramState, DefaultDercontrol, bytes]] = []
         # Modes the ended event set that the default does not carry. The
         # default only writes the modes it names, so these would stay in
         # effect on the device unless they are disabled here.
@@ -2517,7 +2575,7 @@ class EventProcessor:
             # goes out: it always did, and masking cannot have emptied it.
             emptied = bool(carried) and not written
             if not emptied and self._dderc_tracker.should_apply(lfdi, best.href, best.primacy):
-                dderc_targets.append((dev_href, lfdi, best, effective))
+                dderc_targets.append((dev_href, lfdi, best, effective, _default_content(dderc)))
 
         # Dispatch DDERC in parallel, then update tracker for successes.
         # With a group lookup supplied, each server-side EDev resolves
@@ -2525,15 +2583,18 @@ class EventProcessor:
         # Cache the lookup per target so a mid-await groups rebuild can't
         # change the fan-out width between the build and attribution loops.
         if dderc_targets:
-            plans: list[tuple[str, bytes, DerProgramState, list[str] | None, DefaultDercontrol]] = [
+            plans: list[
+                tuple[str, bytes, DerProgramState, list[str] | None, DefaultDercontrol, bytes]
+            ] = [
                 (
                     dev_href,
                     lfdi,
                     best_prog,
                     self._group_local_lfdis(best_prog.href),
                     effective,
+                    content,
                 )
-                for dev_href, lfdi, best_prog, effective in dderc_targets
+                for dev_href, lfdi, best_prog, effective, content in dderc_targets
             ]
             # Both reasons land on the same DDERC write, and they read very
             # differently in an audit trail: "an event ended so the default came
@@ -2544,7 +2605,7 @@ class EventProcessor:
                 CommandOrigin.COMMS_LOSS if self._comms_loss.active else CommandOrigin.DDERC_REAPPLY
             )
             coros: list[Coroutine[Any, Any, None]] = []
-            for dev_href, _, best_prog, local_lfdis, dderc in plans:
+            for dev_href, _, best_prog, local_lfdis, dderc, _content in plans:
                 if local_lfdis is not None:
                     coros.extend(
                         self._dispatcher.apply_default_control_by_lfdi(
@@ -2572,7 +2633,7 @@ class EventProcessor:
             # per dderc_target); collapse per-fan-out results down to one
             # success per target so the tracker isn't double-recorded.
             idx = 0
-            for dev_href, lfdi, best_prog, local_lfdis, dderc in plans:
+            for dev_href, lfdi, best_prog, local_lfdis, dderc, content in plans:
                 n = len(local_lfdis) if local_lfdis is not None else 1
                 target_results = results[idx : idx + n]
                 idx += n
@@ -2599,6 +2660,7 @@ class EventProcessor:
                         dderc.m_rid.value,
                         best_prog.primacy,
                         get_active_mode_names(dderc.dercontrol_base),
+                        content,
                     )
 
         if withdraw_targets:
@@ -2733,6 +2795,7 @@ class EventProcessor:
                     active_devices.add(d)
 
         dderc_mrid = derp_state.default_dercontrol.m_rid.value
+        dderc_content = _default_content(derp_state.default_dercontrol)
         carried = get_active_mode_names(derp_state.default_dercontrol.dercontrol_base)
 
         # Each target is sent the default without the modes that something
@@ -2760,7 +2823,7 @@ class EventProcessor:
                 continue
 
             if not self._dderc_tracker.should_apply_initial(
-                lfdi, program_href, dderc_mrid, derp_state.primacy, written
+                lfdi, program_href, dderc_mrid, derp_state.primacy, written, dderc_content
             ):
                 logger.debug(
                     "Initial DDERC skip %s: tracker blocked for %s (primacy=%d)",
@@ -2829,7 +2892,7 @@ class EventProcessor:
                 # default back: the fallback checks primacy, and the program is
                 # the same.
                 self._dderc_tracker.record_application(
-                    lfdi, program_href, dderc_mrid, derp_state.primacy, written
+                    lfdi, program_href, dderc_mrid, derp_state.primacy, written, dderc_content
                 )
 
     def _higher_priority_default_modes(

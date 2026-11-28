@@ -29,6 +29,7 @@ from py20305.client.connector import Ieee2030TCPConnector, SocketPair
 from py20305.client.errors import (
     Sep2ConnectionError,
     Sep2Error,
+    Sep2ListNotFoundError,
     Sep2NoContentError,
     Sep2PayloadError,
     Sep2ProtocolError,
@@ -301,6 +302,10 @@ class Sep2Client:
         # telemetry PUT/POST -- refreshes this. Retained (mirrors
         # _last_contact_epoch now) for the connectivity probe and status surface.
         self._last_validated_epoch: int | None = None
+        # time.monotonic() of the same round-trip. Elapsed-time checks use it, so
+        # a wall-clock step (NTP, an operator setting the clock) cannot fake or
+        # hide a silence.
+        self._last_contact_monotonic: float | None = None
         self._consecutive_failures = 0
         # Responses received this session, so a caller can tell whether a piece
         # of work it ran reached the server at all.
@@ -815,6 +820,15 @@ class Sep2Client:
         on."""
         return self._last_validated_epoch
 
+    def seconds_since_contact(self) -> float | None:
+        """Return the seconds since the last reachable round-trip, or ``None`` if none.
+
+        Measured on the monotonic clock, so a wall-clock step does not change it.
+        """
+        if self._last_contact_monotonic is None:
+            return None
+        return max(0.0, time.monotonic() - self._last_contact_monotonic)
+
     @property
     def contacts(self) -> int:
         """Number of responses received from the server since this client was created.
@@ -905,6 +919,7 @@ class Sep2Client:
             self._consecutive_failures += 1
             return
         self._last_contact_epoch = int(time.time())
+        self._last_contact_monotonic = time.monotonic()
         self._contacts += 1
         self._consecutive_failures = 0
         self._server_alive = True
@@ -964,6 +979,7 @@ class Sep2Client:
         self._last_error = None
         self._last_contact_epoch = None
         self._last_validated_epoch = None
+        self._last_contact_monotonic = None
         self._consecutive_failures = 0
 
     def update_ca_trust(self, ca_cert_path: str) -> None:
@@ -1346,7 +1362,9 @@ class Sep2Client:
 
         return await self._retry_observed(_do_get)
 
-    async def get_list(self, path: str, model_type: type[T]) -> list[T]:
+    async def get_list(
+        self, path: str, model_type: type[T], *, absent_as_empty: bool = True
+    ) -> list[T]:
         """GET a list resource, fetching all pages.
 
         model_type should be the list container type (e.g. EndDeviceList).
@@ -1358,6 +1376,11 @@ class Sep2Client:
         (or 204) when no controls are configured yet — it is not a transient
         error. A non-first-page 404/204 is not normalized and surfaces as a
         protocol error (a pagination/data-integrity issue).
+
+        ``absent_as_empty=False`` raises :class:`Sep2ListNotFoundError` for a
+        first-page 404 instead, for a caller that must tell a list the server
+        does not serve from a list served empty. A first-page 204 still returns
+        an empty list.
         """
         items: list[Any] = []
         start = 0
@@ -1382,6 +1405,8 @@ class Sep2Client:
             except Sep2ProtocolError as exc:
                 # 404 (absent) on the first page also means "no items".
                 if exc.status_code == 404 and start == 0:
+                    if not absent_as_empty:
+                        raise Sep2ListNotFoundError(f"GET {path}: 404 Not Found") from exc
                     logger.debug("GET %s returned 404, treating as empty list", path)
                     return []
                 raise

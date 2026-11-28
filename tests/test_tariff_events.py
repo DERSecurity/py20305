@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace as NS
 
 from py20305.events.randomization import RandomizationCache
-from py20305.events.tariff import active_interval, effective_window
+from py20305.events.tariff import active_interval, effective_window, next_boundary
 
 HOUR = 3600
 
@@ -109,3 +109,37 @@ class TestActiveInterval:
         assert active_interval([cancelled, active], HOUR, cache) is active
         # With only a cancelled interval covering now, nothing is active.
         assert active_interval([cancelled], HOUR, cache) is None
+
+
+class TestNextBoundary:
+    def test_next_start_when_between_intervals(self):
+        cache = RandomizationCache()
+        intervals = [_interval(b"a", HOUR), _interval(b"b", 3 * HOUR)]
+        assert next_boundary(intervals, 0, cache) == HOUR
+
+    def test_active_interval_end_before_later_start(self):
+        cache = RandomizationCache()
+        intervals = [_interval(b"a", 0, HOUR), _interval(b"b", 2 * HOUR)]
+        assert next_boundary(intervals, 100, cache) == HOUR
+
+    def test_boundary_at_now_is_not_next(self):
+        cache = RandomizationCache()
+        intervals = [_interval(b"a", 0, HOUR), _interval(b"b", HOUR, HOUR)]
+        assert next_boundary(intervals, HOUR, cache) == 2 * HOUR
+
+    def test_none_after_last_interval(self):
+        cache = RandomizationCache()
+        assert next_boundary([_interval(b"a", 0)], HOUR, cache) is None
+
+    def test_cancelled_interval_skipped(self):
+        cache = RandomizationCache()
+        intervals = [_interval(b"x", HOUR, status=2), _interval(b"y", 3 * HOUR)]
+        assert next_boundary(intervals, 0, cache) == 3 * HOUR
+
+    def test_uses_randomized_start(self, monkeypatch):
+        monkeypatch.setattr(
+            "py20305.events.randomization.random.randint", lambda a, b: 600
+        )
+        cache = RandomizationCache()
+        interval = _interval(b"r", HOUR, rand_start=900)
+        assert next_boundary([interval], 0, cache) == HOUR + 600

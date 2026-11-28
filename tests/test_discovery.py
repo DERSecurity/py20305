@@ -14,16 +14,18 @@ from py20305.client.discovery import (
     _extract_href,
     discover,
     refresh_der_controls,
+    refresh_der_controls_for_program,
     refresh_der_programs,
     refresh_end_device_lists,
     refresh_function_set_assignments,
 )
-from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
+from py20305.client.errors import Sep2ListNotFoundError, Sep2PayloadError, Sep2ProtocolError
 from py20305.client.http import Sep2Client
 from py20305.client.poll_rate import DEFAULT_POLL_RATE
 from py20305.client.state import DiscoveredState
 from py20305.client.timebase import ServerTimebase
 from py20305.events.processor import EventProcessor
+from py20305.events.state_machine import EventState
 from py20305.models.sep.sep import (
     DefaultDercontrol,
     DefaultDercontrolLink,
@@ -241,9 +243,23 @@ class _MockClient:
         raw = self._raw_bodies.get(path, b"<default/>")
         return result, raw
 
-    async def get_list(self, path: str, model_type: type) -> list[Any]:
+    async def get_list(
+        self, path: str, model_type: type, *, absent_as_empty: bool = True
+    ) -> list[Any]:
+        """Return the configured pages; a list of pages stands for a multi-page read.
+
+        An empty list stands for a first-page 404 or 204. A configured
+        ``Sep2ListNotFoundError`` is a first-page 404, handled as the real
+        client handles it: [] under the default ``absent_as_empty``, raised
+        otherwise.
+        """
         self.calls.append(("get_list", path))
-        result = await self.get(path, model_type)
+        try:
+            result = await self.get(path, model_type)
+        except Sep2ListNotFoundError:
+            if absent_as_empty:
+                return []
+            raise
         if isinstance(result, list):
             return result
         return [result]
@@ -894,9 +910,11 @@ async def test_refresh_after_p72_delete_stops_applying_controls():
             fetched_paths.append(path.split("?")[0])
             return await super().get(path, model_type)
 
-        async def get_list(self, path: str, model_type: type) -> list[Any]:
+        async def get_list(
+            self, path: str, model_type: type, *, absent_as_empty: bool = True
+        ) -> list[Any]:
             fetched_paths.append(path.split("?")[0])
-            return await super().get_list(path, model_type)
+            return await super().get_list(path, model_type, absent_as_empty=absent_as_empty)
 
     client = _TrackingClient(
         {
@@ -2915,3 +2933,168 @@ async def test_rediscovery_keeps_the_time_observations_of_a_device_whose_fsa_lis
 
     assert set(client.timebase.snapshot()["per_fsa"]) == {"/fsa/1"}
     assert state.previous_fsa_hrefs == {"/edev/1": {"/fsa/1"}, "/edev/2": set()}
+
+
+def _der_control_list(*controls: Any) -> DercontrolList:
+    dl = DercontrolList(**{"all": len(controls), "results": len(controls)})
+    dl.dercontrol = list(controls)
+    return dl
+
+
+def _one_program_with_control_list(derc_list: Any, dderc: Any = None) -> _MockClient:
+    """A server where /edev/1 reaches /derp/1, whose DERControl list is /derp/1/derc.
+
+    With ``dderc`` the program also links a DefaultDERControl at /derp/1/dderc.
+    """
+    edev = _make_edev("/edev/1")
+    edev.function_set_assignments_list_link = FunctionSetAssignmentsListLink(href="/edev/1/fsa")
+    derp = _make_derp("/derp/1", primacy=5)
+    derp.dercontrol_list_link = DercontrolListLink(href="/derp/1/derc")
+    responses: dict[str, Any] = {
+        "/dcap": _make_dcap(),
+        "/tm": _make_time(),
+        "/edev": _make_edev_list(edev),
+        "/edev/1/fsa": _make_fsa_list(_make_fsa("/fsa/1", derp_list_href="/fsa/1/derp")),
+        "/fsa/1/derp": _make_derp_list(derp),
+        "/derp/1/derc": derc_list,
+    }
+    if dderc is not None:
+        derp.default_dercontrol_link = DefaultDercontrolLink(href="/derp/1/dderc")
+        responses["/derp/1/dderc"] = dderc
+    return _MockClient(responses)
+
+
+@pytest.mark.asyncio
+async def test_discovery_of_a_der_control_list_404_leaves_the_list_incomplete():
+    """A list the server does not serve is not a list served empty."""
+    client = _one_program_with_control_list(Sep2ListNotFoundError("GET /derp/1/derc: 404"))
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.der_programs["/derp/1"].der_controls_complete is False
+
+
+@pytest.mark.asyncio
+async def test_a_der_control_list_served_empty_is_complete():
+    client = _one_program_with_control_list(_der_control_list())
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    assert state.der_programs["/derp/1"].der_controls_complete is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("targeted", [False, True], ids=["poll", "targeted"])
+async def test_a_der_control_list_404_does_not_cancel_the_programs_events(targeted: bool):
+    """A 404 on a refresh (a server restart, say) keeps the controls held.
+
+    Read as an empty list, it would have IEEE 2030.5-2023 §10.2.2.3 rule p)
+    cancel every live event of the program, and a cancellation is final.
+    """
+    now = int(time.time())
+    derc = _make_derc(0x01, start=now - 10, duration=3600)
+    client = _one_program_with_control_list(_der_control_list(derc))
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+    http = AsyncMock()
+    http.profile = ServerProfile(base=Edition.E2023)
+    http.post = AsyncMock(return_value=None)
+    processor = EventProcessor(http, state, AsyncMock(), asyncio.Event())
+    await processor.process_controls("/derp/1")
+    assert processor._store.get(derc.m_rid.value).state == EventState.ACTIVE
+
+    client._responses["/derp/1/derc"] = Sep2ListNotFoundError("GET /derp/1/derc: 404")
+    if targeted:
+        await refresh_der_controls_for_program(client, state, "/derp/1")  # type: ignore[arg-type]
+    else:
+        await refresh_der_controls(client, state)  # type: ignore[arg-type]
+    await processor.process_controls("/derp/1")
+    await processor.shutdown()
+
+    assert processor._store.get(derc.m_rid.value).state == EventState.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_an_older_der_control_read_finishing_after_a_newer_one_does_not_replace_it(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A scheduled poll whose list GET finishes after a notification's targeted
+    fetch must not put the older list back."""
+    now = int(time.time())
+    old = _make_derc(0x01, start=now + 600, duration=3600)
+    new = _make_derc(0x02, start=now + 9000, duration=3600)
+    client = _one_program_with_control_list(_der_control_list(old))
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    poll_reading = asyncio.Event()
+    release_poll = asyncio.Event()
+    mock_get_list = client.get_list
+    list_reads = 0
+
+    async def get_list(path: str, model_type: type, *, absent_as_empty: bool = True) -> list[Any]:
+        nonlocal list_reads
+        if path == "/derp/1/derc":
+            list_reads += 1
+            if list_reads == 1:
+                # The poll's read: it saw the list before the new control.
+                poll_reading.set()
+                await release_poll.wait()
+                return [_der_control_list(old)]
+        return await mock_get_list(path, model_type, absent_as_empty=absent_as_empty)
+
+    monkeypatch.setattr(client, "get_list", get_list)
+    client._responses["/derp/1/derc"] = _der_control_list(old, new)
+
+    poll = asyncio.create_task(refresh_der_controls(client, state))  # type: ignore[arg-type]
+    await poll_reading.wait()
+    await refresh_der_controls_for_program(client, state, "/derp/1")  # type: ignore[arg-type]
+    release_poll.set()
+    await poll
+
+    held = [derc.m_rid.value for derc in state.der_programs["/derp/1"].der_controls]
+    assert held == [old.m_rid.value, new.m_rid.value]
+
+
+@pytest.mark.asyncio
+async def test_an_older_default_control_read_finishing_after_a_newer_one_does_not_replace_it(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The same holds for the DefaultDERControl: the older value is not written back."""
+    old = DefaultDercontrol(
+        m_rid=MRidtype(value=b"\x20" * 16),
+        dercontrol_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=5000)),
+    )
+    new = DefaultDercontrol(
+        m_rid=MRidtype(value=b"\x20" * 16),
+        dercontrol_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+    )
+    client = _one_program_with_control_list(_der_control_list(), dderc=old)
+    state = DiscoveredState()
+    await discover(client, state)  # type: ignore[arg-type]
+
+    poll_reading = asyncio.Event()
+    release_poll = asyncio.Event()
+    mock_get = client.get
+    default_reads = 0
+
+    async def get(path: str, model_type: type) -> Any:
+        nonlocal default_reads
+        if path == "/derp/1/dderc":
+            default_reads += 1
+            if default_reads == 1:
+                poll_reading.set()
+                await release_poll.wait()
+                return old
+        return await mock_get(path, model_type)
+
+    monkeypatch.setattr(client, "get", get)
+    client._responses["/derp/1/dderc"] = new
+
+    poll = asyncio.create_task(refresh_der_controls(client, state))  # type: ignore[arg-type]
+    await poll_reading.wait()
+    await refresh_der_controls_for_program(client, state, "/derp/1")  # type: ignore[arg-type]
+    release_poll.set()
+    await poll
+
+    assert state.der_programs["/derp/1"].default_dercontrol is new

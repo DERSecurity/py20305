@@ -686,7 +686,7 @@ stays the `update_*` path's job.
 | `notification_control` | a scheduled `DERControl` was added, updated, activated, superseded, cancelled or completed |
 | `notification_default_baseline` | the program's `DefaultDERControl` baseline was added or changed |
 | `notification_doe` | a Dynamic Operating Envelope (export / import / generation / load watt-limit) changed |
-| `notification_price` | the active pricing interval changed (Pricing function set) |
+| `notification_price` | the active pricing interval changed, or ended or was cancelled with no interval after it (Pricing function set) |
 
 `notification_drlc` and `notification_flow_reservation` exist for streams the
 client does not emit yet.

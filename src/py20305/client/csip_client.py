@@ -105,6 +105,13 @@ _TARIFF_RESOURCE_TYPES: frozenset[str] = frozenset({"TariffProfileList", "TimeTa
 # Normal convergence takes 1-2 passes.
 _MAX_REDISCOVERY_PASSES = 5
 
+# How often a deferred notification re-poll checks whether rediscovery finished.
+_REDISCOVERY_WAIT_INTERVAL_S = 0.1
+
+# Longest sleep of the tariff boundary timer between clock checks. Re-checking
+# lets a wall-clock step or a new server time offset move the firing time.
+_TARIFF_TIMER_TICK_S = 1.0
+
 # After this many consecutive poll failures, treat a subsequent recovery
 # as "the upstream server probably restarted" and trigger full
 # rediscovery instead of just re-subscribing. Rationale: a single
@@ -263,6 +270,9 @@ class CsipClient:
         #: never open-ended: a forgotten one would strand a live site at the
         #: planning limit.
         self._comm_loss_simulation_expiry: asyncio.Task[None] | None = None
+        #: Pending follow-up re-polls for suppressed duplicate notifications,
+        #: keyed by subscribed resource. See _schedule_notification_followup().
+        self._notification_followups: dict[str, asyncio.Task[None]] = {}
         #: Serializes simulate/clear/expiry. Without it a timer that has already
         #: begun clearing can finish against a window someone else has since
         #: opened, marking a live simulation recovered.
@@ -300,6 +310,14 @@ class CsipClient:
         self._tariff_processor = TariffProcessor(
             self._http, self._state, self._dispatcher, timebase=self._timebase
         )
+        #: Serializes tariff refreshes and processing. Re-polls from the
+        #: scheduler, from notifications and from the boundary timer would
+        #: otherwise interleave, and an older read could be relayed after a
+        #: newer one.
+        self._tariff_lock = asyncio.Lock()
+        #: Runs the tariff processor at the next interval boundary. See
+        #: _arm_tariff_timer().
+        self._tariff_timer: asyncio.Task[None] | None = None
         self._subscription_manager = subscription_manager
         self._notification_server = notification_server
         self._on_structural_change = on_structural_change
@@ -851,12 +869,11 @@ class CsipClient:
         from py20305.models.sep.sep import DeviceCapability, Time
 
         if self._http.server_alive:
-            last_validated = self._http.last_validated_epoch
-            if (
-                last_validated is not None
-                and (time.time() - last_validated) < self._connection_heartbeat_seconds
-            ):
-                return  # alive and a validating GET confirmed it within the window
+            # Every established connection is chain-validated, so the last contact
+            # is also the last validated request.
+            since_contact = self._http.seconds_since_contact()
+            if since_contact is not None and since_contact < self._connection_heartbeat_seconds:
+                return  # alive and a validated request confirmed it within the window
 
         if self._state.time_href:
             # Free timebase refresh: the probe already GETs Time, so feed the
@@ -890,10 +907,10 @@ class CsipClient:
             # the boundary can still be pending, so the resume-after gate is done.
             self._comms_loss.resume_after_epoch = None
             logger.info("Comms-loss resume boundary passed (epoch %d); cleared", boundary)
-        lce = self._http.last_contact_epoch
-        if lce is None:
+        since_contact = self._http.seconds_since_contact()
+        if since_contact is None:
             return
-        elapsed = int(time.time() - lce)
+        elapsed = int(since_contact)
         if not self._comms_loss.active:
             if elapsed >= self._comms_loss_seconds:
                 await self._enter_comms_loss(elapsed)
@@ -1386,9 +1403,65 @@ class CsipClient:
 
     async def _do_poll_tariff(self) -> None:
         """Pricing poll: re-walk the tariff tree, then relay any active-interval
-        price change to connectors. No-op unless pricing is enabled."""
-        await refresh_tariffs(self._http, self._state)
-        await self._tariff_processor.process_tariffs()
+        price change to connectors. No-op unless pricing is enabled.
+
+        Waits for a running tariff re-poll to finish rather than skipping, so
+        this run reads the newest server state. Then arms the boundary timer.
+        """
+        async with self._tariff_lock:
+            await refresh_tariffs(self._http, self._state)
+            await self._tariff_processor.process_tariffs()
+        self._arm_tariff_timer()
+
+    def _arm_tariff_timer(self) -> None:
+        """Start the timer that re-runs the tariff processor when it is next due.
+
+        Replaces any pending timer. Starts none when the processor has nothing
+        due (no later interval boundary and no price fetch to retry) or after
+        shutdown started.
+        """
+        pending = self._tariff_timer
+        self._tariff_timer = None
+        if pending is not None and pending is not asyncio.current_task():
+            pending.cancel()
+        if self._shutdown_event.is_set() or self._tariff_processor.next_run_delay() is None:
+            return
+        self._tariff_timer = asyncio.create_task(
+            self._run_tariff_timer(), name="tariff-boundary-timer"
+        )
+
+    async def _run_tariff_timer(self) -> None:
+        """Run the tariff processor at its next interval boundary, then re-arm.
+
+        Processing uses the schedule already fetched; it does not refresh the
+        tariff tree. It waits for a running rediscovery and a running tariff
+        re-poll to finish first.
+        """
+        while True:
+            delay = self._tariff_processor.next_run_delay()
+            if delay is None:
+                return
+            if delay <= 0:
+                break
+            await asyncio.sleep(min(delay, _TARIFF_TIMER_TICK_S))
+        while self._rediscovery_lock.locked():
+            await asyncio.sleep(_REDISCOVERY_WAIT_INTERVAL_S)
+        try:
+            async with self._tariff_lock:
+                await self._tariff_processor.process_tariffs()
+        except Exception:
+            logger.warning("Tariff processing at an interval boundary failed", exc_info=True)
+        self._arm_tariff_timer()
+
+    async def _cancel_tariff_timer(self) -> None:
+        """Cancel the tariff boundary timer and wait for it to stop."""
+        task = self._tariff_timer
+        self._tariff_timer = None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     async def _do_poll_derp_targeted(
         self, subscribed_resource: str, *, strict: bool = False
@@ -1650,11 +1723,10 @@ class CsipClient:
         if all_fsa - subscribed_fsa:
             active_poll_keys.discard("fsa")
 
-        # The tariff processor is poll-driven for active-interval transitions: it
-        # has no event timers (unlike DERControl), so an interval that simply
-        # becomes active by wall-clock produces no server change and no
-        # notification. Keep the tariff poll running even when subscribed -- the
-        # subscription only accelerates pickup of schedule *edits* between polls.
+        # Keep the tariff poll running even when subscribed. The boundary timer
+        # relays interval starts and ends from the schedule already fetched; the
+        # poll re-reads the schedule and re-arms that timer, and the
+        # subscription only speeds up pickup of schedule edits between polls.
         active_poll_keys.discard("tariff")
 
         # Suppress keys covered by subscriptions
@@ -1903,7 +1975,11 @@ class CsipClient:
             )
             return False
 
-        # Dedup: skip if we already processed this resource recently.
+        # Dedup: a notification for a resource processed in the last 5 s is not
+        # processed now. It may report a newer change than the one processed, so
+        # it schedules one follow-up re-poll for when the window ends; further
+        # suppressed notifications join that follow-up. The latest state is
+        # therefore always read, at most one window late.
         # Only STATUS_DEFAULT (data-change) notifications are deduped. Lifecycle
         # statuses (cancel/moved/definition-changed/deleted) are distinct one-shot
         # events, never duplicates of a preceding change -- deduping them swallows
@@ -1920,6 +1996,10 @@ class CsipClient:
         # cancel_derc) must each be
         # processed — deduping them means we only see snapshots from the earliest notifications
         # and miss the trailing state where the burst's later cancellations apply.
+        # Exception 3: TariffProfileList / TimeTariffIntervalList notifications skip dedup.
+        # A second price change within the window would otherwise wait for the next tariff
+        # poll (hourly by default). The re-poll relays a price only when the active
+        # interval changed, so repeating it sends no duplicate price.
         # Classify by the subscription's topology-derived resource_type (naming-
         # independent); the path heuristics inside _is_control/_is_structural are
         # only the fallback when this subscription isn't tracked.
@@ -1927,13 +2007,21 @@ class CsipClient:
         if (
             notification.status == STATUS_DEFAULT
             and not self._is_control(notification.subscribed_resource, resource_type)
+            and not self._is_tariff(notification.subscribed_resource, resource_type)
             and mgr.is_duplicate_notification(notification.subscribed_resource)
         ):
             if self._is_structural(notification.subscribed_resource, resource_type) and (
                 self._rediscovery_lock.locked()
             ):
+                # The running rediscovery loops once more and reads the change.
                 self._rediscovery_pending = True
-            logger.debug("Ignoring duplicate notification for %s", notification.subscribed_resource)
+            else:
+                self._schedule_notification_followup(
+                    notification.subscribed_resource, resource_type
+                )
+            logger.debug(
+                "Deferring duplicate notification for %s", notification.subscribed_resource
+            )
             return False
 
         # List/non-list filter: non-list subscriptions should not fire on list changes
@@ -2024,6 +2112,82 @@ class CsipClient:
         if self._rediscovery_error is not None:
             raise self._rediscovery_error
         raise RuntimeError("rediscovery failed")
+
+    def _schedule_notification_followup(
+        self,
+        subscribed_resource: str,
+        resource_type: str | None,
+        *,
+        after_dedup_window: bool = True,
+    ) -> None:
+        """Schedule one re-poll of ``subscribed_resource``.
+
+        With ``after_dedup_window`` the re-poll waits for the resource's dedup
+        window to end; without it, it runs as soon as no rediscovery is running.
+        Every re-poll waits for a running rediscovery to finish first.
+
+        Does nothing when a follow-up for the resource is already pending, when
+        the subscription manager says none is needed, or after shutdown started.
+        """
+        mgr = self._subscription_manager
+        if (
+            mgr is None
+            or self._shutdown_event.is_set()
+            or subscribed_resource in self._notification_followups
+        ):
+            return
+        delay: float | None = None
+        if after_dedup_window:
+            delay = mgr.followup_delay(subscribed_resource)
+            if delay is None:
+                return
+        self._notification_followups[subscribed_resource] = asyncio.create_task(
+            self._run_notification_followup(subscribed_resource, resource_type, delay),
+            name=f"notification-followup:{subscribed_resource}",
+        )
+
+    async def _run_notification_followup(
+        self, subscribed_resource: str, resource_type: str | None, delay: float | None
+    ) -> None:
+        """Route a data-change notification for the resource once it is due.
+
+        With a ``delay``, wait that many seconds; if a notification for the
+        resource was processed meanwhile, the window restarted, so wait for the
+        new window to end. Then wait for any running rediscovery to finish.
+        """
+        mgr = self._subscription_manager
+        try:
+            while delay is not None:
+                await asyncio.sleep(delay)
+                if mgr is None or not mgr.is_duplicate_notification(subscribed_resource):
+                    break
+                delay = mgr.followup_delay(subscribed_resource) or 0.0
+            while self._rediscovery_lock.locked():
+                await asyncio.sleep(_REDISCOVERY_WAIT_INTERVAL_S)
+        finally:
+            # Removed before routing, so a notification suppressed during the
+            # re-poll schedules a new follow-up rather than being dropped.
+            if self._notification_followups.get(subscribed_resource) is asyncio.current_task():
+                del self._notification_followups[subscribed_resource]
+        logger.info("Re-polling %s after a deferred notification", subscribed_resource)
+        try:
+            await self._route_default_notification(subscribed_resource, resource_type)
+        except Exception:
+            if mgr is not None:
+                mgr.forget_notification(subscribed_resource)
+            logger.warning(
+                "Follow-up re-poll for %s failed", subscribed_resource, exc_info=True
+            )
+
+    async def _cancel_notification_followups(self) -> None:
+        """Cancel the pending follow-up re-polls and wait for them to stop."""
+        tasks = list(self._notification_followups.values())
+        self._notification_followups.clear()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     def _is_structural(self, resource_path: str, resource_type: str | None = None) -> bool:
         """Classify a notification as structural (EndDevice/FSA -> rediscovery).
@@ -2122,13 +2286,17 @@ class CsipClient:
             )
             await self._rediscover_for_notification(raise_failures)
         else:
-            # Skip re-poll if rediscovery is in progress — the device mapping
-            # is in flux and process_controls would produce incorrect results.
-            # Rediscovery will pick up the changes when it re-fetches controls.
+            # Defer the re-poll while rediscovery is in progress: the device
+            # mapping is in flux and process_controls would produce incorrect
+            # results. The rediscovery may already have read this resource before
+            # the change, so re-poll once it finishes.
             if self._rediscovery_lock.locked():
                 logger.debug(
-                    "Skipping control re-poll for %s (rediscovery in progress)",
+                    "Deferring re-poll for %s until rediscovery finishes",
                     subscribed_resource,
+                )
+                self._schedule_notification_followup(
+                    subscribed_resource, resource_type, after_dedup_window=False
                 )
                 return
 
@@ -2494,6 +2662,8 @@ class CsipClient:
         # scheduler, and its recovery would reopen the HTTP session this method
         # is about to close.
         await self._stop_comm_loss_simulation_expiry()
+        await self._cancel_notification_followups()
+        await self._cancel_tariff_timer()
         if self._renewal_task and not self._renewal_task.done():
             self._renewal_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

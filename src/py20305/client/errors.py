@@ -54,6 +54,18 @@ class Sep2NoContentError(Sep2ProtocolError):
         super().__init__(message, 204)
 
 
+class Sep2ListNotFoundError(Sep2ProtocolError):
+    """Raised by ``get_list(..., absent_as_empty=False)`` when the first page returns 404.
+
+    The server does not serve the list at that href. That is not the same as a
+    list served with no items. Subclasses Sep2ProtocolError with
+    ``status_code == 404``.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, 404)
+
+
 class Sep2TlsError(Sep2Error):
     """Raised on TLS handshake or certificate errors."""
 

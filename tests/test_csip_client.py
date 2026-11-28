@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from types import SimpleNamespace as NS
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,7 +25,9 @@ from py20305.client.state import (
     TariffProfileState,
     TariffRateComponentState,
 )
+from py20305.events.tariff import TariffProcessor
 from py20305.subscription.manager import SubscriptionManager
+from tests.contact_time import set_last_contact
 
 
 @pytest.fixture
@@ -733,6 +737,7 @@ def client_with_sub_mgr() -> CsipClient:
     # Untracked subscription -> classification falls back to the path heuristic
     # (these tests exercise the path-based routing).
     mgr.resource_type_for.return_value = None
+    mgr.followup_delay.return_value = None
     client._subscription_manager = mgr
     return client
 
@@ -1033,8 +1038,8 @@ class TestPollSuppression:
         assert client._scheduler.suppressed_keys == set()
 
     def test_tariff_subscription_does_not_suppress_tariff_poll(self):
-        # The tariff processor is poll-driven for active-interval transitions
-        # (no event timers), so the poll must keep running even when subscribed.
+        # The poll re-reads the schedule that the boundary timer relays from,
+        # so it keeps running even when subscribed.
         client = self._client({"TimeTariffIntervalList"})
         client._update_poll_suppression()
         assert "tariff" not in client._scheduler.suppressed_keys
@@ -1156,10 +1161,10 @@ class TestHandleNotificationIntegration:
     async def test_deduped_structural_no_pending_when_not_rediscovering(
         self, client_with_sub_mgr: CsipClient
     ):
-        """A deduped structural notification does NOT set pending outside rediscovery.
+        """A deduped structural notification outside rediscovery schedules a follow-up.
 
         The pending flag is only meaningful while rediscovery holds the lock; outside
-        that window, a deduplicated notification is a true duplicate and should be dropped.
+        it, the suppressed notification is picked up by a follow-up re-poll instead.
         """
         client = client_with_sub_mgr
         client._subscription_manager.is_duplicate_notification.return_value = True
@@ -1169,6 +1174,7 @@ class TestHandleNotificationIntegration:
         assert not client._rediscovery_lock.locked()
         await client._handle_notification(notification)
         assert not client._rediscovery_pending  # type: ignore[attr-defined]
+        client._subscription_manager.followup_delay.assert_called_once_with("/edev")
 
     @pytest.mark.asyncio
     async def test_control_notification_burst_bypasses_dedup(self, client_with_sub_mgr: CsipClient):
@@ -1220,9 +1226,168 @@ class TestHandleNotificationIntegration:
 
         notification = _make_notification("/edev/1/fsa/1/derp/1/derc", status=0)
 
-        async with client._rediscovery_lock:
+        with patch.object(
+            client, "_do_poll_derp_targeted", new_callable=AsyncMock, return_value=True
+        ) as mock_fetch:
+            async with client._rediscovery_lock:
+                await client._handle_notification(notification)
+                assert not client._rediscovery_pending  # type: ignore[attr-defined]
+                await asyncio.sleep(0.3)
+                mock_fetch.assert_not_awaited()
+            await asyncio.sleep(0.3)
+        # The rediscovery may have read the control list before the change.
+        mock_fetch.assert_awaited_once()
+        assert client._notification_followups == {}
+
+    @pytest.mark.asyncio
+    async def test_tariff_notification_during_rediscovery_repolls_after_it(
+        self, client_with_sub_mgr: CsipClient
+    ):
+        """A price change notified during rediscovery is re-polled when rediscovery ends."""
+        client = client_with_sub_mgr
+        notification = _make_notification("/tp/1/rc/1/tti", status=0)
+
+        with patch.object(client, "_do_poll_tariff", new_callable=AsyncMock) as mock_poll:
+            async with client._rediscovery_lock:
+                await client._handle_notification(notification)
+                await asyncio.sleep(0.3)
+                mock_poll.assert_not_awaited()
+            await asyncio.sleep(0.3)
+        mock_poll.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("resource", ["/tp/1/rc/1/tti", "/tp"])
+    async def test_repeated_tariff_notification_repolls_tariffs(self, resource: str):
+        """Each tariff notification re-polls tariffs, even within the dedup window.
+
+        Two price changes posted a second apart must both reach the tariff
+        processor; a deduped second notification would leave the old price in
+        place until the next scheduled tariff poll.
+        """
+        client = CsipClient("https://example.com")
+        client._subscription_manager = SubscriptionManager(
+            client=MagicMock(),
+            notification_uri="https://localhost/notify",
+        )
+
+        with patch.object(client, "_do_poll_tariff", new_callable=AsyncMock) as mock_poll:
+            await client._handle_notification(_make_notification(resource, status=0))
+            await client._handle_notification(_make_notification(resource, status=0))
+
+        assert mock_poll.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("resource_type", ["TariffProfileList", "TimeTariffIntervalList"])
+    async def test_tracked_tariff_subscription_bypasses_dedup(
+        self, client_with_sub_mgr: CsipClient, resource_type: str
+    ):
+        """A tracked tariff subscription skips dedup whatever its URL looks like."""
+        client = client_with_sub_mgr
+        mgr = client._subscription_manager
+        mgr.resource_type_for.return_value = resource_type
+        mgr.is_duplicate_notification.return_value = True
+
+        with patch.object(client, "_do_poll_tariff", new_callable=AsyncMock) as mock_poll:
+            await client._handle_notification(_make_notification("/prices/a", status=0))
+
+        mock_poll.assert_awaited_once()
+        mgr.is_duplicate_notification.assert_not_called()
+
+
+def _client_with_short_dedup_window(window: float = 0.2) -> CsipClient:
+    """Return a client with a real SubscriptionManager whose dedup window is ``window`` s."""
+    client = CsipClient("https://example.com")
+    mgr = SubscriptionManager(client=MagicMock(), notification_uri="https://localhost/notify")
+    mgr._DEDUP_WINDOW = window
+    client._subscription_manager = mgr
+    return client
+
+
+class TestSuppressedNotificationFollowup:
+    """A notification suppressed by the dedup window is re-polled when the window ends."""
+
+    @pytest.mark.asyncio
+    async def test_change_within_window_is_repolled_when_window_ends(self):
+        """Two later changes inside the window cause one follow-up re-poll, not zero."""
+        client = _client_with_short_dedup_window()
+        notification = _make_notification("/edev/1/fsa/1/derp", status=0)
+
+        with patch.object(client, "_do_poll_derp", new_callable=AsyncMock) as mock_poll:
+            for _ in range(3):
+                await client._handle_notification(notification)
+            assert mock_poll.await_count == 1
+            await asyncio.sleep(0.5)
+            assert mock_poll.await_count == 2
+        assert client._notification_followups == {}
+
+    @pytest.mark.asyncio
+    async def test_notification_covered_by_targeted_fetch_gets_no_followup(self):
+        """The parent notification a targeted fetch already read is not re-polled."""
+        client = _client_with_short_dedup_window()
+        control = _make_notification("/edev/1/fsa/1/derp/3/derc", status=0)
+        program_list = _make_notification("/edev/1/fsa/1/derp", status=0)
+
+        with (
+            patch.object(
+                client, "_do_poll_derp_targeted", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(client, "_do_poll_derp", new_callable=AsyncMock) as mock_full,
+        ):
+            await client._handle_notification(control)
+            await client._handle_notification(program_list)
+            await asyncio.sleep(0.5)
+            mock_full.assert_not_awaited()
+
+            # A second parent notification in the window may report a newer change.
+            await client._handle_notification(control)
+            await client._handle_notification(program_list)
+            await client._handle_notification(program_list)
+            await asyncio.sleep(0.5)
+            mock_full.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_followup_lets_next_notification_through(self):
+        """A follow-up re-poll that fails clears the dedup entry for the resource."""
+        client = _client_with_short_dedup_window()
+        notification = _make_notification("/edev/1/fsa/1/derp", status=0)
+
+        with patch.object(
+            client, "_do_poll_derp", new_callable=AsyncMock, side_effect=[None, RuntimeError, None]
+        ) as mock_poll:
             await client._handle_notification(notification)
-            assert not client._rediscovery_pending  # type: ignore[attr-defined]
+            await client._handle_notification(notification)
+            await asyncio.sleep(0.5)
+            assert mock_poll.await_count == 2
+            await client._handle_notification(notification)
+            assert mock_poll.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_wall_clock_step_back_does_not_extend_window(self):
+        """A notification after the window is processed even if the wall clock stepped back."""
+        client = _client_with_short_dedup_window(window=0.05)
+        notification = _make_notification("/edev/1/fsa/1/derp", status=0)
+
+        with patch.object(client, "_do_poll_derp", new_callable=AsyncMock) as mock_poll:
+            await client._handle_notification(notification)
+            await asyncio.sleep(0.1)
+            stepped_back = time.time() - 3600
+            with patch("time.time", return_value=stepped_back):
+                await client._handle_notification(notification)
+            assert mock_poll.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_pending_followup(self):
+        client = _client_with_short_dedup_window(window=30.0)
+        notification = _make_notification("/edev/1/fsa/1/derp", status=0)
+
+        with patch.object(client, "_do_poll_derp", new_callable=AsyncMock) as mock_poll:
+            await client._handle_notification(notification)
+            await client._handle_notification(notification)
+            task = client._notification_followups["/edev/1/fsa/1/derp"]
+            await client.shutdown(subscription_cancel_timeout=None, unsubscribe=False)
+            assert task.cancelled()
+            assert client._notification_followups == {}
+            assert mock_poll.await_count == 1
 
 
 class TestComputeDesiredSubscriptions:
@@ -1544,7 +1709,7 @@ class TestCommsLossProbe:
     @pytest.mark.asyncio
     async def test_no_entry_before_first_contact(self):
         client = CsipClient("https://example.com", comms_loss_seconds=900)
-        client._http._last_contact_epoch = None
+        set_last_contact(client, None)
         with patch.object(client, "_enter_comms_loss", new_callable=AsyncMock) as enter:
             await client._comms_loss_probe()
         enter.assert_not_awaited()
@@ -1553,7 +1718,7 @@ class TestCommsLossProbe:
     @pytest.mark.asyncio
     async def test_enters_after_threshold(self):
         client = CsipClient("https://example.com", comms_loss_seconds=900)
-        client._http._last_contact_epoch = int(time.time()) - 1000
+        set_last_contact(client, 1000)
         with patch.object(
             client._event_processor, "enter_comms_loss", new_callable=AsyncMock
         ) as ep:
@@ -1562,9 +1727,30 @@ class TestCommsLossProbe:
         ep.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_wall_clock_step_forward_does_not_enter(self):
+        """A wall-clock jump past the threshold is not a silence; elapsed time is monotonic."""
+        client = CsipClient("https://example.com", comms_loss_seconds=900)
+        set_last_contact(client, 0)
+        with patch("time.time", return_value=time.time() + 3600):
+            await client._comms_loss_probe()
+        assert client._comms_loss.active is False
+
+    @pytest.mark.asyncio
+    async def test_wall_clock_step_back_does_not_hide_silence(self):
+        """A silence past the threshold enters comms-loss even if the wall clock stepped back."""
+        client = CsipClient("https://example.com", comms_loss_seconds=900)
+        set_last_contact(client, 1000)
+        with (
+            patch("time.time", return_value=time.time() - 3600),
+            patch.object(client._event_processor, "enter_comms_loss", new_callable=AsyncMock),
+        ):
+            await client._comms_loss_probe()
+        assert client._comms_loss.active is True
+
+    @pytest.mark.asyncio
     async def test_no_entry_below_threshold(self):
         client = CsipClient("https://example.com", comms_loss_seconds=900)
-        client._http._last_contact_epoch = int(time.time()) - 100
+        set_last_contact(client, 100)
         await client._comms_loss_probe()
         assert client._comms_loss.active is False
 
@@ -1584,7 +1770,7 @@ class TestCommsLossProbe:
         client._comms_loss.active = True
         client._comms_loss.resume_after_epoch = 12345
         client._own_lfdi = "ab" * 20
-        client._http._last_contact_epoch = int(time.time())
+        set_last_contact(client, 0)
         with (
             patch.object(
                 client, "_server_lists_end_device", new_callable=AsyncMock, return_value=False
@@ -1657,7 +1843,7 @@ class TestCommsLossProbe:
     async def test_probe_clears_boundary_once_passed(self):
         client = CsipClient("https://example.com", comms_loss_seconds=900)
         client._comms_loss.resume_after_epoch = int(time.time()) - 10  # already passed
-        client._http._last_contact_epoch = int(time.time())
+        set_last_contact(client, 0)
         await client._comms_loss_probe()
         assert client._comms_loss.resume_after_epoch is None
 
@@ -2037,6 +2223,26 @@ class TestServerTimebasePlumbing:
             await client._scheduler.cancel_all()
 
     @pytest.mark.asyncio
+    async def test_connectivity_probe_runs_after_heartbeat_despite_clock_step_back(self):
+        """The heartbeat probe fires once the window has elapsed, whatever the wall clock says."""
+        client = CsipClient("https://example.com", connection_heartbeat_seconds=60)
+        client._http._server_alive = True
+        set_last_contact(client, 120)
+        client._http.get = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        with patch("time.time", return_value=time.time() - 3600):
+            await client._connectivity_probe()
+        client._http.get.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_connectivity_probe_skipped_within_heartbeat(self):
+        client = CsipClient("https://example.com", connection_heartbeat_seconds=60)
+        client._http._server_alive = True
+        set_last_contact(client, 10)
+        client._http.get = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        await client._connectivity_probe()
+        client._http.get.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_connectivity_probe_observes(self):
         client = CsipClient("https://example.com", time_drift_warn_seconds=0)
         client._state.time_href = "/tm"
@@ -2058,7 +2264,7 @@ class TestServerTimebasePlumbing:
         )
         client._timebase.observe(int(time.time()) + 1000)
         client._comms_loss.resume_after_epoch = int(time.time()) + 500
-        client._http._last_contact_epoch = int(time.time())
+        set_last_contact(client, 0)
 
         await client._comms_loss_probe()
 
@@ -2123,3 +2329,162 @@ class TestPricingWiring:
         client._tariff_processor.process_tariffs = fake_process
         await client._do_poll_tariff()
         assert order == ["refresh", "process"]
+
+
+class _RelayRecorder:
+    def __init__(self) -> None:
+        self.notes: list[Any] = []
+
+    async def relay_schedule_notification(self, lfdis: list[str], notification: Any) -> None:
+        self.notes.append(notification)
+
+
+class _PriceHttp:
+    """Serve one price page; fail the first ``fail_times`` fetches."""
+
+    def __init__(self, fail_times: int = 0) -> None:
+        self._fail_times = fail_times
+
+    async def get_list(self, path: str, model_type: type) -> list[Any]:
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise RuntimeError("transient fetch failure")
+        cti = NS(price=1, start_value=0, consumption_block=NS(value=0))
+        return [NS(consumption_tariff_interval=[cti])]
+
+
+class _RunningClock:
+    """Server clock that starts at ``start`` and advances in real time."""
+
+    def __init__(self, start: float) -> None:
+        self._start = start
+        self._t0 = time.monotonic()
+
+    def now(self, fsa_href: str | None = None) -> float:
+        return self._start + (time.monotonic() - self._t0)
+
+
+def _price_interval(mrid: bytes, start: int, duration: int = 3600) -> NS:
+    return NS(
+        m_rid=NS(value=mrid),
+        interval=NS(start=NS(value=start), duration=duration),
+        creation_time=NS(value=0),
+        event_status=NS(current_status=0),
+        randomize_start=NS(value=0),
+        randomize_duration=NS(value=0),
+        tou_tier=NS(value=0),
+        consumption_tariff_interval_list_link=NS(href="/cti"),
+        response_required=b"\x00",
+        reply_to=None,
+    )
+
+
+def _price_profile(intervals: list[NS]) -> NS:
+    return NS(
+        profile=NS(currency=NS(value=840), price_power_of_ten_multiplier=NS(value=-2)),
+        href="/tp/1",
+        primacy=1,
+        rate_components=[NS(href="/tp/1/rc/1", time_tariff_intervals=intervals)],
+        discovered_from_fsa_href=None,
+    )
+
+
+def _pricing_client(clock: Any, *, fail_times: int = 0) -> tuple[CsipClient, _RelayRecorder]:
+    """Return a pricing client with one EndDevice, a fake price server and ``clock``."""
+    client = CsipClient("https://example.com", pricing_enabled=True)
+    relays = _RelayRecorder()
+    client._tariff_processor = TariffProcessor(
+        _PriceHttp(fail_times), client._state, relays, timebase=clock
+    )
+    client._state.end_devices = {"/edev/1": NS(lfdi=b"\x11")}
+    return client, relays
+
+
+class TestTariffTiming:
+    """The tariff path relays interval boundaries on time and serializes re-polls."""
+
+    @pytest.mark.asyncio
+    async def test_price_starting_between_polls_is_relayed_at_its_start(self, monkeypatch):
+        boundary = 1_000_000
+        client, relays = _pricing_client(_RunningClock(boundary - 0.3))
+        refreshes: list[int] = []
+        client._state.tariff_profiles = {
+            "/tp/1": _price_profile(
+                [_price_interval(b"\xaa", boundary - 3600), _price_interval(b"\xbb", boundary)]
+            )
+        }
+
+        async def fake_refresh(http, state):
+            refreshes.append(1)
+
+        monkeypatch.setattr("py20305.client.csip_client.refresh_tariffs", fake_refresh)
+        try:
+            await client._do_poll_tariff()
+            await asyncio.sleep(0.05)
+            assert [n.mrid for n in relays.notes] == ["aa"]
+            await asyncio.sleep(0.6)
+            assert [n.mrid for n in relays.notes] == ["aa", "bb"]
+            assert len(refreshes) == 1  # relayed by the boundary timer, not a poll
+        finally:
+            await client.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_failed_price_fetch_is_retried_before_next_poll(self, monkeypatch):
+        client, relays = _pricing_client(_RunningClock(100), fail_times=1)
+        client._state.tariff_profiles = {"/tp/1": _price_profile([_price_interval(b"\xaa", 0)])}
+        monkeypatch.setattr("py20305.client.csip_client.refresh_tariffs", AsyncMock())
+        monkeypatch.setattr("py20305.events.tariff._PRICE_RETRY_INITIAL_S", 0.1)
+        try:
+            await client._do_poll_tariff()
+            await asyncio.sleep(0.05)
+            assert relays.notes == []
+            await asyncio.sleep(0.4)
+            assert [n.mrid for n in relays.notes] == ["aa"]
+        finally:
+            await client.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_tariff_boundary_timer(self, monkeypatch):
+        client, _ = _pricing_client(_RunningClock(100))
+        client._state.tariff_profiles = {
+            "/tp/1": _price_profile([_price_interval(b"\xaa", 3600)])
+        }
+        monkeypatch.setattr("py20305.client.csip_client.refresh_tariffs", AsyncMock())
+        await client._do_poll_tariff()
+        timer = client._tariff_timer
+        assert timer is not None and not timer.done()
+
+        await client.shutdown()
+
+        assert timer.cancelled()
+        assert client._tariff_timer is None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_tariff_repolls_relay_newest_schedule_last(self, monkeypatch):
+        """An older re-poll whose read finishes late must not relay after a newer one.
+
+        The server replaced interval aa with bb. The first re-poll read the old
+        schedule but its response arrived after the second re-poll's.
+        """
+        client, relays = _pricing_client(_RunningClock(100))
+        old = {"/tp/1": _price_profile([_price_interval(b"\xaa", 0)])}
+        new = {"/tp/1": _price_profile([_price_interval(b"\xbb", 0)])}
+        reads = iter([(0.1, old), (0.0, new)])
+
+        async def slow_then_fast_refresh(http, state):
+            delay, profiles = next(reads)
+            await asyncio.sleep(delay)
+            state.tariff_profiles = profiles
+
+        monkeypatch.setattr(
+            "py20305.client.csip_client.refresh_tariffs", slow_then_fast_refresh
+        )
+        try:
+            first = asyncio.create_task(client._do_poll_tariff())
+            await asyncio.sleep(0)
+            await client._do_poll_tariff()
+            await first
+            await asyncio.sleep(0.05)
+            assert relays.notes[-1].mrid == "bb"
+        finally:
+            await client.shutdown()

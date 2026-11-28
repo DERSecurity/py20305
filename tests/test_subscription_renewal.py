@@ -38,6 +38,39 @@ class TestRenewAll:
         assert count == 0
 
 
+class TestRenewalLoop:
+    @pytest.mark.asyncio
+    async def test_subscription_created_after_loop_start_is_renewed_on_time(
+        self, mgr: SubscriptionManager
+    ):
+        """A subscription made after the loop started is renewed one interval after creation.
+
+        The loop used to wake once per interval and skip a subscription younger
+        than the interval, so that subscription waited almost two intervals.
+        """
+        interval = 0.48
+        renewed: list[float] = []
+        loop = asyncio.get_running_loop()
+
+        async def record_renewal(uri: str) -> bool:
+            renewed.append(loop.time())
+            return True
+
+        mgr.renew = record_renewal  # type: ignore[method-assign]
+        shutdown = asyncio.Event()
+        task = asyncio.create_task(mgr.start_renewal_task(shutdown, interval_seconds=interval))
+        try:
+            await asyncio.sleep(0.1)
+            assert await mgr.subscribe("/edev/1/sub", "/edev/1/derc", "DERControlList")
+            created = loop.time()
+            await asyncio.sleep(0.75)
+            assert renewed, "no renewal within one interval of creation"
+            assert renewed[0] - created < interval + 0.2
+        finally:
+            shutdown.set()
+            await task
+
+
 class TestRenewSingle:
     @pytest.mark.asyncio
     async def test_renew_updates_created_at(self, mgr: SubscriptionManager):
@@ -339,6 +372,28 @@ class TestDuplicateNotification:
     def test_different_resources_not_duplicate(self, mgr: SubscriptionManager):
         mgr.is_duplicate_notification("/derc/1")
         assert not mgr.is_duplicate_notification("/derc/2")
+
+    def test_followup_delay_none_without_a_processed_notification(
+        self, mgr: SubscriptionManager
+    ):
+        assert mgr.followup_delay("/derp") is None
+
+    def test_followup_delay_is_time_left_in_window(self, mgr: SubscriptionManager):
+        mgr.is_duplicate_notification("/derp")
+        delay = mgr.followup_delay("/derp")
+        assert delay is not None
+        assert 0 < delay <= mgr._DEDUP_WINDOW
+
+    def test_followup_delay_none_after_forget(self, mgr: SubscriptionManager):
+        mgr.is_duplicate_notification("/derp")
+        mgr.forget_notification("/derp")
+        assert mgr.followup_delay("/derp") is None
+
+    def test_followup_skipped_once_for_ancestry_entry(self, mgr: SubscriptionManager):
+        """The first notification a targeted fetch suppressed needs no follow-up; later ones do."""
+        mgr.record_notification_ancestry("/edev/1/derp/3/derc")
+        assert mgr.followup_delay("/edev/1/derp") is None
+        assert mgr.followup_delay("/edev/1/derp") is not None
 
 
 class TestNotificationAncestryDedup:

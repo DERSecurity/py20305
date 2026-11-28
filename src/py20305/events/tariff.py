@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from py20305.connectors.base import ScheduleNotification
@@ -47,6 +49,12 @@ logger = logging.getLogger(__name__)
 # EventStatus.currentStatus values that mean the interval is not in effect:
 # 2 = Cancelled, 3 = Cancelled with randomization, 4 = Superseded.
 _INACTIVE_STATUSES = frozenset({2, 3, 4})
+
+# Retry delay after a failed ConsumptionTariffInterval fetch. It doubles on each
+# consecutive failure up to the maximum, so a server that stays down is not
+# hammered, while a brief failure delays the price by only a few seconds.
+_PRICE_RETRY_INITIAL_S = 5.0
+_PRICE_RETRY_MAX_S = 60.0
 
 
 def _scalar(value: Any) -> Any:
@@ -101,18 +109,38 @@ def active_interval(
     return best
 
 
+def next_boundary(
+    intervals: Iterable[TimeTariffInterval1], now: int, cache: RandomizationCache
+) -> int | None:
+    """Return the earliest effective start or end after *now*, or ``None``.
+
+    Cancelled and superseded intervals are skipped because they never become
+    active. The active interval can change only at one of these instants.
+    """
+    best: int | None = None
+    for interval in intervals:
+        if _is_cancelled(interval):
+            continue
+        for edge in effective_window(interval, cache):
+            if edge > now and (best is None or edge < best):
+                best = edge
+    return best
+
+
 class TariffProcessor:
     """Emit price relays as the active TimeTariffInterval changes.
 
-    Parallel to the DERControl EventProcessor (D-EVENT): it runs the
-    active-interval selection per RateComponent and, on a transition, fetches the
-    interval's ConsumptionTariffInterval prices and relays a
-    ``ScheduleNotification(stream="price")``. Pricing is global, so the relay
+    Runs the active-interval selection per RateComponent and, on a transition,
+    fetches the interval's ConsumptionTariffInterval prices and relays a
+    ``ScheduleNotification(stream="price")``. When the active interval ends or
+    is cancelled with no interval after it, relays the ended interval with
+    transition ``completed`` or ``cancelled``. Pricing is global, so the relay
     broadcasts to every discovered EndDevice LFDI. Relay-only -- it does not
     actuate; the connector's ``notification_price`` hook decides what to do.
 
-    Driven by the poll loop (wired in a later increment). The live DERControl
-    processor is untouched.
+    The caller runs :meth:`process_tariffs` after each tariff poll and again
+    when :meth:`next_run_delay` expires, so a transition is relayed at the
+    interval boundary rather than at the next poll.
     """
 
     def __init__(
@@ -136,21 +164,48 @@ class TariffProcessor:
         #: rate-component href -> mRID of the last-relayed active interval (or
         #: None). Used to fire the relay only on a transition.
         self._active: dict[str, bytes | None] = {}
+        #: rate-component href -> the last relayed active-price notification.
+        #: Used to relay the interval's end when no interval follows it.
+        self._relayed: dict[str, ScheduleNotification] = {}
+        #: Scope (FSA href or None) -> the earliest interval boundary after the
+        #: last run, in that scope's server epoch seconds.
+        self._boundaries: dict[str | None, int] = {}
+        #: Monotonic time to retry a failed price fetch, or None.
+        self._retry_at: float | None = None
+        self._fetch_failures = 0
         self._relay_tasks: set[asyncio.Task[None]] = set()
         #: Dedups PriceResponse posts across polls (per mRID/code/LFDI), shared
         #: with the DER response path's tracker semantics.
         self._response_tracker = ResponseTracker()
 
+    def next_run_delay(self) -> float | None:
+        """Return seconds until :meth:`process_tariffs` should run again, or ``None``.
+
+        The next run is due at the earliest interval boundary the last run
+        found, or when a failed price fetch is due for a retry. The delay is
+        computed on the current clocks, so a timebase update moves it.
+        """
+        delays = [
+            target - self._timebase.now(scope) for scope, target in self._boundaries.items()
+        ]
+        if self._retry_at is not None:
+            delays.append(self._retry_at - time.monotonic())
+        return min(delays) if delays else None
+
     async def process_tariffs(self) -> None:
         """Ack discovered intervals and relay the active interval per RateComponent."""
+        # Reset before any await, so a run that raises leaves no past-due time.
+        self._boundaries = {}
+        self._retry_at = None
+        # Iterate a snapshot: a tariff refresh or rediscovery can replace or
+        # clear the dict while this run awaits.
+        profiles = list(self._state.tariff_profiles.values())
         # Bound the randomization cache to live events (mirrors the DERControl
         # processor). Prune against the MINIMUM clock across all tariff scopes so
         # an interval still active under a lagging per-FSA clock isn't evicted --
         # eviction would recompute its randomization offset mid-interval, breaking
         # session determinism.
-        scopes = {tp.discovered_from_fsa_href for tp in self._state.tariff_profiles.values()} or {
-            None
-        }
+        scopes = {tp.discovered_from_fsa_href for tp in profiles} or {None}
         self._randomization.prune(min(int(self._timebase.now(scope)) for scope in scopes))
         all_lfdis = [ed.lfdi.hex() for ed in self._state.end_devices.values()]
         if not all_lfdis:
@@ -159,13 +214,16 @@ class TariffProcessor:
             return
         live_mrids: set[bytes] = set()
         live_rc_hrefs: set[str] = set()
-        for tp_state in self._state.tariff_profiles.values():
+        fetch_failed = False
+        for tp_state in profiles:
             # IEEE 9.2.3: classify a tariff's events against its discovering FSA's
             # clock (per-FSA Time), falling back to the global timebase when the
             # profile has no FSA attribution -- matching the DERControl processor.
-            now = int(self._timebase.now(tp_state.discovered_from_fsa_href))
+            scope = tp_state.discovered_from_fsa_href
+            now = int(self._timebase.now(scope))
             for rc_state in tp_state.rate_components:
                 live_rc_hrefs.add(rc_state.href)
+                self._note_boundary(scope, rc_state.time_tariff_intervals, now)
                 for interval in rc_state.time_tariff_intervals:
                     live_mrids.add(interval.m_rid.value)
                     # Ack-on-receipt (IEEE 2030.5 responseRequired bit 0): a
@@ -174,7 +232,8 @@ class TariffProcessor:
                     # becomes active -- mirrors the DERControl discovery ack.
                     await self._ack_received(interval, now)
                 active = active_interval(rc_state.time_tariff_intervals, now, self._randomization)
-                await self._relay_if_changed(tp_state, rc_state, active, all_lfdis)
+                if not await self._relay_if_changed(tp_state, rc_state, active, all_lfdis, now):
+                    fetch_failed = True
         # Dedup is scoped to live intervals: forget acks for intervals the server
         # no longer serves (so a recreated mRID re-acks), while a still-present
         # long interval is never re-acked (unlike an age-based prune).
@@ -182,6 +241,26 @@ class TariffProcessor:
         # Likewise bound the transition map to live rate components so a schedule
         # whose RateComponents changed (server edits, re-walk) doesn't leak hrefs.
         self._active = {href: mrid for href, mrid in self._active.items() if href in live_rc_hrefs}
+        self._relayed = {
+            href: note for href, note in self._relayed.items() if href in live_rc_hrefs
+        }
+        if fetch_failed:
+            self._fetch_failures += 1
+            backoff = _PRICE_RETRY_INITIAL_S * 2 ** min(self._fetch_failures - 1, 8)
+            self._retry_at = time.monotonic() + min(backoff, _PRICE_RETRY_MAX_S)
+        else:
+            self._fetch_failures = 0
+
+    def _note_boundary(
+        self, scope: str | None, intervals: Iterable[TimeTariffInterval1], now: int
+    ) -> None:
+        """Keep the earliest interval boundary after *now* for *scope*."""
+        edge = next_boundary(intervals, now, self._randomization)
+        if edge is None:
+            return
+        known = self._boundaries.get(scope)
+        if known is None or edge < known:
+            self._boundaries[scope] = edge
 
     async def _relay_if_changed(
         self,
@@ -189,23 +268,61 @@ class TariffProcessor:
         rc_state: TariffRateComponentState,
         interval: TimeTariffInterval1 | None,
         all_lfdis: list[str],
-    ) -> None:
+        now: int,
+    ) -> bool:
+        """Relay a change of the active interval. Return False if the price fetch failed."""
         prev = self._active.get(rc_state.href)
         current = interval.m_rid.value if interval is not None else None
         if current == prev:
-            return
+            return True
         if interval is None:
-            # Active window ended with no successor (a schedule gap) -- nothing to
-            # price. Record the transition so the next active interval relays.
+            # The active interval ended or was cancelled with no interval after
+            # it. Relay the end, and record the transition so the next active
+            # interval relays.
             self._active[rc_state.href] = None
-            return
+            ended = self._relayed.pop(rc_state.href, None)
+            if ended is not None:
+                self._emit(self._ended_notification(ended, rc_state, all_lfdis, now))
+            return True
         prices = await self._fetch_prices(interval)
         if prices is None:
             # Transient price fetch failure: do NOT record the transition, so the
-            # next poll retries rather than leaving a permanent price-less relay.
-            return
+            # retry relays it rather than leaving a permanent price-less relay.
+            return False
+        notification = self._build_notification(tp_state, rc_state, interval, prices, all_lfdis)
         self._active[rc_state.href] = current
-        self._emit(self._build_notification(tp_state, rc_state, interval, prices, all_lfdis))
+        self._relayed[rc_state.href] = notification
+        self._emit(notification)
+        return True
+
+    @staticmethod
+    def _ended_notification(
+        ended: ScheduleNotification,
+        rc_state: TariffRateComponentState,
+        all_lfdis: list[str],
+        now: int,
+    ) -> ScheduleNotification:
+        """Return the notification that the relayed interval *ended* is no longer active.
+
+        The transition is ``completed`` when the interval's effective end has
+        passed, else ``cancelled`` (the server cancelled or removed it early).
+        ``current_status`` is the interval's latest EventStatus when the server
+        still lists it.
+        """
+        transition = "completed" if ended.end is not None and now >= ended.end else "cancelled"
+        current_status = ended.current_status
+        for interval in rc_state.time_tariff_intervals:
+            if interval.m_rid.value.hex() == ended.mrid:
+                status = interval.event_status
+                current_status = status.current_status if status is not None else None
+                break
+        return replace(
+            ended,
+            transition=transition,
+            status=transition,
+            current_status=current_status,
+            affected_lfdis=list(all_lfdis),
+        )
 
     async def _ack_received(self, interval: TimeTariffInterval1, now: int) -> None:
         """Post a message-received PriceResponse per EndDevice for a discovered interval.
@@ -231,7 +348,7 @@ class TariffProcessor:
 
     async def _fetch_prices(self, interval: TimeTariffInterval1) -> list[dict[str, Any]] | None:
         """Return the priced consumption blocks, ``[]`` if the interval has none,
-        or ``None`` if the fetch failed (so the caller can retry next poll)."""
+        or ``None`` if the fetch failed (so the caller can retry)."""
         link = interval.consumption_tariff_interval_list_link
         cti_href = link.href if link is not None else None
         if not cti_href:

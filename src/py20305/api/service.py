@@ -186,10 +186,9 @@ class ClientAPIService:
             # PUT/POSTs are in flight. Prefer `seconds_since_last_contact` over
             # `server_alive` for staleness checks.
             "last_contact_epoch": last_contact,
-            # Clamped at 0 so a backwards clock step (NTP) can't yield a negative
-            # age that breaks a consumer's staleness comparison.
+            # Monotonic, so a wall-clock step (NTP) cannot change the age.
             "seconds_since_last_contact": (
-                max(0, int(time.time()) - last_contact) if last_contact is not None else None
+                int(http_client.seconds_since_contact() or 0) if last_contact is not None else None
             ),
             "consecutive_failures": http_client.consecutive_failures,
             # Application-level server timebase: offset/quality/age per

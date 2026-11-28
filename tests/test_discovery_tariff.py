@@ -10,6 +10,7 @@ import pytest
 from py20305.client.discovery import (
     _discover_tariff_profile,
     _discover_tariffs_for_fsa,
+    refresh_tariffs,
 )
 from py20305.client.errors import Sep2ProtocolError
 from py20305.client.state import DiscoveredState
@@ -243,3 +244,51 @@ async def test_csipaus_13_intervals_are_discovered():
     intervals = state.tariff_profiles["/tp/1"].rate_components[0].time_tariff_intervals
     assert [tti.href for tti in intervals] == ["/tp/1/rc/1/tti/1"]
     assert intervals[0].rate_component_link.href == "/tp/1/rc/1"
+
+
+def _pricing_state(fsa_hrefs: list[str]) -> DiscoveredState:
+    state = DiscoveredState()
+    state.pricing_enabled = True
+    state.end_devices = {"/edev/1": NS(fsa_list=[_fsa(h, "/tp") for h in fsa_hrefs])}
+    state.tariff_profiles = {"/tp/old": NS(href="/tp/old")}
+    return state
+
+
+class _ObservingClient(_MockClient):
+    """Record the profiles in ``state.tariff_profiles`` at each GET."""
+
+    def __init__(self, responses: dict[str, Any], state: DiscoveredState) -> None:
+        super().__init__(responses)
+        self._state = state
+        self.seen: list[set[str]] = []
+
+    async def get_list(self, path: str, model_type: type) -> list[Any]:
+        self.seen.append(set(self._state.tariff_profiles))
+        return await super().get_list(path, model_type)
+
+
+@pytest.mark.asyncio
+async def test_refresh_tariffs_keeps_previous_profiles_until_walk_completes():
+    state = _pricing_state(["/fsa/1"])
+    tp = _tariff_profile("/tp/1", "/tp/1/rc")
+    client = _ObservingClient(
+        {
+            "/tp": NS(poll_rate=None, tariff_profile=[tp]),
+            "/tp/1/rc": NS(rate_component=[]),
+        },
+        state,
+    )
+    await refresh_tariffs(client, state)
+
+    # A reader during the walk sees the previous tree, never an empty or partial one.
+    assert client.seen == [{"/tp/old"}, {"/tp/old"}]
+    assert set(state.tariff_profiles) == {"/tp/1"}
+
+
+@pytest.mark.asyncio
+async def test_refresh_tariffs_that_fails_keeps_previous_profiles():
+    state = _pricing_state(["/fsa/1"])
+    client = _MockClient({"/tp": Sep2ProtocolError("server error", status_code=500)})
+    with pytest.raises(Sep2ProtocolError):
+        await refresh_tariffs(client, state)
+    assert set(state.tariff_profiles) == {"/tp/old"}
