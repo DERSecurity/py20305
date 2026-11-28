@@ -5882,6 +5882,31 @@ class TestDeviceWithdrawnDuringAnEvent:
         assert _codes_by_lfdi(http) == {_DEV1_LFDI: {ResponseCode.COMPLETED}}
 
     @pytest.mark.asyncio
+    async def test_a_withdrawn_device_whose_own_window_ends_first_is_not_told_completed(self):
+        http = _http_ok()
+        dispatcher = AsyncMock()
+        proc, state = self._running_event(dispatcher=dispatcher, http=http)
+        await proc.process_controls("/derp/1")
+        record = proc._store.get(self.MRID)
+        assert record is not None
+        now = int(time.time())
+        record.set_window("/edev/1", now - 10, now + 3600)
+        record.set_window("/edev/2", now - 10, now + 1800)
+        state.device_mapping.remove_pair("/derp/1", "/edev/2")
+        await proc.release_withdrawn_devices([("/derp/1", "/edev/2")])
+        http.post.reset_mock()
+
+        await proc._on_completion(record, ["/edev/2"])
+
+        assert record.state == EventState.ACTIVE
+        assert http.post.await_count == 0
+
+        await proc._on_completion(record, ["/edev/1"])
+        await proc.shutdown()
+
+        assert _codes_by_lfdi(http) == {_DEV1_LFDI: {ResponseCode.COMPLETED}}
+
+    @pytest.mark.asyncio
     async def test_a_device_mapped_to_the_program_again_is_not_released(self):
         dispatcher = AsyncMock()
         proc, _state = self._running_event(dispatcher=dispatcher)

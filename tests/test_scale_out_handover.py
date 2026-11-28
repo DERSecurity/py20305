@@ -659,6 +659,49 @@ class TestHandoverEdgeCases:
         finally:
             await b.shutdown()
 
+    async def test_a_withdrawn_device_is_handed_over_with_its_withdrawal(self):
+        store = MemoryEventStateStore()
+        lfdi_1, lfdi_2 = b"" * 20, b"" * 20
+        derc = _derc(1, _now() - 5)
+        state = _state("/edev/1", lfdi_1, [derc])
+        _add_device(state, "/edev/2", lfdi_2)
+        a = _processor(state, store)
+        try:
+            await a.process_controls("/derp/1")
+            state.device_mapping.remove_pair("/derp/1", "/edev/2")
+            await a.release_withdrawn_devices([("/derp/1", "/edev/2")])
+
+            await a.release_devices(["/edev/2"])
+
+            record = a._store.get(derc.m_rid.value)
+            assert record is not None
+            assert record.withdrawn_devices == set()
+            saved = store.load_device("/edev/2")
+            assert saved is not None
+            assert saved["events"][0]["withdrawn"] is True
+        finally:
+            await a.shutdown()
+
+    async def test_a_withdrawn_device_taken_over_does_not_hold_the_events_modes(self):
+        store = MemoryEventStateStore()
+        lfdi_1, lfdi_2 = b"" * 20, b"" * 20
+        derc = _derc(1, _now() - 5)
+        entry = _entry(derc, "active", applied=True, started=True, withdrawn=True)
+        store.save_device("/edev/2", _snapshot(lfdi_2, [entry]))
+        state = _state("/edev/1", lfdi_1, [derc])
+        _add_device(state, "/edev/2", lfdi_2)
+        state.device_mapping.remove_pair("/derp/1", "/edev/2")
+        b = _processor(state, store)
+        try:
+            b.load_devices(["/edev/2"])
+
+            record = b._store.get(derc.m_rid.value)
+            assert record is not None
+            assert record.withdrawn_devices == {"/edev/2"}
+            assert "/edev/2" not in b._mode_tracker.devices_of(derc.m_rid.value)
+        finally:
+            await b.shutdown()
+
     async def test_a_restored_event_past_its_end_is_not_applied(self):
         store = MemoryEventStateStore()
         lfdi = b"\x01" * 20

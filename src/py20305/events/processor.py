@@ -1045,7 +1045,9 @@ class EventProcessor:
             record.ended_devices |= group
             if not set(record.device_windows) <= record.ended_devices:
                 logger.info("Event %s: ended on %d device(s)", mrid_short, len(group))
-                audience = (record.applied_devices - record.superseded_devices) & group
+                audience = (
+                    record.applied_devices - record.superseded_devices - record.withdrawn_devices
+                ) & group
                 if audience:
                     await self._post_response_for_devices(
                         record.derc, ResponseCode.COMPLETED, audience
@@ -1962,6 +1964,7 @@ class EventProcessor:
                     "applied": dev_href in record.applied_devices,
                     "rejected": dev_href in record.rejected_devices,
                     "superseded": dev_href in record.superseded_devices,
+                    "withdrawn": dev_href in record.withdrawn_devices,
                     "superseded_modes": sorted(modes) if modes is not None else None,
                     "opted_out": record.opted_out,
                     "fallback_at": (
@@ -2213,13 +2216,18 @@ class EventProcessor:
             record.rejected_devices.add(dev_href)
         if entry["superseded"]:
             record.superseded_devices.add(dev_href)
+        withdrawn = bool(entry.get("withdrawn"))
+        if withdrawn:
+            record.withdrawn_devices.add(dev_href)
         if entry.get("superseded_modes") is not None:
             held = record.superseded_modes.get(dev_href, frozenset())
             record.superseded_modes[dev_href] = held | frozenset(entry["superseded_modes"])
         running = record.state == EventState.ACTIVE and not record.opted_out
-        if running and entry["applied"] and not entry["opted_out"]:
+        if running and entry["applied"] and not entry["opted_out"] and not withdrawn:
             # Registered even when superseded on the device, as dispatch leaves
-            # it: the tracker subtracts the modes other events cover.
+            # it: the tracker subtracts the modes other events cover. A device
+            # withdrawn from the program had the event's modes released, so
+            # they are not registered again.
             modes = get_active_mode_names(record.derc.dercontrol_base)
             self._mode_tracker.register(dev_href, mrid, modes)
 
@@ -2391,6 +2399,7 @@ class EventProcessor:
             record.applied_devices -= released
             record.rejected_devices -= released
             record.superseded_devices -= released
+            record.withdrawn_devices -= released
             record.started_devices -= released
             record.ended_devices -= released
             for dev_href in released:
