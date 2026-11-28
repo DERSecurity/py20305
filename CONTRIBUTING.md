@@ -87,9 +87,11 @@ Name it `<pull-request>.<category>.md` and write the entry body into it;
 requests editing the same `[Unreleased]` heading conflict on every pair.
 
 Releases follow the same road: a pull request folds the fragments in with
-`python scripts/build_changelog.py --release X.Y.Z`, bumps the version, and
-deletes the fragments it consumed in that same commit. Once it merges, pushing
-the `vX.Y.Z` tag builds, checks and publishes the release.
+`python scripts/build_changelog.py --release X.Y.Z`, bumps the version, runs
+`uv lock` (the lock records the package's own version, so CI's `--locked`
+install fails until it is refreshed), and deletes the fragments it consumed in
+that same commit. Once it merges, pushing the `vX.Y.Z` tag builds, checks and
+publishes the release.
 
 ## Conventions
 
