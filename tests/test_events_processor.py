@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from py20305.client.errors import Sep2ProtocolError
 from py20305.client.state import (
     DerProgramState,
     DiscoveredState,
@@ -32,6 +33,8 @@ from py20305.models.sep.sep import (
     DefaultDercontrol,
     Dercontrol1,
     DercontrolBase,
+    DercontrolList,
+    DercontrolListLink,
     Derprogram1,
     EndDevice1,
     EventStatus,
@@ -389,6 +392,108 @@ class TestDisappearedEventCancellation:
         await proc.process_controls("/derp/1")
 
         assert proc._store.get(derc.m_rid.value).state == EventState.CANCELLED
+        await proc.shutdown()
+
+    @staticmethod
+    def _control(mrid_byte: int, now: int) -> Dercontrol1:
+        """Return a scheduled control; controls with different bytes do not overlap."""
+        return _make_derc(mrid_byte, start=now + 600 + mrid_byte * 4000, duration=3600)
+
+    @classmethod
+    async def _three_scheduled_events(
+        cls, shutdown: asyncio.Event, reread: list[Dercontrol1] | None
+    ) -> tuple[EventProcessor, DiscoveredState, list[Dercontrol1], AsyncMock]:
+        """Store three scheduled events, then serve a two-page list read missing the middle one.
+
+        ``reread`` is what an immediate second read of the list returns; None
+        makes that read fail.
+        """
+        now = int(time.time())
+        controls = [cls._control(b, now) for b in (0x01, 0x02, 0x03)]
+        state = _setup_state(der_controls=list(controls))
+        state.der_programs["/derp/1"].program.dercontrol_list_link = DercontrolListLink(
+            href="/derp/1/derc"
+        )
+        http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
+        http.post = AsyncMock(return_value=None)
+        if reread is None:
+            http.get_list = AsyncMock(side_effect=Sep2ProtocolError("boom", 500))
+        else:
+            page = DercontrolList(**{"all": len(reread), "results": len(reread)})
+            page.dercontrol = list(reread)
+            http.get_list = AsyncMock(return_value=[page])
+        proc = EventProcessor(http, state, NullDispatcher(), shutdown)
+        await proc.process_controls("/derp/1")
+        assert all(proc._store.get(c.m_rid.value).state == EventState.SCHEDULED for c in controls)
+
+        # The server dropped an item between the two page reads, so the
+        # second page started one item late and the middle control was missed.
+        derp_state = state.der_programs["/derp/1"]
+        derp_state.der_controls = [controls[0], controls[2]]
+        derp_state.der_controls_complete = True
+        derp_state.der_controls_pages = 2
+        return proc, state, controls, http.get_list
+
+    @pytest.mark.asyncio
+    async def test_a_control_skipped_by_a_shifted_page_is_not_cancelled(
+        self, shutdown: asyncio.Event
+    ):
+        """A control missing from a multi-page read but present on an immediate
+        second read is still served, so it is not cancelled."""
+        proc, _, controls, get_list = await self._three_scheduled_events(shutdown, reread=None)
+        get_list.side_effect = None
+        page = DercontrolList(**{"all": 3, "results": 3})
+        page.dercontrol = list(controls)
+        get_list.return_value = [page]
+
+        await proc.process_controls("/derp/1")
+
+        get_list.assert_awaited_once()
+        assert get_list.await_args.args[0] == "/derp/1/derc"
+        assert proc._store.get(controls[1].m_rid.value).state == EventState.SCHEDULED
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_control_missing_from_both_reads_of_a_paged_list_is_cancelled(
+        self, shutdown: asyncio.Event
+    ):
+        """The second read does not delay a real removal: a control absent from
+        both reads is cancelled in the same pass."""
+        now = int(time.time())
+        others = [self._control(b, now) for b in (0x01, 0x03)]
+        proc, _, controls, get_list = await self._three_scheduled_events(shutdown, reread=others)
+
+        await proc.process_controls("/derp/1")
+
+        get_list.assert_awaited_once()
+        assert proc._store.get(controls[1].m_rid.value).state == EventState.CANCELLED
+        assert proc._store.get(controls[0].m_rid.value).state == EventState.SCHEDULED
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_second_read_of_a_paged_list_cancels_nothing(
+        self, shutdown: asyncio.Event
+    ):
+        proc, _, controls, get_list = await self._three_scheduled_events(shutdown, reread=None)
+
+        await proc.process_controls("/derp/1")
+
+        get_list.assert_awaited_once()
+        assert proc._store.get(controls[1].m_rid.value).state == EventState.SCHEDULED
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_a_single_page_list_is_not_read_again_before_a_cancellation(
+        self, shutdown: asyncio.Event
+    ):
+        proc, state, controls, get_list = await self._three_scheduled_events(shutdown, reread=None)
+        state.der_programs["/derp/1"].der_controls_pages = 1
+
+        await proc.process_controls("/derp/1")
+
+        get_list.assert_not_awaited()
+        assert proc._store.get(controls[1].m_rid.value).state == EventState.CANCELLED
         await proc.shutdown()
 
     @pytest.mark.asyncio
@@ -1504,6 +1609,42 @@ class TestInitialDderc:
         await proc.process_controls("/derp/1")
         assert dispatcher.apply_default_control.await_count == 1
 
+        await proc.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_dderc_modified_under_the_same_mrid_is_written_again(
+        self, shutdown: asyncio.Event
+    ):
+        """A server that changes a default's value keeps its mRID; the new value still
+        reaches the device."""
+        mrid = MRidtype(value=b"\x20" * 16)
+        dderc_v1 = DefaultDercontrol(
+            m_rid=mrid,
+            dercontrol_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=5000)),
+        )
+        state = _setup_state(der_controls=[], dderc=dderc_v1)
+        http = AsyncMock()
+        http.profile = ServerProfile(base=Edition.E2023)
+        http.post = AsyncMock(return_value=None)
+        dispatcher = AsyncMock()
+        proc = EventProcessor(http, state, dispatcher, shutdown)
+
+        await proc.process_controls("/derp/1")
+        assert dispatcher.apply_default_control.await_count == 1
+
+        dderc_v2 = DefaultDercontrol(
+            m_rid=mrid,
+            dercontrol_base=DercontrolBase(op_mod_max_lim_w=PerCentControlType(value=3000)),
+        )
+        state.der_programs["/derp/1"].default_dercontrol = dderc_v2
+
+        await proc.process_controls("/derp/1")
+        assert dispatcher.apply_default_control.await_count == 2
+        assert dispatcher.apply_default_control.await_args[0][1] is dderc_v2
+
+        # The same content seen again is not written a third time.
+        await proc.process_controls("/derp/1")
+        assert dispatcher.apply_default_control.await_count == 2
         await proc.shutdown()
 
     @pytest.mark.asyncio

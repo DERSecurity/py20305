@@ -101,6 +101,14 @@ class DerProgramState:
     #: rule p) turns removal into cancellation, so the event processor
     #: reconciles against this list only when the flag says it is trustworthy.
     der_controls_complete: bool = False
+    #: Number of pages ``der_controls`` was read in. A server that removes or
+    #: adds a control between two page reads shifts the later pages, so a list
+    #: read in more than one page can miss a control it still serves.
+    der_controls_pages: int = 0
+    #: Read ticket of the read that last set each child resource, by resource
+    #: name. Discovery drops a read that finishes after a newer read of the same
+    #: resource has already set it, so older data cannot overwrite newer data.
+    read_tickets: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass

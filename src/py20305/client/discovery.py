@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 import re
 from collections.abc import Iterable
@@ -12,7 +13,7 @@ from typing import Any
 from lxml import etree
 
 from py20305.client.aggregation import aggregation_poll_rate, read_aggregation
-from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
+from py20305.client.errors import Sep2ListNotFoundError, Sep2PayloadError, Sep2ProtocolError
 from py20305.client.http import Sep2Client
 from py20305.client.poll_rate import DEFAULT_POLL_RATE, normalize_poll_rate
 from py20305.client.scope import DeviceFilter
@@ -81,6 +82,68 @@ def _declared_csipaus_namespace(raw_dcap: bytes) -> str:
     if "csipaus" in prefixed:
         return prefixed["csipaus"]
     return next(iter(prefixed.values()), default or NS_CSIPAUS)
+
+
+#: Source of read tickets, numbered in the order reads start.
+_read_tickets = itertools.count(1)
+
+
+def _start_read() -> int:
+    """Return a ticket for a read that is about to start."""
+    return next(_read_tickets)
+
+
+def _read_lands(derp_state: DerProgramState, resource: str, ticket: int) -> bool:
+    """Return True when the read with ``ticket`` may set ``resource`` on the program.
+
+    A scheduled poll and a notification's targeted fetch can read the same
+    resource at once, and the older read can finish last. It is dropped when a
+    read that started later has already set the resource, so stale data cannot
+    replace newer data. A DERControl list put back to an older version would
+    have IEEE 2030.5-2023 §10.2.2.3 rule p) cancel the newer controls for good.
+    """
+    if derp_state.read_tickets.get(resource, 0) > ticket:
+        logger.debug(
+            "Dropping a %s read for program %s: a newer read finished first",
+            resource,
+            derp_state.href,
+        )
+        return False
+    derp_state.read_tickets[resource] = ticket
+    return True
+
+
+def _store_der_controls(derp_state: DerProgramState, derc_pages: list[Any], ticket: int) -> None:
+    """Replace the program's DERControls with a complete list read.
+
+    Skipped when a newer read of the list has already set it.
+    """
+    if not _read_lands(derp_state, "der_controls", ticket):
+        return
+    # Assigned as a new list, not cleared and refilled, so a pass that is
+    # iterating over the previous list is not disturbed.
+    derp_state.der_controls = [derc for page in derc_pages for derc in page.dercontrol]
+    derp_state.der_controls_complete = True
+    derp_state.der_controls_pages = len(derc_pages)
+
+
+async def read_der_control_mrids(
+    client: Sep2Client, derp_state: DerProgramState
+) -> set[bytes] | None:
+    """Read the program's DERControl list again and return the mRIDs it serves.
+
+    Returns None when the list cannot be read completely. Does not change the
+    program state.
+    """
+    derc_list_href = _extract_href(derp_state.program.dercontrol_list_link)
+    if not derc_list_href:
+        return None
+    try:
+        derc_pages = await client.get_list(derc_list_href, DercontrolList, absent_as_empty=False)
+    except Exception as exc:
+        logger.warning("Could not read the DERControl list at %s again: %s", derc_list_href, exc)
+        return None
+    return {derc.m_rid.value for page in derc_pages for derc in page.dercontrol}
 
 
 def _paging_fault(exc: Sep2ProtocolError) -> bool:
@@ -309,12 +372,18 @@ async def _discover_program(client: Sep2Client, derp: Any, derp_href: str) -> De
     derc_list_href = _extract_href(derp.dercontrol_list_link)
     if derc_list_href:
         try:
-            derc_pages = await client.get_list(derc_list_href, DercontrolList)
+            ticket = _start_read()
+            derc_pages = await client.get_list(
+                derc_list_href, DercontrolList, absent_as_empty=False
+            )
             for derc_page in derc_pages:
-                derp_state.der_controls.extend(derc_page.dercontrol)
                 if hasattr(derc_page, "subscribable") and derc_page.subscribable:
                     derp_state.derc_list_subscribable = True
-            derp_state.der_controls_complete = True
+            _store_der_controls(derp_state, derc_pages, ticket)
+        except Sep2ListNotFoundError:
+            # Not served is not the same as served empty: the list stays
+            # incomplete, so no event is cancelled for being absent from it.
+            logger.debug("DERControl list at %s not found (HTTP 404)", derc_list_href)
         except Sep2PayloadError as exc:
             logger.warning("Skipping DERControl list for program %s: %s", derp_href, exc)
         except Exception:
@@ -859,9 +928,11 @@ async def _refresh_curves_for_program(client: Sep2Client, derp_state: DerProgram
     cached curves are available.
     """
     curve_list_href = _extract_href(derp_state.program.dercurve_list_link)
+    ticket = _start_read()
     if not curve_list_href:
         # Server removed the curve list link or never had one; clear cache.
-        derp_state.der_curves.clear()
+        if _read_lands(derp_state, "der_curves", ticket):
+            derp_state.der_curves = []
         return
     try:
         curve_pages = await client.get_list(curve_list_href, DercurveList)
@@ -886,9 +957,8 @@ async def _refresh_curves_for_program(client: Sep2Client, derp_state: DerProgram
         )
         return
 
-    derp_state.der_curves.clear()
-    for curve_page in curve_pages:
-        derp_state.der_curves.extend(curve_page.dercurve)
+    if _read_lands(derp_state, "der_curves", ticket):
+        derp_state.der_curves = [curve for page in curve_pages for curve in page.dercurve]
 
 
 async def refresh_der_controls(client: Sep2Client, state: DiscoveredState) -> None:
@@ -904,16 +974,19 @@ async def refresh_der_controls(client: Sep2Client, state: DiscoveredState) -> No
     for _, derp_state in list(state.der_programs.items()):
         # Refresh DefaultDERControl
         dderc_href = _extract_href(derp_state.program.default_dercontrol_link)
+        ticket = _start_read()
         if dderc_href:
             try:
                 dderc = await client.get(dderc_href, DefaultDercontrol)
-                derp_state.default_dercontrol = dderc
+                if _read_lands(derp_state, "default_dercontrol", ticket):
+                    derp_state.default_dercontrol = dderc
             except Sep2ProtocolError as exc:
                 if exc.status_code in (404, 204):
                     logger.debug(
                         "DDERC at %s %s on refresh", dderc_href, _absent_reason(exc.status_code)
                     )
-                    derp_state.default_dercontrol = None
+                    if _read_lands(derp_state, "default_dercontrol", ticket):
+                        derp_state.default_dercontrol = None
                 else:
                     raise
             except Sep2PayloadError as exc:
@@ -924,7 +997,7 @@ async def refresh_der_controls(client: Sep2Client, state: DiscoveredState) -> No
                     dderc_href,
                     exc_info=True,
                 )
-        else:
+        elif _read_lands(derp_state, "default_dercontrol", ticket):
             # Server removed the DefaultDERControl link — clear cached value
             derp_state.default_dercontrol = None
 
@@ -938,8 +1011,17 @@ async def refresh_der_controls(client: Sep2Client, state: DiscoveredState) -> No
         if not derc_list_href:
             continue
 
+        ticket = _start_read()
         try:
-            derc_pages = await client.get_list(derc_list_href, DercontrolList)
+            derc_pages = await client.get_list(
+                derc_list_href, DercontrolList, absent_as_empty=False
+            )
+        except Sep2ListNotFoundError:
+            # Not a list served empty: a server restarting can answer 404 for a
+            # moment. Keep the controls held. A program the server removed is
+            # dropped by the DERProgram list refresh.
+            logger.debug("DERC list at %s not found (HTTP 404) during refresh", derc_list_href)
+            continue
         except Sep2ProtocolError as exc:
             if _paging_fault(exc):
                 logger.error(
@@ -960,10 +1042,7 @@ async def refresh_der_controls(client: Sep2Client, state: DiscoveredState) -> No
             )
             continue
 
-        derp_state.der_controls.clear()
-        for derc_page in derc_pages:
-            derp_state.der_controls.extend(derc_page.dercontrol)
-        derp_state.der_controls_complete = True
+        _store_der_controls(derp_state, derc_pages, ticket)
 
     logger.debug("Refreshed DER controls for %d programs", len(state.der_programs))
 
@@ -989,10 +1068,12 @@ async def refresh_der_controls_for_program(
 
     # Refresh DefaultDERControl
     dderc_href = _extract_href(derp_state.program.default_dercontrol_link)
+    ticket = _start_read()
     if dderc_href:
         try:
             dderc = await client.get(dderc_href, DefaultDercontrol)
-            derp_state.default_dercontrol = dderc
+            if _read_lands(derp_state, "default_dercontrol", ticket):
+                derp_state.default_dercontrol = dderc
         except Sep2ProtocolError as exc:
             if exc.status_code in (404, 204):
                 logger.debug(
@@ -1000,7 +1081,8 @@ async def refresh_der_controls_for_program(
                     dderc_href,
                     _absent_reason(exc.status_code),
                 )
-                derp_state.default_dercontrol = None
+                if _read_lands(derp_state, "default_dercontrol", ticket):
+                    derp_state.default_dercontrol = None
             else:
                 raise
         except Sep2PayloadError as exc:
@@ -1015,7 +1097,7 @@ async def refresh_der_controls_for_program(
                 dderc_href,
                 exc_info=True,
             )
-    else:
+    elif _read_lands(derp_state, "default_dercontrol", ticket):
         derp_state.default_dercontrol = None
 
     # Refresh DERCurve list before controls so any newly-referenced curves
@@ -1025,8 +1107,19 @@ async def refresh_der_controls_for_program(
     # Refresh DERControl list
     derc_list_href = _extract_href(derp_state.program.dercontrol_list_link)
     if derc_list_href:
+        ticket = _start_read()
         try:
-            derc_pages = await client.get_list(derc_list_href, DercontrolList)
+            derc_pages = await client.get_list(
+                derc_list_href, DercontrolList, absent_as_empty=False
+            )
+        except Sep2ListNotFoundError:
+            # Not a list served empty: a server restarting can answer 404 for a
+            # moment. Keep the controls held. A program the server removed is
+            # dropped by the DERProgram list refresh.
+            logger.debug(
+                "DERC list at %s not found (HTTP 404) during targeted refresh", derc_list_href
+            )
+            return True
         except Sep2ProtocolError as exc:
             if _paging_fault(exc) and not strict:
                 logger.error(
@@ -1051,10 +1144,7 @@ async def refresh_der_controls_for_program(
             )
             return True
 
-        derp_state.der_controls.clear()
-        for derc_page in derc_pages:
-            derp_state.der_controls.extend(derc_page.dercontrol)
-        derp_state.der_controls_complete = True
+        _store_der_controls(derp_state, derc_pages, ticket)
 
     logger.debug("Targeted refresh complete for program %s", program_href)
     return True

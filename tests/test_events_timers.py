@@ -195,9 +195,65 @@ async def test_now_fn_update_reaims_mid_sleep():
     await mgr.cancel_all()
 
 
+class _SteppableClock:
+    """Stand-in for the ``time`` module whose wall and monotonic clocks a test moves."""
+
+    def __init__(self) -> None:
+        self.wall_offset = 0.0
+        self.monotonic_offset = 0.0
+
+    def time(self) -> float:
+        return time.time() + self.wall_offset
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.monotonic_offset
+
+
 @pytest.mark.asyncio
-async def test_delayed_callback_stays_on_local_clock():
-    """Wind-down delays are elapsed-time semantics: a delayed callback isn't
+async def test_delayed_callback_fires_after_its_delay_when_the_wall_clock_steps_back(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A wall-clock step back of an hour does not make the wind-down an hour late."""
+    clock = _SteppableClock()
+    monkeypatch.setattr("py20305.events.timers.time", clock)
+    shutdown = asyncio.Event()
+    mgr = EventTimerManager(shutdown)
+    callback = AsyncMock()
+    record = _make_record(state=EventState.CANCELLED)
+
+    mgr.schedule_delayed_callback(record, 120, callback, "wind-down")
+    # 120 s pass while NTP steps the wall clock back by an hour.
+    clock.monotonic_offset += 120
+    clock.wall_offset += 120 - 3600
+    await asyncio.sleep(0.2)
+
+    callback.assert_awaited_once_with(record)
+    await mgr.cancel_all()
+
+
+@pytest.mark.asyncio
+async def test_delayed_callback_does_not_fire_early_when_the_wall_clock_steps_forward(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A wall-clock step forward of two hours does not cut a one-hour delay short."""
+    clock = _SteppableClock()
+    monkeypatch.setattr("py20305.events.timers.time", clock)
+    shutdown = asyncio.Event()
+    mgr = EventTimerManager(shutdown)
+    callback = AsyncMock()
+    record = _make_record(state=EventState.CANCELLED)
+
+    mgr.schedule_delayed_callback(record, 3600, callback, "wind-down")
+    clock.wall_offset += 7200
+    await asyncio.sleep(0.2)
+
+    callback.assert_not_awaited()
+    await mgr.cancel_all()
+
+
+@pytest.mark.asyncio
+async def test_delayed_callback_ignores_server_time_skew():
+    """Wind-down delays count elapsed time: a delayed callback is not
     accelerated by any server-time skew (no now_fn hook exposed)."""
     shutdown = asyncio.Event()
     mgr = EventTimerManager(shutdown)

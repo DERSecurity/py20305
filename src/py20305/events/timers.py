@@ -32,6 +32,11 @@ def _local_now() -> int:
     return int(time.time())
 
 
+def _monotonic_now() -> float:
+    """Clock for relative delays: a wall-clock step does not move it."""
+    return time.monotonic()
+
+
 class EventTimerManager:
     """Manages asyncio.Task timers for event activation and completion."""
 
@@ -132,7 +137,7 @@ class EventTimerManager:
         a cancelled event's default-control fallback, runs for an event that is
         already CANCELLED.
         """
-        target = int(time.time()) + delay_seconds
+        target = _monotonic_now() + delay_seconds
         logger.debug(
             "Scheduling %s callback for %s in %ds",
             label,
@@ -140,9 +145,9 @@ class EventTimerManager:
             delay_seconds,
         )
         task = asyncio.create_task(
-            # Delayed callbacks are elapsed-time semantics (target anchored to
-            # local now above), so they deliberately stay on the local clock.
-            self._wait_and_fire(record, target, callback, label, _local_now, frozenset()),
+            # A delay counts elapsed time, so it runs on the monotonic clock.
+            # On the wall clock an NTP step would make it fire early or late.
+            self._wait_and_fire(record, target, callback, label, _monotonic_now, frozenset()),
             name=f"{label}-{record.mrid.hex()[:8]}",
         )
         self._track(record.mrid, task)
@@ -193,10 +198,10 @@ class EventTimerManager:
     async def _wait_and_fire(
         self,
         record: EventRecord,
-        target: int,
+        target: float,
         callback: Callable[[EventRecord], Awaitable[None]],
         label: str,
-        now_fn: Callable[[], int],
+        now_fn: Callable[[], float],
         skip_states: frozenset[EventState],
     ) -> None:
         """Adaptive sleep until target time, then fire callback if still valid.

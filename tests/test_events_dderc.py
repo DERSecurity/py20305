@@ -188,3 +188,26 @@ class TestInitialModes:
         t = DdercTracker()
         t.record_application(self.LFDI, "/derp/1", self.MRID, 5)
         assert not t.should_apply_initial(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"a"}))
+
+
+class TestInitialContent:
+    """A default modified in place keeps its mRID, so its content decides."""
+
+    LFDI = b"\x01" * 20
+    MRID = b"\xaa" * 16
+
+    def test_a_default_whose_content_changes_under_the_same_mrid_is_written_again(self):
+        t = DdercTracker()
+        t.record_application(self.LFDI, "/derp/1", self.MRID, 5, content=b"old")
+        assert t.should_apply_initial(self.LFDI, "/derp/1", self.MRID, 5, content=b"new")
+
+    def test_a_default_with_unchanged_content_is_not_written_again(self):
+        t = DdercTracker()
+        t.record_application(self.LFDI, "/derp/1", self.MRID, 5, content=b"same")
+        assert not t.should_apply_initial(self.LFDI, "/derp/1", self.MRID, 5, content=b"same")
+
+    def test_new_content_does_not_keep_the_modes_written_with_the_old_content(self):
+        t = DdercTracker()
+        t.record_application(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"a"}), b"old")
+        t.record_application(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"b"}), b"new")
+        assert t.should_apply_initial(self.LFDI, "/derp/1", self.MRID, 5, frozenset({"a"}), b"new")
