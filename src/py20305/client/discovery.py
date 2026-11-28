@@ -11,9 +11,11 @@ from typing import Any
 
 from lxml import etree
 
+from py20305.client.aggregation import aggregation_poll_rate, read_aggregation
 from py20305.client.errors import Sep2PayloadError, Sep2ProtocolError
 from py20305.client.http import Sep2Client
 from py20305.client.poll_rate import DEFAULT_POLL_RATE, normalize_poll_rate
+from py20305.client.scope import DeviceFilter
 from py20305.client.state import (
     DerProgramState,
     DeviceMapping,
@@ -489,6 +491,7 @@ async def discover(
     *,
     registration_pins: dict[str, int] | None = None,
     dcap_path: str = "/dcap",
+    device_filter: DeviceFilter | None = None,
 ) -> None:
     """Run full hierarchical discovery: dcap -> sdev -> edev -> der -> fsa -> derp.
 
@@ -501,6 +504,10 @@ async def discover(
         registration_pins: Optional mapping from LFDI hex -> expected PIN
             for registration verification.
         dcap_path: Path to DeviceCapability resource (default: /dcap).
+        device_filter: Walk only the EndDevices this accepts (see
+            :mod:`py20305.client.scope`). An EndDevice it rejects is left out
+            of ``state.end_devices`` and nothing below it is fetched; its
+            SubscriptionListLink is still recorded. None walks every EndDevice.
     """
     # Kept for an EndDevice whose FSA list fails to read: the FSAs it named
     # before are still the best knowledge of what it is assigned.
@@ -614,11 +621,21 @@ async def discover(
                         logger.debug(
                             "Could not read SubscriptionList pollRate, using default: %s", exc
                         )
+                if state.subscription_list_href is None:
+                    state.subscription_list_href = sub_list_href
+
+            if device_filter is not None and not device_filter(edev_href, lfdi.hex()):
+                logger.debug("EndDevice %s is outside this client's device filter", edev_href)
+                continue
 
             # Registration link (for PIN verification)
             reg_href = _extract_href(edev.registration_link)
             if reg_href:
                 edev_state.registration_href = reg_href
+
+            # An EndDevice that represents an aggregation: its AggregatedDeviceList
+            # and, for a Priority distribution, its AggregationPriority (Annex C.3).
+            edev_state.aggregation = await read_aggregation(client, edev)
 
             # 5a. DER list (optional; server may advertise link without resource).
             # Contained per device: one EndDevice's unreadable DER list must not
@@ -944,13 +961,18 @@ async def refresh_der_controls(client: Sep2Client, state: DiscoveredState) -> No
 
 
 async def refresh_der_controls_for_program(
-    client: Sep2Client, state: DiscoveredState, program_href: str
+    client: Sep2Client, state: DiscoveredState, program_href: str, *, strict: bool = False
 ) -> bool:
     """Re-fetch DERControl list and DefaultDERControl for a single program.
 
     Returns True if the program was found and refreshed, False if
     *program_href* is not in state (e.g. removed between notification
     and fetch).
+
+    A failed fetch is logged and skipped, and the call still returns True, so
+    a poll carries on. ``strict`` raises it instead, for a caller that hands
+    the failure back to whoever asked, so the request can be retried. A
+    DefaultDERControl the server reports absent (404, 204) is not a failure.
     """
     derp_state = state.der_programs.get(program_href)
     if derp_state is None:
@@ -974,8 +996,12 @@ async def refresh_der_controls_for_program(
             else:
                 raise
         except Sep2PayloadError as exc:
+            if strict:
+                raise
             logger.warning("Skipping DDERC targeted refresh at %s: %s", dderc_href, exc)
         except Exception:
+            if strict:
+                raise
             logger.warning(
                 "Failed to parse DDERC at %s during targeted refresh, skipping",
                 dderc_href,
@@ -994,7 +1020,7 @@ async def refresh_der_controls_for_program(
         try:
             derc_pages = await client.get_list(derc_list_href, DercontrolList)
         except Sep2ProtocolError as exc:
-            if _paging_fault(exc):
+            if _paging_fault(exc) and not strict:
                 logger.error(
                     "DERC list at %s stopped answering between pages (%s) during targeted refresh",
                     derc_list_href,
@@ -1003,9 +1029,13 @@ async def refresh_der_controls_for_program(
                 return True
             raise
         except Sep2PayloadError as exc:
+            if strict:
+                raise
             logger.warning("Skipping DERControl targeted refresh: %s", exc)
             return True
         except Exception:
+            if strict:
+                raise
             logger.warning(
                 "Failed to parse DERControl list at %s during targeted refresh, skipping",
                 derc_list_href,
@@ -1056,9 +1086,64 @@ async def refresh_end_device_lists(client: Sep2Client, state: DiscoveredState) -
                 # Update the device object and LFDI
                 state.end_devices[edev_href].device = edev
                 state.end_devices[edev_href].lfdi = edev.l_fdi or b""
+                # The distribution, members and priority may change (§8.7.3.1:
+                # a member is disabled before it is removed).
+                edev_state = state.end_devices[edev_href]
+                edev_state.aggregation = await read_aggregation(
+                    client, edev, edev_state.aggregation
+                )
 
     register_device_prefixes(client, state)
     logger.debug("Refreshed EndDevice list with %d devices", len(state.end_devices))
+
+
+def aggregations_poll_interval(state: DiscoveredState) -> int | None:
+    """Return the shortest poll interval of the discovered aggregations, or None."""
+    fallback = state.poll_rates.get("edev") or DEFAULT_POLL_RATE
+    rates = [
+        rate
+        for edev_state in state.end_devices.values()
+        if edev_state.aggregation is not None
+        and (rate := aggregation_poll_rate(edev_state.aggregation, fallback)) is not None
+    ]
+    return min(rates) if rates else None
+
+
+async def refresh_aggregations(
+    client: Sep2Client, state: DiscoveredState, last_read: dict[str, float], now: float
+) -> None:
+    """Read again each aggregation whose poll interval has elapsed.
+
+    This runs on its own schedule, so an aggregation stays current while a
+    subscription suppresses the EndDeviceList poll. ``last_read`` maps an
+    EndDevice href to the monotonic time of its last read here; an EndDevice
+    with no entry is due. A read that fails keeps the previous members and
+    priority. A read that an EndDeviceList refresh overtook is dropped.
+    """
+    fallback = state.poll_rates.get("edev") or DEFAULT_POLL_RATE
+    for edev_href, edev_state in list(state.end_devices.items()):
+        info = edev_state.aggregation
+        if info is None:
+            continue
+        rate = aggregation_poll_rate(info, fallback)
+        if rate is None:
+            continue
+        previous = last_read.get(edev_href)
+        # One second of slack, so a tick that wakes just early still reads.
+        if previous is not None and now - previous < rate - 1:
+            continue
+        device = edev_state.device
+        fresh = await read_aggregation(client, device, info)
+        last_read[edev_href] = now
+        # An EndDeviceList refresh or a rediscovery may have replaced the
+        # EndDevice or its aggregation while this read was in flight. Its data
+        # is newer, so this read is dropped.
+        if (
+            state.end_devices.get(edev_href) is edev_state
+            and edev_state.device is device
+            and edev_state.aggregation is info
+        ):
+            edev_state.aggregation = fresh
 
 
 async def refresh_function_set_assignments(

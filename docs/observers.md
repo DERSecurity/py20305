@@ -245,9 +245,13 @@ event record is made once per transition, never per poll:
   the client answers it EXPIRED) or `skipped` (inside a loss-of-communications
   window the client opted out of). `from_state` is `null` for an event first
   seen already in that state.
-- `effective_start` and `effective_duration` are after randomization.
-- An `active` record is made once dispatch has finished, so `applied_lfdis`
-  and `rejected_lfdis` are final. They are the outcome each device's dispatch
+- `effective_start` and `effective_duration` are after randomization. Each
+  device draws its own offsets, so they span the windows of all the event's
+  devices.
+- An `active` record is made once dispatch has finished at the event's first
+  start, so `applied_lfdis` and `rejected_lfdis` are final for the devices
+  that started then; a device whose own randomized start comes later is
+  dispatched at that start. They are the outcome each device's dispatch
   returned, which is what the server was told.
 - A whole supersession is the transition to `superseded`, with
   `superseded_by`. A partial one has `from_state` equal to `to_state` and

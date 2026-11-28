@@ -71,6 +71,14 @@ What it reports:
   `operationalModeStatus`, the 2030.5-2023 `connectStatus` and 2030.5-2018
   `genConnectStatus` bitmaps, and the AC over- and under-voltage and over-
   and under-frequency alarms at their `alarmStatus` bits.
+- **State of charge**, as a `SoC` reading and as DERStatus
+  `stateOfChargeStatus`, from the first source the device has: model 713
+  `SoC`, model 802 `SoC` (percent of the watt-hour rating), model 713
+  `WHAvail` over `WHRtg`, then model 124 `ChaState`. Model 124 is last because
+  `ChaState` is a percent of the amp-hour rating, which can differ by several
+  percent from the energy-based figure a battery management system shows. The
+  status value comes from the last monitoring read, so its `dateTime` is that
+  read's time and can lag the status poll by up to one monitoring interval.
 
 What it applies: the volt-var, volt-watt and watt-var curves, `opModMaxLimW`
 and its inject and absorb forms, `opModFixedW`, `opModTargetW`,
@@ -695,7 +703,9 @@ client does not emit yet.
 
 Each hook receives a `ScheduleNotification`: the `stream`, the `transition` and
 `status` that fired it, the control's `mrid`, `program_href` and `primacy`, the
-post-randomization `start` / `duration` / `end`, the `affected_lfdis` the event
+post-randomization `start` / `duration` / `end` (spanning every device's own
+randomized window, since each device draws its own offsets), the
+`affected_lfdis` the event
 scopes to, the `randomization` window, and a stream-specific `payload`. For
 `price` the payload carries the tariff profile's price multiplier and the active
 interval's consumption blocks; the relay is global and does not actuate, so the

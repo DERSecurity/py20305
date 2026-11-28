@@ -62,10 +62,44 @@ class EventRecord:
     #: excluded from "other active" DDERC checks. The state stays SCHEDULED/ACTIVE
     #: so supersession/classification are unaffected.
     opted_out: bool = False
+    #: Each EndDevice's effective window, ``device href -> (start, end)``.
+    #: IEEE 2030.5-2023 §10.2.3.2.2 and §10.2.3.2.3 have each device draw its
+    #: own start and duration randomization, so devices of one event start and
+    #: end at different moments. ``start`` and ``duration`` above then span
+    #: every window. Empty for an event whose program has no device mapping:
+    #: it runs on ``start`` and ``end``.
+    device_windows: dict[str, tuple[int, int]] = field(default_factory=dict)
+    #: Devices whose window has started here (the control was dispatched or
+    #: the device was found superseded at its start).
+    started_devices: set[str] = field(default_factory=set)
+    #: Devices whose window has ended here (COMPLETED and fallback handled).
+    ended_devices: set[str] = field(default_factory=set)
 
     @property
     def end(self) -> int:
         return self.start + self.duration
+
+    def window(self, device_href: str) -> tuple[int, int]:
+        """Return the effective ``(start, end)`` of the event on one device."""
+        return self.device_windows.get(device_href, (self.start, self.end))
+
+    def set_window(self, device_href: str, start: int, end: int) -> None:
+        """Record one device's window and widen ``start``/``duration`` to cover every window."""
+        self.device_windows[device_href] = (start, end)
+        first = min(s for s, _ in self.device_windows.values())
+        last = max(e for _, e in self.device_windows.values())
+        self.start = first
+        self.duration = last - first
+
+    def runs_on(self, device_href: str) -> bool:
+        """Return whether the event is in its window on ``device_href`` here.
+
+        False before the device's own start and after its own end. A device
+        without a window of its own follows the event's state.
+        """
+        if device_href in self.ended_devices:
+            return False
+        return device_href not in self.device_windows or device_href in self.started_devices
 
 
 class EventStore:
@@ -84,6 +118,14 @@ class EventStore:
 
     def get(self, mrid: bytes) -> EventRecord | None:
         return self._events.get(mrid)
+
+    def remove(self, mrid: bytes) -> None:
+        """Forget an event without a state change. An unknown mRID is not an error."""
+        self._events.pop(mrid, None)
+
+    def values(self) -> list[EventRecord]:
+        """Return every stored event, whatever its state."""
+        return list(self._events.values())
 
     def by_state(self, state: EventState) -> list[EventRecord]:
         return [r for r in self._events.values() if r.state == state]

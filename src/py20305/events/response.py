@@ -237,6 +237,10 @@ class ResponseTracker:
         #: ``(mrid, code, lfdi, at, error)``, with ``error`` None on success.
         #: The operations history listens here; None when nothing does.
         self.observer: Callable[[bytes, ResponseCode, bytes, int, str | None], None] | None = None
+        #: Told about each response as it is marked sent, as ``(mrid, code,
+        #: lfdi, at)``. The shared event state records it here. Not told about
+        #: responses loaded with :meth:`restore`.
+        self.on_sent: Callable[[bytes, ResponseCode, bytes, int], None] | None = None
 
     def notify(
         self, mrid: bytes, code: ResponseCode, lfdi: bytes, at: int, error: str | None = None
@@ -309,6 +313,23 @@ class ResponseTracker:
         in_flight = self._in_flight.pop(key, None)
         if in_flight is not None and not in_flight.done():
             in_flight.set_result(True)
+        if self.on_sent is not None:
+            try:
+                self.on_sent(mrid, code, lfdi, now)
+            except Exception:
+                logger.warning(
+                    "Could not record the response for mrid=%s in the shared event state",
+                    mrid.hex()[:8],
+                    exc_info=True,
+                )
+
+    def restore(self, mrid: bytes, code: ResponseCode, lfdi: bytes, at: int) -> None:
+        """Count a response another process posted as sent, without telling ``on_sent``."""
+        self._sent.setdefault((mrid, code, lfdi), at)
+
+    def sent_for(self, lfdi: bytes) -> list[tuple[bytes, ResponseCode, int]]:
+        """Return ``(mrid, code, at)`` for each response sent for ``lfdi``."""
+        return [(m, c, at) for (m, c, who), at in self._sent.items() if who == lfdi]
 
     def prune(self, now: int, max_age: int = 7200) -> None:
         """Remove entries older than max_age seconds."""
