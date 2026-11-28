@@ -43,6 +43,9 @@ _SUBSCRIPTION_LOST_STATUSES: frozenset[int] = frozenset({401, 404})
 # A.2.7.2) and is handled the same way so such a server still renews.
 _PUT_RENEWAL_FALLBACK_STATUSES: frozenset[int] = frozenset({404, 405})
 
+# Longest floor on the wait between passes of the renewal loop.
+_RENEWAL_MIN_WAKE_SECONDS = 3600
+
 RenewalMethod = Literal["post", "put"]
 
 _DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
@@ -1231,20 +1234,27 @@ class SubscriptionManager:
     ) -> None:
         """Run subscription renewal loop until shutdown is signaled.
 
-        Renews subscriptions that are older than ``interval_seconds``
-        (default 24h). IEEE 2030.5 server-side subscriptions expire after 36h.
+        Renews each subscription ``interval_seconds`` (default 24h) after it
+        was created or last renewed. IEEE 2030.5 server-side subscriptions
+        expire after 36h. The loop wakes when the earliest subscription is due,
+        so one created or adopted after the loop started is renewed on time
+        rather than at the following interval. Passes are at least
+        ``interval_seconds / 24`` apart, one hour at the default interval
+        (IEEE 2030.5-2023 8.9.3.4 a: renewals no more often than every hour),
+        which also spaces out retries of a failed renewal.
         Returns at once in a manager that does not maintain the set.
         """
         if not self.maintains_set:
             return
+        min_wait = min(_RENEWAL_MIN_WAKE_SECONDS, interval_seconds / 24)
+        wait = self._seconds_until_renewal_due(interval_seconds)
         while not shutdown.is_set():
             try:
-                await asyncio.wait_for(shutdown.wait(), timeout=interval_seconds)
+                await asyncio.wait_for(shutdown.wait(), timeout=max(min_wait, wait))
                 break  # shutdown signaled
             except TimeoutError:
-                pass  # interval elapsed, time to renew
+                pass  # a subscription is due
 
-            # Renew stale subscriptions
             now = time.time()
             for uri in [s.subscription_uri for s in self._store.values()]:
                 state = self._store.get(uri)
@@ -1252,6 +1262,21 @@ class SubscriptionManager:
                     age = now - state.created_at
                     if age >= interval_seconds:
                         await self.renew(uri)
+            wait = self._seconds_until_renewal_due(interval_seconds)
+
+    def _seconds_until_renewal_due(self, interval_seconds: float) -> float:
+        """Return the seconds until the earliest active subscription is due for renewal.
+
+        Return ``interval_seconds`` when no subscription is active, and 0 when
+        one is already due. The result is never more than ``interval_seconds``.
+        """
+        now = time.time()
+        wait = float(interval_seconds)
+        for state in self._store.values():
+            if state.status == "active":
+                due_in = state.created_at + interval_seconds - now
+                wait = min(wait, max(0.0, due_in))
+        return wait
 
     # ------------------------------------------------------------------
     # WP4d: Non-list vs list notification semantics

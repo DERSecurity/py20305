@@ -38,6 +38,39 @@ class TestRenewAll:
         assert count == 0
 
 
+class TestRenewalLoop:
+    @pytest.mark.asyncio
+    async def test_subscription_created_after_loop_start_is_renewed_on_time(
+        self, mgr: SubscriptionManager
+    ):
+        """A subscription made after the loop started is renewed one interval after creation.
+
+        The loop used to wake once per interval and skip a subscription younger
+        than the interval, so that subscription waited almost two intervals.
+        """
+        interval = 0.48
+        renewed: list[float] = []
+        loop = asyncio.get_running_loop()
+
+        async def record_renewal(uri: str) -> bool:
+            renewed.append(loop.time())
+            return True
+
+        mgr.renew = record_renewal  # type: ignore[method-assign]
+        shutdown = asyncio.Event()
+        task = asyncio.create_task(mgr.start_renewal_task(shutdown, interval_seconds=interval))
+        try:
+            await asyncio.sleep(0.1)
+            assert await mgr.subscribe("/edev/1/sub", "/edev/1/derc", "DERControlList")
+            created = loop.time()
+            await asyncio.sleep(0.75)
+            assert renewed, "no renewal within one interval of creation"
+            assert renewed[0] - created < interval + 0.2
+        finally:
+            shutdown.set()
+            await task
+
+
 class TestRenewSingle:
     @pytest.mark.asyncio
     async def test_renew_updates_created_at(self, mgr: SubscriptionManager):
