@@ -16,7 +16,7 @@ import math
 import re
 import time
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from py20305.connectors.control_errors import ModeNotSupportedError
 from py20305.connectors.errors import (
@@ -1766,7 +1766,7 @@ class SunSpecModbusConnector:
             pct = 100.0 if pct > 0 else -100.0
         return pct
 
-    def _control_unsupported(self, control: str, detail: str) -> None:
+    def _control_unsupported(self, control: str, detail: str) -> NoReturn:
         """Decline a control this device cannot accept, and say so upstream.
 
         Raises rather than returns. Suppressing the write alone would leave the
