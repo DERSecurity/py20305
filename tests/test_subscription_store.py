@@ -264,6 +264,22 @@ class TestOtherClientsSubscriptions:
         deleted = [call.args[0] for call in http.delete.await_args_list]
         assert deleted == ["/edev/1/sub/1"]
 
+    async def test_reconciliation_keeps_our_subscription_when_the_server_normalizes_its_uri(
+        self, store: SubscriptionStore
+    ):
+        echoed = "HTTPS://Host.Example.com:10443/notify/"
+        listed = _sub_list(("/edev/1/sub/1", "/edev/1/fsa", echoed))
+        http = _http()
+        http.get_list = AsyncMock(return_value=listed)
+        mgr = SubscriptionManager(http, NOTIFY, store=store)
+
+        await mgr.adopt_existing(SUB_LIST, {("/edev/1/fsa", "FSAList")})
+        await mgr.reconcile_with_server(SUB_LIST, reestablish_missing=False)
+
+        assert [s.subscription_uri for s in mgr.active_subscriptions] == ["/edev/1/sub/1"]
+        http.post.assert_not_awaited()
+        http.delete.assert_not_awaited()
+
 
 class TestSharedReconciliation:
     async def test_disjoint_desired_sets_cancel_nothing_without_cancel_unwanted(

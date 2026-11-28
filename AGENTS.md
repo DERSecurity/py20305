@@ -35,7 +35,7 @@ repeated here.
 ### Commands
 
 ```bash
-pip install -e ".[dev]"                      # once; everything below needs it
+uv sync --extra dev                          # once; then activate .venv (or prefix uv run)
 
 pytest tests -q                              # the unit suite: offline, no Docker
 pytest tests/test_identity.py -q             # one file

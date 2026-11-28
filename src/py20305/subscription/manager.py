@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import string
 import time
 import warnings
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, get_args
+from urllib.parse import urlsplit
 
 from py20305.client.errors import Sep2ProtocolError
 from py20305.models.sep.sep import Subscription
@@ -41,6 +44,49 @@ _SUBSCRIPTION_LOST_STATUSES: frozenset[int] = frozenset({401, 404})
 _PUT_RENEWAL_FALLBACK_STATUSES: frozenset[int] = frozenset({404, 405})
 
 RenewalMethod = Literal["post", "put"]
+
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+_UNRESERVED = frozenset(string.ascii_letters + string.digits + "-._~")
+_PERCENT_ENCODING = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def _normalize_percent_encoding(text: str) -> str:
+    """Decode percent-encoded unreserved characters and uppercase the rest (RFC 3986 §6.2.2)."""
+
+    def fix(match: re.Match[str]) -> str:
+        char = chr(int(match.group(0)[1:], 16))
+        return char if char in _UNRESERVED else match.group(0).upper()
+
+    return _PERCENT_ENCODING.sub(fix, text)
+
+
+def notification_uri_key(uri: str | None) -> str | None:
+    """Return a normalized form of ``uri`` for comparing notificationURIs.
+
+    A server may echo a notificationURI in a different but equivalent form. The
+    key lowercases the scheme and host, drops the scheme's default port,
+    normalizes percent-encodings, and ignores a trailing slash on the path.
+    A URI that does not parse is returned unchanged.
+    """
+    if uri is None:
+        return None
+    try:
+        parts = urlsplit(uri.strip())
+        port = parts.port
+    except ValueError:
+        return uri
+    scheme = parts.scheme.lower()
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None and port != _DEFAULT_PORTS.get(scheme):
+        host = f"{host}:{port}"
+    userinfo = parts.netloc.rpartition("@")[0]
+    if userinfo:
+        host = f"{userinfo}@{host}"
+    path = _normalize_percent_encoding(parts.path).rstrip("/")
+    query = _normalize_percent_encoding(parts.query)
+    return f"{scheme}://{host}{path}" + (f"?{query}" if query else "")
 
 
 @dataclass
@@ -173,6 +219,7 @@ class SubscriptionManager:
         self._renewal_method = renewal_method
         self._client = client
         self._notification_uri = notification_uri
+        self._notification_key = notification_uri_key(notification_uri)
         if store is None:
             from py20305.subscription.store import MemorySubscriptionStore
 
@@ -698,7 +745,7 @@ class SubscriptionManager:
                 # Only our own subscriptions, as adoption counts them: another
                 # client's subscription to the same resource is not ours to
                 # re-key to, renew or DELETE.
-                if sub.notification_uri != self._notification_uri:
+                if notification_uri_key(sub.notification_uri) != self._notification_key:
                     continue
                 server_resources.add(sub.subscribed_resource)
                 if sub.href:
@@ -842,7 +889,8 @@ class SubscriptionManager:
         for page in pages:
             for sub in page.subscription or []:
                 resource = sub.subscribed_resource
-                if sub.notification_uri != self._notification_uri:
+                # The server may echo our notificationURI in an equivalent form.
+                if notification_uri_key(sub.notification_uri) != self._notification_key:
                     continue
                 if not resource or resource not in desired_types or not sub.href:
                     continue

@@ -5,7 +5,8 @@ the mRID of the DERControl or DefaultDERControl that was applied, and the
 event whose start or end caused it. The device-telemetry stream publishes
 those, but nothing kept them. This part stores each write with both mRIDs, so
 the writes an event caused can be listed by the event's mRID, including the
-ones a device rejected and the ones the command gate refused.
+ones a device rejected, the ones the command gate refused and the ones a
+command intercept took.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from py20305.history.database import HistoryDatabase
 APPLIED = "applied"
 FAILED = "failed"
 REFUSED = "refused"
+INTERCEPTED = "intercepted"
 
 _DDL = (
     """CREATE TABLE IF NOT EXISTS device_writes (
@@ -95,8 +97,10 @@ class WriteHistory:
             device: The name the dispatcher knows the device by.
             control: The connector operation, e.g. ``p_lim``.
             params: What was written.
-            outcome: ``applied``, ``failed`` (the connector raised) or
-                ``refused`` (the command gate stopped it before the device).
+            outcome: ``applied``, ``failed`` (the connector or the command
+                intercept raised), ``refused`` (the command gate stopped it
+                before the device) or ``intercepted`` (the command intercept
+                took it, so the connector did not apply it).
             at: When it was issued, local epoch seconds. Defaults to now.
             lfdi: The device's LFDI when known.
             origin: Who issued it, e.g. ``ieee2030_5`` or ``local_api``.

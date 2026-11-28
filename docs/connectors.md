@@ -59,17 +59,61 @@ What it reports:
   the lines (A, AB or ABC). Under the signed-load reading profile the power
   totals carry the wiring's PhaseCode too, as that profile registers them.
 - **Ratings and settings** from model 702, under the `rtg*` and `set*` names,
-  with `rtgMaxA` from the current rating.
+  with `rtgMaxA` from the current rating. The device's `CtrlModes` bits are
+  reported as the DERControlType bitmap of the controls the connector applies
+  for each function (fixed power factor is both `opModFixedPFAbsorbW` and
+  `opModFixedPFInjectW`, frequency-watt is `opModFreqDroop`); functions with no
+  such control, such as the trip functions and scheduling, set no bit. The
+  operating categories are reported as IEEE 2030.5 numbers them, from 1 with 0
+  meaning not specified (`rtgNormalCategory` 1 is Category A, `rtgAbnormalCategory`
+  1 is Category I), so SunSpec category A is 1, not 0.
 - **Status** from model 701 in the DERStatus types: `inverterStatus`,
   `operationalModeStatus`, the 2030.5-2023 `connectStatus` and 2030.5-2018
   `genConnectStatus` bitmaps, and the AC over- and under-voltage and over-
   and under-frequency alarms at their `alarmStatus` bits.
+- **State of charge**, as a `SoC` reading and as DERStatus
+  `stateOfChargeStatus`, from the first source the device has: model 713
+  `SoC`, model 802 `SoC` (percent of the watt-hour rating), model 713
+  `WHAvail` over `WHRtg`, then model 124 `ChaState`. Model 124 is last because
+  `ChaState` is a percent of the amp-hour rating, which can differ by several
+  percent from the energy-based figure a battery management system shows. The
+  status value comes from the last monitoring read, so its `dateTime` is that
+  read's time and can lag the status poll by up to one monitoring interval.
 
 What it applies: the volt-var, volt-watt and watt-var curves, `opModMaxLimW`
 and its inject and absorb forms, `opModFixedW`, `opModTargetW`,
 `opModFixedVar`, the two fixed power factors, `opModFreqDroop`, the CSIP-AUS
 generation and load limits, and `opModConnect` / `opModEnergize` through the
 model 703 enter-service permit. Any other element is unsupported by design.
+
+A control the device cannot take is declined, so the server is told the control
+is not supported (IEEE 2030.5 Table 31 status 251) and no register or enable
+point is changed. That covers a model 704 setpoint the device does not
+implement, a curve whose `yRefType` has no SunSpec reference, an
+`opModFixedVar` `refType` with no SunSpec reactive-power mode, an
+`opModTargetW` on a device with no percent base, and an `opModFreqDroop`
+`pMin` on a device without the `PMin` point or a rating.
+
+Curves and the frequency droop are written and adopted before the function is
+enabled, so a refused write leaves the function as it was. A curve's `yRefType`
+selects the curve's SunSpec reference: for volt-var and watt-var `%setMaxW`,
+`%setMaxVar`, `%statVarAvail` and `%setMaxVA`, for volt-watt `%setMaxW` and
+`%statWAvail`. A volt-var curve with no `vRef` is written with a reference
+voltage of 100% of nominal, which leaves its points unadjusted.
+`autonomousVRefTimeConstant`, in hundredths of a second, is written in whole
+seconds. An `opModFreqDroop` `pMin`, in watts, is written as a whole percent of
+the device's rated active power (`WMaxRtg`), and a value beyond the rating is
+refused.
+
+`opModMaxLimWInject` is written to the device's discharge rate limit and
+mirrored onto its maximum active power (`WMax`), which some devices honor
+alone. An `opModMaxLimW` percent keeps meaning a percent of the device's own
+maximum while the mirror is in force: the connector scales the percent it
+writes, so the cap is the lower of the two limits in watts whichever control
+arrives first. When `opModMaxLimWInject` clears, the discharge rate limit
+returns to its rating, the value for no limit, and `WMax` returns to the value
+the device had. The mirror is held in memory, so a restart during an event
+leaves `WMax` at the mirrored value until the device's own value is set again.
 
 The connector does not apply ramp times. A control's `rampTms` is accepted and
 ignored: the device ramps at its own rate. The connector logs that once at INFO
@@ -271,7 +315,7 @@ reported; an explicit 0 is.
 | `rtgVNom`, `rtgMaxV`, `rtgMinV` | |
 | `rtgReactiveSusceptance`, `rtgNormalCategory`, `rtgAbnormalCategory` | |
 | `modesSupported` | DERControlType bitmap, as a Python `int` from 0 to 4294967295. Any other type or range is reported as `00000000` and logged as a warning |
-| `doeModesSupported` | CSIP-AUS extension bitmap; defaults to all four limits |
+| `doeModesSupported` | CSIP-AUS extension bitmap (bit 0 export, 1 import, 2 generation, 3 load limit). Defaults to the limits the connector implements: a connector that overrides none of the four `update_op_mod_*_lim_w` methods reports `0`. A value returned here replaces the default |
 
 | `fetch_configuration` key | Notes |
 |---|---|
@@ -283,7 +327,7 @@ reported; an explicit 0 is.
 | `setVNom`, `setMaxV`, `setMinV` | |
 | `setGradW` | |
 | `modesEnabled` | DERControlType bitmap, as a Python `int` from 0 to 4294967295. Any other type or range is left out and logged as a warning |
-| `doeModesEnabled` | CSIP-AUS extension bitmap; defaults to the export and import limits |
+| `doeModesEnabled` | CSIP-AUS extension bitmap, bits as for `doeModesSupported`. Defaults to the limits the connector implements. A value returned here replaces the default |
 
 The absorbed reactive power limits are negative numbers. IEEE 2030.5-2023 says
 of `setMaxVarNeg`: "If present, SHALL be a negative value >= rtgMaxVarNeg
@@ -448,8 +492,8 @@ that describes what actually happened and the right code reaches the server.
 
 Every control that reaches a device goes through one funnel, whether it came from
 a translated DERControl, a default-control fallback, a comms-loss clear, or a
-caller naming a control directly. Two seams hang off that funnel, and both are
-optional: omit them and the dispatcher behaves as though neither existed.
+caller naming a control directly. Three seams hang off that funnel, and all are
+optional: omit them and the dispatcher behaves as though none existed.
 
 A device configured as a meter never reaches the funnel. A control or a named
 operation addressed to it raises `DeviceNotConfiguredError`, which the event
@@ -553,6 +597,56 @@ to a connector but not to an LFDI. Those writes proceed, and say so at debug
 level. Denying them would fail closed by accident rather than by decision, and
 would drop writes that worked before the gate existed.
 
+### Taking a write before the connector
+
+A host application can take some writes itself instead of letting the connector
+apply them, for example to decide the final setpoint in its own logic.
+`CommandIntercept` is how the dispatcher offers them. Implement an async
+`intercept(write)` and pass it as `command_intercept`:
+
+```python
+from py20305.commands import InterceptedWrite
+
+
+class ExportLimitsToPlanner:
+    async def intercept(self, write: InterceptedWrite) -> bool:
+        if write.control != "op_mod_exp_lim_w":
+            return False                      # the connector applies it
+        await self.planner.submit(write.lfdi, write.params)
+        return True                           # the planner owns it now
+
+
+dispatcher = ConnectorDispatcher(
+    registry, lfdi_resolver=resolve_lfdi, command_intercept=ExportLimitsToPlanner()
+)
+```
+
+Each write is offered after the command gate permits it, and only when the write
+names a device by LFDI. Only controls the connector implements are offered, so
+the intercept sees the same writes the connector would. An `InterceptedWrite`
+carries:
+
+- `lfdi`, `control` (the connector method without `update_`, or `clear_control`
+  for a connector's own clear), `params` (a deep copy) and `origin`.
+- `kind`, the apply path: `control` for a DERControl, `default_control` for a
+  DefaultDERControl, `clear` for a write that withdraws a mode (the clear on a
+  loss of communications and the disabling of the modes an ended event set;
+  `origin` tells them apart), and `operation` for a call to `apply_operation`.
+- `applied_mrid` and `cause_mrid`, as the write history keeps them.
+
+The return value decides what happens next:
+
+- `True`: the intercept took the write. The connector is not called, the
+  command observer records nothing and no device write is reported to telemetry.
+  The write history keeps the write with outcome `intercepted`. The caller sees
+  success, so an event is reported to the server as applied.
+- `False`: the connector applies the write as it would with no intercept.
+- An exception: the write history keeps the write with outcome `failed`, and the
+  exception reaches the caller as a connector failure does.
+
+Taking a write makes the application responsible for it. The dispatcher reports
+the write as applied whether or not the application ever writes it to the device.
+
 ### What counts as an implemented control
 
 `BaseConnector` declares each control method as a concrete method returning
@@ -568,6 +662,13 @@ unsupported, because only one of them is anybody's mistake:
 
 Overriding the method is what support means. A connector that overrides nothing
 is not silently credited with accepting every command.
+
+A DERControl that names several modes is applied for the modes the connector
+implements, and the rest are skipped: IEEE 2030.5-2023 §10.10.4.2.1 lets a
+client "reject or partially act upon" a control for its capabilities. A control
+none of whose modes the connector implements applies nothing, so the client
+answers it as rejected (Table 31 status 251, or 252 for a 2018 server) and does
+not report it as started.
 
 ## Reacting to the schedule
 

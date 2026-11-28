@@ -169,7 +169,8 @@ Project website: <https://open-satori.org>
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+uv sync --extra dev             # installs the versions uv.lock pins
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pytest tests -q                 # unit tests, no network
 ruff check src tests examples scripts
 mypy
@@ -192,6 +193,10 @@ That one proves the belief survives contact with an implementation nobody here
 wrote. See [Testing](https://dersecurity.github.io/py20305/testing/).
 
 See [CONTRIBUTING.md](https://github.com/DERSecurity/py20305/blob/main/CONTRIBUTING.md).
+
+The repository is mirrored, read-only, to
+[Codeberg](https://codeberg.org/DERSecurity/py20305), which receives `main` and every
+tag after each change here. Open issues and pull requests on GitHub.
 
 ## License
 

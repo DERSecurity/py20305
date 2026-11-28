@@ -117,6 +117,9 @@ class _Client:
     def observe_device_capability(self, body: bytes) -> ServerProfile:
         return self.profile
 
+    def observe_csip_aus_detection(self, detected: bool) -> None:
+        self.csip_aus_detected = detected
+
     async def get(self, path: str, model_type: type) -> Any:
         self.calls.append(path)
         value = self.responses[path.split("?")[0]]

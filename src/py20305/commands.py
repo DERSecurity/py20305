@@ -1,4 +1,4 @@
-"""Command vocabulary, and the observer interface that records it.
+"""Command vocabulary, the observer interface that records it, and the write-path seams.
 
 A control reaching a device is one :class:`CommandRecord`: what was commanded, by
 which interface, when, and whether the device has confirmed it. Monitoring
@@ -209,6 +209,72 @@ class AllowAllCommands:
     def may_command(self, device: str, origin: str) -> bool:
         """Always True."""
         return True
+
+
+@dataclass(frozen=True)
+class InterceptedWrite:
+    """One translated write, offered to a :class:`CommandIntercept` before the connector.
+
+    The fields are the values the dispatcher would otherwise pass to the
+    connector and keep in the write history.
+    """
+
+    #: The device the write is for.
+    lfdi: str
+    #: The connector operation without the ``update_`` prefix, e.g.
+    #: ``op_mod_max_lim_w``, or ``clear_control`` for a connector's own clear.
+    control: str
+    #: What the connector would receive. A deep copy, so changing it, or any value
+    #: nested in it, changes nothing the dispatcher applies or records.
+    params: dict[str, Any]
+    #: Where the command entered: one of :class:`CommandOrigin`, or the
+    #: application's own origin.
+    origin: str
+    #: Which apply path produced the write:
+    #:
+    #: - ``"control"``: a DERControl applied when its event starts.
+    #: - ``"default_control"``: a DefaultDERControl applied.
+    #: - ``"clear"``: a write that withdraws a mode. This is the clear made on a
+    #:   loss of communications, one write per mode or the connector's own
+    #:   ``clear_control``, and the disabling of the modes an ended event set.
+    #:   ``origin`` tells the two apart (``comms_loss`` or ``event_end``).
+    #: - ``"operation"``: a named control passed to
+    #:   :meth:`~py20305.connectors.dispatcher.ConnectorDispatcher.apply_operation`.
+    kind: str
+    #: The mRID of the DERControl or DefaultDERControl written, when there is one.
+    applied_mrid: bytes | None
+    #: The mRID of the event whose start or end caused the write, when known.
+    cause_mrid: bytes | None
+
+
+@runtime_checkable
+class CommandIntercept(Protocol):
+    """Takes a translated write before it reaches the connector.
+
+    A host application can route some writes somewhere other than the device's
+    connector, for example to logic that decides the final setpoint itself. The
+    dispatcher offers each write to the intercept after the :class:`CommandGate`
+    has permitted it, and only when the write names a device by LFDI. Only modes
+    the connector implements are offered, so the intercept sees the same writes
+    the connector would.
+
+    Injected rather than imported, for the same reason :class:`CommandGate` is.
+    Omitted, every write goes to the connector.
+    """
+
+    async def intercept(self, write: InterceptedWrite) -> bool:
+        """Return True to take ``write``, or False to let the connector apply it.
+
+        A taken write is not applied to the connector. The dispatcher keeps it
+        in the write history with outcome ``intercepted``, records no command
+        with the :class:`CommandObserver`, reports no device write to the
+        telemetry emitter, and returns success to its caller. Taking a write
+        makes the intercept responsible for it.
+
+        An exception is kept in the write history as a failed write and raised
+        to the dispatcher's caller, as a connector failure is.
+        """
+        ...
 
 
 class CommandNotPermittedError(Exception):

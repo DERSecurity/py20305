@@ -17,17 +17,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.12"
-          cache: pip
+          activate-environment: true
       # mkdocstrings imports the package to read its docstrings, so the docs
       # build doubles as a check that the public API is importable.
-      - run: pip install -e ".[docs]"
+      - run: uv sync --locked --extra docs
       - name: Build (warnings are errors)
         run: mkdocs build --strict
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         if: github.ref == 'refs/heads/main' && vars.PUBLISH_DOCS == 'true'
         with:
           path: site
@@ -56,4 +56,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
